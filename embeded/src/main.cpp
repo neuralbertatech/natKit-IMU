@@ -79,11 +79,11 @@ const char indexHtml[] PROGMEM = R"=====(
       <h1>ESP32 Configuration Panel</h1>
       <form action="/action">
         <label for="networkSsid">SSID:</label><br>
-        <input type="text" id="networkSsid" name="networkSsid" value="selk"><br>
+        <input type="text" id="networkSsid" name="networkSsid" value="natFlat Admin"><br>
         <label for="networkPassword">Password:</label><br>
-        <input type="password" id="networkPassword" name="networkPassword"><br>
+        <input type="password" id="networkPassword" name="networkPassword" value="K65cSaDCARr2EcZuasw8P2aERCd8eavmZfgmBvp38uLJSCkUpWN763oNcmtETF"><br>
         <label for="natKitServerAddress">natKit Core Server Address:</label><br>
-        <input type="text" id="natKitServerAddress" name="natKitServerAddress" value="perrin.selk.io"><br>
+        <input type="text" id="natKitServerAddress" name="natKitServerAddress" value="172.20.19.36"><br>
         <label for="natKitServerPort">natKit Core Server Port:</label><br>
         <input type="text" id="natKitServerPort" name="natKitServerPort" value="38082"><br><br>
         <input type="submit" value="Submit">
@@ -130,11 +130,11 @@ enum class NetworkingStage {
 NetworkingStage currentNetworkingStage = NetworkingStage::Disconnected;
 KafkaTopic* kafkaTopic = nullptr;
 
-ImuReader imuReader{100};
+ImuReader imuReader{};
 // TODO: Create a list of these objects so they can be queued
 ImuData imuData{};
 int imuCalibration{0};
-bool IMU_DUMMY_DATA{true};
+bool IMU_DUMMY_DATA{false};
 
 void handleApRequestsTask(void*) {
   const auto delay = 1000 / portTICK_PERIOD_MS; // 1s
@@ -243,6 +243,23 @@ void handleNtpTask(void*) {
 
   vTaskDelete( NULL );
 }
+
+void handleUpdateImuTask(void*) {
+  const auto delayUs = reportIntervalUs;
+  // const auto delay = (reportIntervalUs / 1000) / portTICK_PERIOD_MS; // 1s
+  while(true) {
+    const auto startTimeUs = esp_timer_get_time();
+    imuReader.update();
+    const auto endTimeUs = esp_timer_get_time();
+
+    const auto delta = endTimeUs - startTimeUs;
+    const auto delay = (std::max(0LL, delayUs - delta) / 1000) / portTICK_PERIOD_MS;
+    vTaskDelay(delay);
+  }
+
+  vTaskDelete( NULL );
+}
+
 
 void setup(){ //the order of the code is important and it is critical the the android workaround is after the dns and sofAP setup
   esp_efuse_mac_get_default(MAC_ADDRESS);
@@ -357,6 +374,9 @@ void setup(){ //the order of the code is important and it is critical the the an
 
   TaskHandle_t handleNtpTaskHandle = NULL;
   xTaskCreate(handleNtpTask, "handleNtpTask", 2048, NULL, tskIDLE_PRIORITY+1, &handleNtpTaskHandle);
+
+  TaskHandle_t handleUpdateImuTaskHandle = NULL;
+  xTaskCreate(handleUpdateImuTask, "handleUpdateImuTask", 2048, NULL, tskIDLE_PRIORITY+1, &handleNtpTaskHandle);
 
 }
 
