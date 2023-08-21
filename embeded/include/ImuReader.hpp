@@ -2,7 +2,9 @@
 
 #include <array>
 
+#include <Arduino.h>
 #include <Adafruit_BNO08x.h>
+#include <SPI.h>
 
 #include <ImuData.hpp>
 #include <macros.hpp>
@@ -15,11 +17,17 @@
 // For SPI mode, we also need a RESET 
 #define BNO08X_RESET 14
 
+#define BNO08X_SCK 5
+#define BNO08X_MISO 21
+#define BNO08X_MOSI 19
+
 struct euler_t {
   float yaw;
   float pitch;
   float roll;
 } ypr;
+
+
 
 
 // #define FAST_MODE
@@ -84,14 +92,22 @@ public:
 // };
 
 class ImuReader {
+    SPIClass spiClass{};
+
     Adafruit_BNO08x bno08x{BNO08X_RESET};
+
     sh2_SensorValue_t sensorValue;
 
     // TODO Add filter
     //ImuFilter selectedFilter;
 
 public:
-    ImuReader() = default;
+    ImuReader() {
+        spiClass.begin(BNO08X_SCK, BNO08X_MISO, BNO08X_MOSI);
+    }
+
+    // DEBUG_SERIAL.println("Could not enable stabilized remote vector");
+
 
     void setReports(sh2_SensorId_t reportType, long report_interval) {
         DEBUG_SERIAL.println("Setting desired reports");
@@ -101,7 +117,7 @@ public:
     }
 
     void start() {
-         if (!bno08x.begin_SPI(BNO08X_CS, BNO08X_INT)) {
+         if (!bno08x.begin_SPI(BNO08X_CS, BNO08X_INT, &spiClass)) {
             DEBUG_SERIAL.println("Failed to find BNO08x chip");
             while (1) { delay(10); }
         }
