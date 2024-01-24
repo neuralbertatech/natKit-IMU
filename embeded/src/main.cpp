@@ -281,12 +281,13 @@ void setup(){ //the order of the code is important and it is critical the the an
   if (!IMU_DUMMY_DATA) {
     DEBUG_SERIAL.println("Starting IMU Reader");
     imuReader.start();
+    DEBUG_SERIAL.println("Finished starting IMU Reader");
   }
 
   WiFi.mode(WIFI_AP_STA); //access point mode
   WiFi.softAPConfig(localIP, gatewayIP, subnetMask);
   WiFi.softAP(ssid, password, WIFI_CHANNEL, 0, MAX_CLIENTS);
-  
+
   dnsServer.setTTL(300); //set 5min client side cache for DNS
   dnsServer.start(53, "*", localIP); //if DNSServer is started with "*" for domain name, it will reply with provided IP to all DNS request
 
@@ -383,3 +384,58 @@ void setup(){ //the order of the code is important and it is critical the the an
 void loop(){
   vTaskDelay(500);
 }
+
+// #include <WiFi.h>
+// #include <ESP32Ping.h>
+
+// #include "time.h"
+
+// unsigned long epochTime; 
+
+// unsigned long getTime() {
+//   time_t now;
+//   struct tm timeinfo;
+//   if (!getLocalTime(&timeinfo)) {
+//     return 0;
+//   }
+//   time(&now);
+//   return now;
+// }
+ 
+// const char* ssid = "selk";
+// const char* password =  "filberts";
+// unsigned long long start, end;
+// int count = 0;
+ 
+// void setup() {
+//   Serial.begin(115200);
+ 
+//   WiFi.begin(ssid, password);
+   
+//   while (WiFi.status() != WL_CONNECTED) {
+//     delay(500);
+//     Serial.println("Connecting to WiFi...");
+//   }
+
+//   Serial.println("Connected");
+
+//   while (count < 100) {
+//     start = esp_timer_get_time();
+//     bool success = Ping.ping("10.26.0.214", 1);
+//     end = esp_timer_get_time();
+//     double diff = end - start;
+
+//     if(!success){
+//       Serial.println("Ping failed");
+//       return;
+//     }
+  
+//     Serial.printf("64 bytes from 10.26.0.214: icmp_seq=%i ttl=64 time=%.3f ms\n", count, Ping.averageTime());
+  
+//     count += 1;
+//   }
+// }
+ 
+// void loop() {
+  
+// }
