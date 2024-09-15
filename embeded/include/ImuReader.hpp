@@ -2,6 +2,7 @@
 
 #include <array>
 
+#include <Adafruit_SensorLab.h>
 #include <Arduino.h>
 #include <Adafruit_BNO08x.h>
 #include <SPI.h>
@@ -69,9 +70,23 @@ public:
     T& z() { return data[2]; }
 };
 
-// using AccelerometerData = UnitVector3D<float>;
-// using GyroData = UnitVector3D<float>;
-// using MagnetometerData = UnitVector3D<float>;
+template <typename T>
+class RotationVectorData {
+    std::array<T, 4> data;
+
+public:
+    RotationVectorData() = default;
+    RotationVectorData(T real, T i, T j, T k) { data = {real, i, j, k}; }
+
+    T& real() { return data[0]; }
+    T& i() { return data[1]; }
+    T& j() { return data[2]; }
+    T& k() { return data[3]; }
+};
+
+using AccelerometerData = UnitVector3D<float>;
+using GyroData = UnitVector3D<float>;
+using MagnetometerData = UnitVector3D<float>;
 
 class RotationData : protected UnitVector<float, 3> {
     using UnitVector<float, 3>::data;
@@ -98,8 +113,19 @@ class ImuReader {
 
     sh2_SensorValue_t sensorValue;
 
+    Adafruit_SensorLab sensorLab;
+
     // TODO Add filter
     //ImuFilter selectedFilter;
+    AccelerometerData accelerometerData;
+    GyroData gyroData;
+    MagnetometerData magnetometerData;
+    RotationVectorData<float> rotationVectorData;
+    int accuracy;
+
+    Adafruit_Sensor* accelerometer;
+    Adafruit_Sensor* gyroscope;
+    Adafruit_Sensor* magnetometer;
 
 public:
     ImuReader() {
@@ -116,14 +142,47 @@ public:
         }
     }
 
+    void setupReports(Adafruit_BNO08x& bno08x, long report_interval) {
+        if (!bno08x.enableReport(SH2_ACCELEROMETER, report_interval)) {
+            Serial.println("Could not enable accelerometer");
+        }
+        if (!bno08x.enableReport(SH2_GYROSCOPE_CALIBRATED, report_interval)) {
+            Serial.println("Could not enable gyroscope");
+        }
+        if (!bno08x.enableReport(SH2_MAGNETIC_FIELD_CALIBRATED, report_interval)) {
+            Serial.println("Could not enable magnetic field calibrated");
+        }
+        if (!bno08x.enableReport(SH2_ROTATION_VECTOR, report_interval)) {
+            Serial.println("Could not enable rotation vector");
+        }
+    }
+
     void start() {
+        // sensorLab.begin();
+
+        // accelerometer = sensorLab.getAccelerometer();
+        // if (accelerometer == nullptr) {
+        //     DEBUG_SERIAL.println("Could not find accelerometer");
+        // }
+
+        // gyroscope = sensorLab.getAccelerometer();
+        // if (gyroscope == nullptr) {
+        //     DEBUG_SERIAL.println("Could not find gyroscope");
+        // }
+
+        // magnetometer = sensorLab.getAccelerometer();
+        // if (magnetometer == nullptr) {
+        //     DEBUG_SERIAL.println("Could not find magnetometer");
+        // }
+
          if (!bno08x.begin_SPI(BNO08X_CS, BNO08X_INT, &spiClass)) {
             DEBUG_SERIAL.println("Failed to find BNO08x chip");
             while (1) { delay(10); }
         }
         DEBUG_SERIAL.println("BNO08x Found!");
         
-        setReports(reportType, reportIntervalUs);
+        //setReports(reportType, reportIntervalUs);
+        setupReports(bno08x, reportIntervalUs);
 
         DEBUG_SERIAL.println("Reading events");
     }
@@ -136,7 +195,33 @@ public:
         
         if (bno08x.getSensorEvent(&sensorValue)) {
             // in this demo only one report type will be received depending on FAST_MODE define (above)
+            accuracy = sensorValue.status & 3;
             switch (sensorValue.sensorId) {
+                case SH2_ACCELEROMETER:
+                    accelerometerData.x() = sensorValue.un.accelerometer.x;
+                    accelerometerData.y() = sensorValue.un.accelerometer.y;
+                    accelerometerData.z() = sensorValue.un.accelerometer.z;
+                    break;
+
+                case SH2_GYROSCOPE_CALIBRATED:
+                    gyroData.x() = sensorValue.un.gyroscope.x;
+                    gyroData.y() = sensorValue.un.gyroscope.y;
+                    gyroData.z() = sensorValue.un.gyroscope.z;
+                    break;
+
+                case SH2_MAGNETIC_FIELD_CALIBRATED:
+                    magnetometerData.x() = sensorValue.un.magneticField.x;
+                    magnetometerData.y() = sensorValue.un.magneticField.y;
+                    magnetometerData.z() = sensorValue.un.magneticField.z;
+                    break;
+
+                case SH2_ROTATION_VECTOR:
+                    rotationVectorData.real() = sensorValue.un.rotationVector.real;
+                    rotationVectorData.i() = sensorValue.un.rotationVector.i;
+                    rotationVectorData.j() = sensorValue.un.rotationVector.j;
+                    rotationVectorData.k() = sensorValue.un.rotationVector.k;
+                    break;
+
                 case SH2_ARVR_STABILIZED_RV:
                     quaternionToEulerRV(&sensorValue.un.arvrStabilizedRV, &ypr, true);
                     break;
@@ -213,22 +298,23 @@ public:
         data->timestamp = getTime();
 
         // // TODO: Assigning a reference here, don't do that
-        data->data[0] = ypr.yaw;
-        data->data[1] = ypr.pitch;
-        data->data[2] = ypr.roll;
+        data->data[0] = accelerometerData.x();
+        data->data[1] = accelerometerData.y();
+        data->data[2] = accelerometerData.z();
 
-        // data->data[0] = accelerometerData.x();
-        // data->data[1] = accelerometerData.y();
-        // data->data[2] = accelerometerData.z();
+        data->data[3] = gyroData.x();
+        data->data[4] = gyroData.y();
+        data->data[5] = gyroData.z();
 
-        // data->data[3] = gyroData.x();
-        // data->data[4] = gyroData.y();
-        // data->data[5] = gyroData.z();
+        data->data[6] = magnetometerData.x();
+        data->data[7] = magnetometerData.y();
+        data->data[8] = magnetometerData.z();
 
-        // data->data[6] = magnetometerData.x();
-        // data->data[7] = magnetometerData.y();
-        // data->data[8] = magnetometerData.z();
+        data->data[9] = rotationVectorData.real();
+        data->data[10] = rotationVectorData.i();
+        data->data[11] = rotationVectorData.j();
+        data->data[12] = rotationVectorData.k();
 
-        data->calibration = sensorValue.status;
+        data->accuracy = accuracy;
     }
 };
