@@ -9,20 +9,32 @@
 #include <MQTT.h>
 #include <libnatkit-core.hpp>
 #include <PubSubClient.h>
+#include <mutex>
 // #include "mqtt_client.h"
 
 
 char kafkaUrlBuffer[256];
-char kafkaRecordDataBuffer[512];
+byte kafkaRecordDataBuffer[6200];
+//char mqttBuffer[16384];
+uint32_t indexes[10];
+uint32_t currentIndex = 0;
+nat::core::NatImuDataSchema imuDataList[100];
+uint32_t currentImuDataIndex = 0;
 
 class KafkaTopic {
     String name;
+    nat::core::BasicMetaInfoSchema meta;
     String dataTopicString;
+    String bulkDataTopicString;
     String metaTopicString;
     // String clusterId;
     nat::core::Stream dataStream;
     nat::core::Stream metaStream;
-    nat::core::BasicMetaInfoSchema meta;
+    nat::core::Stream bulkDataStream;
+
+    nat::core::NatImuBulkDataSchema bulkImuData{};
+    bool bulkImuDataReadyToSend;
+    std::mutex bulkImuDataLock;
     // static String createTopicPostStringTemplate;
     // static String createTopicUrlTemplate;
     // static String writeRecordUrlTemplate;
@@ -34,8 +46,11 @@ public:
     KafkaTopic(uint64_t id, const String& name)
       : name(name), meta(name.c_str()),
       dataStream(std::string(name.c_str()), nat::core::StreamType::DATA, id, nat::core::toString(nat::core::SerializationType::Json), nat::core::NatImuDataSchema::name),
-      metaStream(std::string(name.c_str()), nat::core::StreamType::META, id, nat::core::toString(nat::core::SerializationType::Json), nat::core::BasicMetaInfoSchema::name) {
+      bulkDataStream(std::string(name.c_str()), nat::core::StreamType::DATA, id, nat::core::toString(nat::core::SerializationType::Binary), nat::core::NatImuBulkDataSchema::name),
+      metaStream(std::string(name.c_str()), nat::core::StreamType::META, id, nat::core::toString(nat::core::SerializationType::Json), nat::core::BasicMetaInfoSchema::name),
+      bulkImuDataReadyToSend(false) {
         dataTopicString = dataStream.toTopicString().c_str();
+        bulkDataTopicString = bulkDataStream.toTopicString().c_str();
         metaTopicString = metaStream.toTopicString().c_str();
       }
 
@@ -44,7 +59,9 @@ public:
     // void writeMetaRecord(const ConnectionConfig& connectionConfig, MQTTClient& mqttClient);
     void writeMetaRecord(const ConnectionConfig& connectionConfig, PubSubClient& mqttClient);
     // void writeDataRecord(const ConnectionConfig& connectionConfig, const ImuData& data, MQTTClient& mqttClient);
-    void writeDataRecord(const ConnectionConfig& connectionConfig, const ImuData& data, PubSubClient& mqttClient);
+    bool writeDataRecord(const ConnectionConfig& connectionConfig, const ImuData& data, PubSubClient& mqttClient);
+
+    void writeBulkDataRecord(const ConnectionConfig& connectionConfig, PubSubClient& mqttClient);
 
     static KafkaTopic* create(uint64_t topicId, const String& boardId) {
         const String name = "ESP32-" + boardId;
@@ -149,6 +166,7 @@ String KafkaTopic::mqttUrlTemplate = "natKit/sending/%s";
 // }
 
 void KafkaTopic::writeMetaRecord(const ConnectionConfig& connectionConfig, PubSubClient& mqttClient) {
+    
     static const auto delay = 10 / portTICK_PERIOD_MS; // 10ms
     if (WiFi.status() == WL_CONNECTED) {
         // const uint32_t urlSize = writeRecordUrlTemplate.length() +
@@ -180,7 +198,7 @@ void KafkaTopic::writeMetaRecord(const ConnectionConfig& connectionConfig, PubSu
         //     DEBUG_SERIAL.printf("Error: Failed to POST a new meta record: %d\n", httpResponseCode);
         // }
         //String recordDataString{recordDataBuffer};
-
+        
         while (!mqttClient.connect("natKit-IMU")) vTaskDelay(delay);
         sprintf(kafkaUrlBuffer, mqttUrlTemplate.c_str(), metaTopicString.c_str());
         const auto bytes = meta.encodeToBytes(nat::core::SerializationType::Json);
@@ -189,13 +207,16 @@ void KafkaTopic::writeMetaRecord(const ConnectionConfig& connectionConfig, PubSu
         kafkaRecordDataBuffer[bytes->size()] = 0;
         // memcpy(kafkaRecordDataBuffer, bytes.get(), bytes->size());
         // esp_mqtt_client_publish(mqttClient, kafkaUrlBuffer, kafkaRecordDataBuffer, strlen(kafkaUrlBuffer), 0, false);
-        mqttClient.publish(kafkaUrlBuffer, kafkaRecordDataBuffer);
+        mqttClient.publish(kafkaUrlBuffer, kafkaRecordDataBuffer, bytes->size() + 1);
+        
     }
 }
 
-void KafkaTopic::writeDataRecord(const ConnectionConfig& connectionConfig, const ImuData& imuData, PubSubClient& mqttClient) {
-    static const auto delay = 10 / portTICK_PERIOD_MS; // 10ms
-    if (WiFi.status() == WL_CONNECTED) {
+bool KafkaTopic::writeDataRecord(const ConnectionConfig& connectionConfig, const ImuData& imuDatum, PubSubClient& mqttClient) {
+    //static const auto delay_len = 10 / portTICK_PERIOD_MS; // 10ms
+    //if (WiFi.status() == WL_CONNECTED) {
+        //digitalWrite(12, HIGH);
+        //digitalWrite(13, HIGH);
         // const uint32_t urlSize = writeRecordUrlTemplate.length() +
         //     strlen(connectionConfig.natKitServerAddress) + strlen(connectionConfig.natKitServerPort) +
         //     clusterId.length() + 1;
@@ -225,39 +246,171 @@ void KafkaTopic::writeDataRecord(const ConnectionConfig& connectionConfig, const
         //     log_i("Memory Sucessfully Allocated\n");
         // free(memory);
 
-        while (!mqttClient.connect("natKit-IMU")) {
-            if (WiFi.status() != WL_CONNECTED) {
-                WiFi.begin(connectionConfig.networkSsid, connectionConfig.networkPassword);
-                while (WiFi.status() != WL_CONNECTED) {
-                    vTaskDelay(delay*100);
-                    DEBUG_SERIAL.println("Connecting to WiFi..");
-                }
-            }
-            vTaskDelay(delay);
-        }
-        DEBUG_SERIAL.println("HIHIHIHIHIHI");
-        nat::core::NatImuDataSchema data{imuData.timestamp, nat::core::NatImuDataSchema::convertIntToSensorAccuracy(imuData.accuracy), imuData.data, 13};
-        const auto bytes = data.encodeToBytes(nat::core::SerializationType::Json);
-        if (bytes == nullptr) {
-            DEBUG_SERIAL.println("Error: Failed to encode json data!");
-        }
-        for (int i = 0; i < bytes->size(); ++i)
-            kafkaRecordDataBuffer[i] = (*bytes)[i];
-        kafkaRecordDataBuffer[bytes->size()] = 0;
-        DEBUG_SERIAL.printf("WORLD size: %u\n%s\n", strlen(kafkaRecordDataBuffer), kafkaRecordDataBuffer);
-        DEBUG_SERIAL.printf("There: %s\n", kafkaRecordDataBuffer);
-        sprintf(kafkaUrlBuffer, mqttUrlTemplate.c_str(), dataTopicString.c_str());
-        // esp_mqtt_client_publish(mqttClient, kafkaUrlBuffer, kafkaRecordDataBuffer, strlen(kafkaUrlBuffer), 0, false);
-        if (mqttClient.publish(kafkaUrlBuffer, kafkaRecordDataBuffer))
-            DEBUG_SERIAL.printf("-------------------------------- Sent message to %s --------------------------------\n", kafkaUrlBuffer);
-        else
-            DEBUG_SERIAL.printf("-------------------------------- ERROR --------------------------------\n");
-
-        // DEBUG_SERIAL.printf("HELLO size: %u\n%s\n", strlen(payloadBuffer), payloadBuffer);
-        // const int httpResponseCode = httpClient.POST(payloadBuffer);
-        // if (httpResponseCode != 200) {
-        //     DEBUG_SERIAL.printf("Error: Failed to POST a new meta record: %d\n", httpResponseCode);
+        // while (!mqttClient.connect("natKit-IMU")) {
+        //     if (WiFi.status() != WL_CONNECTED) {
+        //         WiFi.begin(connectionConfig.networkSsid, connectionConfig.networkPassword);
+        //         while (WiFi.status() != WL_CONNECTED) {
+        //             //vTaskDelay(delay_len*100);
+        //             DEBUG_SERIAL.println("Connecting to WiFi..");
+        //         }
+        //     }
+        //     //vTaskDelay(delay_len);
         // }
+
+        nat::core::NatImuDataSchema data{imuDatum.timestamp, nat::core::NatImuDataSchema::convertIntToSensorAccuracy(imuDatum.accuracy), imuDatum.data, 13};
+        imuDataList[currentImuDataIndex++] = data;
+        if (currentImuDataIndex == 100) {
+            DEBUG_SERIAL.println("Bulk Message Is Ready to Send");
+            currentImuDataIndex = 0;
+            DEBUG_SERIAL.println("AA");
+            {
+                DEBUG_SERIAL.println("BB");
+                std::lock_guard<std::mutex> gaurd(bulkImuDataLock);
+                DEBUG_SERIAL.println("CC");
+                bulkImuData.setData(imuDataList, 100);
+                DEBUG_SERIAL.println("DD");
+                bulkImuDataReadyToSend = true;
+                DEBUG_SERIAL.println("EE");
+                //digitalWrite(12, LOW);
+                DEBUG_SERIAL.println("FF");
+                return true;
+            }
+            DEBUG_SERIAL.println("GG");
+        } else {
+            //digitalWrite(12, LOW);
+            return false;
+        }
+        // const auto bytes = data.encodeToBytes(nat::core::SerializationType::Json);
+        // if (bytes == nullptr) {
+        //     DEBUG_SERIAL.println("Error: Failed to encode json data!");
+        // }
+
+        // int offset = indexes[currentIndex];
+        // for (int i = 0; i < bytes->size(); ++i)
+        //     mqttBuffer[offset+i] = (*bytes)[i];
+        // kafkaRecordDataBuffer[offset+bytes->size()] = 0;
+        // if (currentIndex == 9) {
+        //     sprintf(kafkaUrlBuffer, mqttUrlTemplate.c_str(), dataTopicString.c_str());
+        //     //mqttClient.beginPublish();
+        // } else {
+        //     indexes[currentIndex] = offset+bytes->size() + 1;
+        // }
+        // // for (int i = 0; i < bytes->size(); ++i)
+        // //     kafkaRecordDataBuffer[i] = (*bytes)[i];
+        // // kafkaRecordDataBuffer[bytes->size()] = 0;
+        // // DEBUG_SERIAL.printf("WORLD size: %u\n%s\n", strlen(kafkaRecordDataBuffer), kafkaRecordDataBuffer);
+        // // DEBUG_SERIAL.printf("There: %s\n", kafkaRecordDataBuffer);
+        // sprintf(kafkaUrlBuffer, mqttUrlTemplate.c_str(), dataTopicString.c_str());
+        // // esp_mqtt_client_publish(mqttClient, kafkaUrlBuffer, kafkaRecordDataBuffer, strlen(kafkaUrlBuffer), 0, false);
+        // if (mqttClient.publish(kafkaUrlBuffer, kafkaRecordDataBuffer)) {
+        //     DEBUG_SERIAL.printf("-------------------------------- Sent message to %s --------------------------------\n", kafkaUrlBuffer);
+        // } else {
+        //     DEBUG_SERIAL.printf("-------------------------------- ERROR --------------------------------\n");
+        //     digitalWrite(13, HIGH);
+        // }
+        // // DEBUG_SERIAL.printf("HELLO size: %u\n%s\n", strlen(payloadBuffer), payloadBuffer);
+        // // const int httpResponseCode = httpClient.POST(payloadBuffer);
+        // // if (httpResponseCode != 200) {
+        // //     DEBUG_SERIAL.printf("Error: Failed to POST a new meta record: %d\n", httpResponseCode);
+        // // }
+        // mqttClient.loop();
+        // digitalWrite(12, LOW);
+    //}
+}
+
+void KafkaTopic::writeBulkDataRecord(const ConnectionConfig& connectionConfig, PubSubClient& mqttClient) {
+    {
+        DEBUG_SERIAL.println("Sending Bulk Message");
+        std::lock_guard<std::mutex> gaurd(bulkImuDataLock);
+        if (!bulkImuDataReadyToSend) {
+            DEBUG_SERIAL.println("Exit Early");
+            return;
+        }
+        //static const auto delay_len = 10 / portTICK_PERIOD_MS; // 10ms
+        if (WiFi.status() == WL_CONNECTED) {
+            digitalWrite(27, HIGH);
+            //digitalWrite(12, HIGH);
+            //digitalWrite(13, LOW);
+            // const uint32_t urlSize = writeRecordUrlTemplate.length() +
+            //     strlen(connectionConfig.natKitServerAddress) + strlen(connectionConfig.natKitServerPort) +
+            //     clusterId.length() + 1;
+
+            // if (urlSize > 256) {
+            //     DEBUG_SERIAL.println("Error: Cannot write a meta record because url is larger than 127 characters!");
+            //     return;
+            // }
+            
+            //char payloadBuffer[1024];
+            // sprintf(kafkaUrlBuffer, writeRecordUrlTemplate.c_str(), connectionConfig.natKitServerAddress,
+            //     connectionConfig.natKitServerPort, clusterId.c_str(), dataTopicString.c_str());
+
+            // HTTPClient httpClient;
+            // httpClient.addHeader("Content-Type", "application/json");
+            // httpClient.addHeader("Accept", "application/json");
+            // httpClient.begin(urlBuffer);
+
+            // if (writeRecordPostTemplate.length() + 1 > 1024) {
+            //     DEBUG_SERIAL.println("Error: Cannot write a meta record because POST message is larger than 1023 characters!");
+            //     return;
+            // }
+            // void *memory = malloc(1000);
+            // if (memory == NULL)
+            //     log_i("Out of Memory!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!\n");
+            // else
+            //     log_i("Memory Sucessfully Allocated\n");
+            // free(memory);
+
+            while (!mqttClient.connect("natKit-IMU")) {
+                if (WiFi.status() != WL_CONNECTED) {
+                    WiFi.begin(connectionConfig.networkSsid, connectionConfig.networkPassword);
+                    while (WiFi.status() != WL_CONNECTED) {
+                        //vTaskDelay(delay_len*100);
+                        DEBUG_SERIAL.println("Connecting to WiFi..");
+                    }
+                }
+                //vTaskDelay(delay_len);
+            }
+            DEBUG_SERIAL.println("MQTT Client is connected");
+
+            const auto bytes = bulkImuData.encodeToBytes(nat::core::SerializationType::Binary);
+            DEBUG_SERIAL.println("Bytes Encoded");
+            if (bytes == nullptr) {
+                DEBUG_SERIAL.println("Error: Failed to encode CSV data!");
+            }
+
+            DEBUG_SERIAL.println("Bytes Encoded");
+            DEBUG_SERIAL.printf("%d\n", bytes->size());
+            for (int i = 0; i < bytes->size(); ++i)
+                kafkaRecordDataBuffer[i] = (*bytes)[i];
+            DEBUG_SERIAL.println("Bytes moved into buffer");
+            //kafkaRecordDataBuffer[bytes->size()] = 0;
+            DEBUG_SERIAL.printf("%d\n", bytes->size());
+            // DEBUG_SERIAL.printf("%s\n", kafkaRecordDataBuffer);
+            sprintf(kafkaUrlBuffer, mqttUrlTemplate.c_str(), bulkDataTopicString.c_str());
+            // DEBUG_SERIAL.printf("%s\n", kafkaUrlBuffer);
+            // for (int i = 0; i < bytes->size(); ++i)
+            //     kafkaRecordDataBuffer[i] = (*bytes)[i];
+            // kafkaRecordDataBuffer[bytes->size()] = 0;
+            // DEBUG_SERIAL.printf("WORLD size: %u\n%s\n", strlen(kafkaRecordDataBuffer), kafkaRecordDataBuffer);
+            // DEBUG_SERIAL.printf("There: %s\n", kafkaRecordDataBuffer);
+            // esp_mqtt_client_publish(mqttClient, kafkaUrlBuffer, kafkaRecordDataBuffer, strlen(kafkaUrlBuffer), 0, false);
+            //if (mqttClient.publish(kafkaUrlBuffer, kafkaRecordDataBuffer, bytes->size())) {
+            if (mqttClient.publish(kafkaUrlBuffer, kafkaRecordDataBuffer, bytes->size())) {
+                DEBUG_SERIAL.printf("-------------------------------- Sent message to %s --------------------------------\n", kafkaUrlBuffer);
+                bulkImuDataReadyToSend = false;
+            } else {
+                DEBUG_SERIAL.printf("-------------------------------- ERROR --------------------------------\n");
+                //digitalWrite(13, HIGH);
+            }
+            // DEBUG_SERIAL.printf("HELLO size: %u\n%s\n", strlen(payloadBuffer), payloadBuffer);
+            // const int httpResponseCode = httpClient.POST(payloadBuffer);
+            // if (httpResponseCode != 200) {
+            //     DEBUG_SERIAL.printf("Error: Failed to POST a new meta record: %d\n", httpResponseCode);
+            // }
+            mqttClient.loop();
+            digitalWrite(27, LOW);
+            //digitalWrite(12, LOW);
+        }
     }
 }
 

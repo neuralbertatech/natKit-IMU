@@ -39,8 +39,9 @@ struct euler_t {
   long reportIntervalUs = 2000;
 #else
   // Top frequency is about 250Hz but this report is more accurate
-  sh2_SensorId_t reportType = SH2_ARVR_STABILIZED_RV;
-  long reportIntervalUs = 5000;
+  //sh2_SensorId_t reportType = SH2_ARVR_STABILIZED_RV;
+  sh2_SensorId_t reportType = SH2_ROTATION_VECTOR;
+  long reportIntervalUs = 10000;
 //   long reportIntervalUs = 10000;
 #endif
 
@@ -230,10 +231,10 @@ public:
                     quaternionToEulerGI(&sensorValue.un.gyroIntegratedRV, &ypr, true);
                     break;
             }
-            static long last = 0;
-            long now = micros();
+            //static long last = 0;
+            //long now = micros();
             // DEBUG_SERIAL.print(now - last);             DEBUG_SERIAL.print("\t");
-            last = now;
+            //last = now;
             // DEBUG_SERIAL.print(sensorValue.status);     DEBUG_SERIAL.print("\t");  // This is accuracy in the range of 0 to 3
             // DEBUG_SERIAL.print(ypr.yaw);                DEBUG_SERIAL.print("\t");
             // DEBUG_SERIAL.print(ypr.pitch);              DEBUG_SERIAL.print("\t");
