@@ -1,3 +1,5 @@
+#define USE_FREE_RTOS_LOCKS
+
 #include <WiFi.h>
 #include <time.h>
 #include <freertos/FreeRTOS.h>
@@ -9,12 +11,15 @@
 
 //#include <Arduino.h> //not needed in the arduino ide
 
+#ifdef ENABLE_CAPTIVE_PORTAL
 //Captive Portal
 #include <DNSServer.h>
 #include <esp_wifi.h> //Used for mpdu_rx_disable android workaround
 #include <AsyncTCP.h> 	//https://github.com/me-no-dev/AsyncTCP using the latest dev version from @me-no-dev
 #include <ESPAsyncWebServer.h> //https://github.com/me-no-dev/ESPAsyncWebServer using the latest dev version from @me-no-dev
 #include <HTTPClient.h>
+#endif // ENABLE_CAPTIVE_PORTAL
+
 #include <esp_random.h>
 #include <ImuData.hpp>
 #include <ImuReader.hpp>
@@ -27,6 +32,14 @@
 #include "esp_netif.h"
 //#include "esp_netif_sntp.h"
 #include "esp_sntp.h"
+#include <ESPNtpClient.h>
+
+#ifdef USE_FREE_RTOS_LOCKS
+#include "freertos/FreeRTOS.h"
+#include "freertos/semphr.h"
+#else
+#include <mutex>
+#endif
 
 // Dependency Graph (these are the libary versions used by this version of the code)
 // |-- AsyncTCP @ 1.1.1+sha.ca8ac5f //Latest version of the main branch
@@ -54,9 +67,10 @@ const char* ntpServer = nullptr;
 const long  gmtOffset_sec = 0;
 const int   daylightOffset_sec = 0;
 
+#ifdef ENABLE_CAPTIVE_PORTAL
 char ssid[32];
-//const char * password = "12345678"; //Atleast 8 chars
 const char * password = NULL; // no password
+#endif // ENABLE_CAPTIVE_PORTAL
 
 #define MAX_CLIENTS 4 //ESP32 supports up to 10 but I have not tested it yet
 #define WIFI_CHANNEL 6 //2.4ghz channel 6 https://en.wikipedia.org/wiki/List_of_WLAN_channels#2.4_GHz_(802.11b/g/n/ax)
@@ -71,9 +85,10 @@ const String localIPURL = "http://4.3.2.1"; //a string version of the local IP w
 uint8_t MAC_ADDRESS[6];
 uint64_t UNIQUE_ID;
 
+#ifdef ENABLE_CAPTIVE_PORTAL
 //WARNING IOS (and maybe macos) WILL NOT POP UP IF IT CONTAINS THE WORD "Success" https://www.esp8266.com/viewtopic.php?f=34&t=4398
 //SAFARI (IOS) there is a 128KB limit to the size of the HTML. The HTML can reference external resources/images that bring the total over 128KB
-//SAFARI (IOS) popup browser has some severe limitations (javascript disabled, cookies disabled, no .gz extension (even though gzip files are supported)) 
+//SAFARI (IOS) popup browser has some severe limitations (javascript disabled, cookies disabled, no .gz extension (even though gzip files are supported))
 const char indexHtml[] PROGMEM = R"=====(
   <!DOCTYPE html> <html>
     <head>
@@ -97,7 +112,7 @@ const char indexHtml[] PROGMEM = R"=====(
         <label for="natKitServerPort">natKit Core Server Port:</label><br>
         <input type="text" id="natKitServerPort" name="natKitServerPort" value="38082"><br><br>
         <input type="submit" value="Submit">
-      </form> 
+      </form>
     </body>
   </html>
 )=====";
@@ -120,6 +135,7 @@ const char formCompletionResponseHtml[] PROGMEM = R"=====(
 
 DNSServer dnsServer;
 AsyncWebServer server(80);
+#endif // ENABLE_CAPTIVE_PORTAL
 
 ConnectionConfig connectionConfig{};
 
@@ -156,6 +172,7 @@ bool IMU_DUMMY_DATA{false};
 
 TaskHandle_t sendMessageTaskHandle = NULL;
 
+#ifdef ENABLE_CAPTIVE_PORTAL
 void handleApRequestsTask(void*) {
   const auto delay = 1000 / portTICK_PERIOD_MS; // 1s
   while(true) {
@@ -165,154 +182,277 @@ void handleApRequestsTask(void*) {
 
   vTaskDelete( NULL );
 }
+#endif // ENABLE_CAPTIVE_PORTAL
 
 void sendMessageTask(void*) {
-  DEBUG_SERIAL.println("Send Message Task run");
+  // DEBUG_SERIAL.println("Send Message Task run");
   kafkaTopic->writeBulkDataRecord(connectionConfig, mqttClient);
+  // DEBUG_SERIAL.println("Finishing Message Task");
   vTaskDelete( NULL );
 }
 
-void handleNetworkingStagesTask(void*) {
-  const auto delay = 10 / portTICK_PERIOD_MS; // 10ms
-  int task_delta = 0;
-  long last_timestamp = 0;
-  long current_timestamp = 0;
-  Serial.println("Starting Network!");
-  while(true) {
-    last_timestamp = esp_timer_get_time();
-    switch(currentNetworkingStage) {
-      case NetworkingStage::Disconnected:
-        break;
-      
-      case NetworkingStage::RecievedWifiCredentials:
-        if (connectionConfig.networkSsid != nullptr && connectionConfig.networkPassword != nullptr) {
-          currentNetworkMode = NetworkMode::ConnectingToWifi;
-          WiFi.begin(connectionConfig.networkSsid, connectionConfig.networkPassword);
-          while (WiFi.status() != WL_CONNECTED) {
-            vTaskDelay(delay*100);
-            DEBUG_SERIAL.println("Connecting to WiFi..");
-          }
-          gConnectedToWifi = true;
-          IPAddress ipAddress{};
-          ipAddress.fromString(connectionConfig.natKitServerAddress);
-          mqttClient.setClient(wifiClient);
-          mqttClient.setServer(ipAddress, 1883);
-          // mqttClient.begin(ipAddress, 1883, wifiClient);
-          while (!mqttClient.connect("natKit-IMU")) {
-              Serial.print(".");
-              DEBUG_SERIAL.println("Connecting to mqtt..");
-          }
+// void handleNetworkingStagesTask(void*) {
+//   const auto delay = 10 / portTICK_PERIOD_MS; // 10ms
+//   int task_delta = 0;
+//   long last_timestamp = 0;
+//   long current_timestamp = 0;
+//   Serial.println("Starting Network!");
+//   while(true) {
+//     last_timestamp = esp_timer_get_time();
+//     switch(currentNetworkingStage) {
+//       case NetworkingStage::Disconnected:
+//         break;
 
-          static std::string ntpServerAddressString = connectionConfig.natKitServerAddress;
-          ntpServerAddressString += ":123";
-          ntpServer = ntpServerAddressString.c_str();
-          //configTime(gmtOffset_sec, daylightOffset_sec, ntpServer.c_str());
-          // mqtt_cfg.broker.address.uri = "10.26.0.214";
-          // mqttClient = esp_mqtt_client_init(&mqtt_cfg);
-          // esp_mqtt_client_register_event(client, ESP_EVENT_ANY_ID, mqtt_event_handler, client);
-          // esp_mqtt_client_start(mqttClient);
-          DEBUG_SERIAL.print("ESP32 IP on the WiFi network: ");
-          DEBUG_SERIAL.println(WiFi.localIP());
-          // request->send_P(200, "text/html", formCompletionResponseHtml);
-          //uint8_t size;
-          //const auto clusterId = KafkaTopic::getKafkaCluster(connectionConfig, size);
-          DEBUG_SERIAL.println("AAAAAAAAA");
-          // vTaskDelay(500);
-          // if (size > 0) {
-            // DEBUG_SERIAL.printf("HI %s\n", clusterId);
-            const String boardId{UNIQUE_ID};
-            DEBUG_SERIAL.println("BBBBBBBBB");
+//       case NetworkingStage::RecievedWifiCredentials:
+//         if (connectionConfig.networkSsid != nullptr && connectionConfig.networkPassword != nullptr) {
+//           currentNetworkMode = NetworkMode::ConnectingToWifi;
+//           WiFi.begin(connectionConfig.networkSsid, connectionConfig.networkPassword);
+//           while (WiFi.status() != WL_CONNECTED) {
+//             vTaskDelay(delay*100);
+//             DEBUG_SERIAL.println("Connecting to WiFi..");
+//           }
+//           gConnectedToWifi = true;
+//           IPAddress ipAddress{};
+//           ipAddress.fromString(connectionConfig.natKitServerAddress);
+//           mqttClient.setClient(wifiClient);
+//           mqttClient.setServer(ipAddress, 1883);
+//           // mqttClient.begin(ipAddress, 1883, wifiClient);
+//           while (!mqttClient.connect("natKit-IMU")) {
+//               Serial.print(".");
+//               DEBUG_SERIAL.println("Connecting to mqtt..");
+//           }
 
-            // kafkaTopic = KafkaTopic::create(esp_random(), boardId);
-            kafkaTopic = KafkaTopic::create(UNIQUE_ID, boardId);
-            DEBUG_SERIAL.println("CCCCCCCCC");
-            //kafkaTopic->createKafkaStream(connectionConfig);
-            vTaskDelay(500);
-            DEBUG_SERIAL.println("DDDDDDDDD");
-            kafkaTopic->writeMetaRecord(connectionConfig, mqttClient);
-            DEBUG_SERIAL.println("EEEEEEEE");
-            currentNetworkingStage = NetworkingStage::WriteData;
-          // }
-        } else {
-          DEBUG_SERIAL.println("Error: Either the network SSID or the network password was not set");
-          // request->send_P(400, "text/html", formCompletionResponseHtml);
-        }
-        break;
+//           static std::string ntpServerAddressString = connectionConfig.natKitServerAddress;
+//           ntpServerAddressString += ":123";
+//           ntpServer = ntpServerAddressString.c_str();
+//           //configTime(gmtOffset_sec, daylightOffset_sec, ntpServer.c_str());
+//           // mqtt_cfg.broker.address.uri = "10.26.0.214";
+//           // mqttClient = esp_mqtt_client_init(&mqtt_cfg);
+//           // esp_mqtt_client_register_event(client, ESP_EVENT_ANY_ID, mqtt_event_handler, client);
+//           // esp_mqtt_client_start(mqttClient);
+//           DEBUG_SERIAL.print("ESP32 IP on the WiFi network: ");
+//           DEBUG_SERIAL.println(WiFi.localIP());
+//           // request->send_P(200, "text/html", formCompletionResponseHtml);
+//           //uint8_t size;
+//           //const auto clusterId = KafkaTopic::getKafkaCluster(connectionConfig, size);
+//           DEBUG_SERIAL.println("AAAAAAAAA");
+//           // vTaskDelay(500);
+//           // if (size > 0) {
+//             // DEBUG_SERIAL.printf("HI %s\n", clusterId);
+//             const String boardId{UNIQUE_ID};
+//             DEBUG_SERIAL.println("BBBBBBBBB");
 
-      case NetworkingStage::WriteData:
-        if (connectionConfig.networkSsid != nullptr && connectionConfig.networkPassword != nullptr) {
+//             // kafkaTopic = KafkaTopic::create(esp_random(), boardId);
+//             kafkaTopic = KafkaTopic::create(UNIQUE_ID, boardId);
+//             DEBUG_SERIAL.println("CCCCCCCCC");
+//             //kafkaTopic->createKafkaStream(connectionConfig);
+//             vTaskDelay(500);
+//             DEBUG_SERIAL.println("DDDDDDDDD");
+//             kafkaTopic->writeMetaRecord(connectionConfig, mqttClient);
+//             DEBUG_SERIAL.println("EEEEEEEE");
+//             currentNetworkingStage = NetworkingStage::WriteData;
+//           // }
+//         } else {
+//           DEBUG_SERIAL.println("Error: Either the network SSID or the network password was not set");
+//           // request->send_P(400, "text/html", formCompletionResponseHtml);
+//         }
+//         break;
 
-          DEBUG_SERIAL.println("Before");
-          bool isBulkReady = kafkaTopic->writeDataRecord(connectionConfig, imuData, mqttClient);
-          DEBUG_SERIAL.println("After");
-          if (isBulkReady) {
-            //xTaskCreate(sendMessageTask, "sendMessageTask", 2048, NULL, tskIDLE_PRIORITY+2, &sendMessageTaskHandle);
-            DEBUG_SERIAL.println("Got signal indicating that bulk message is ready to send");
-            sendMessageTask(NULL);
-          } else {
-            DEBUG_SERIAL.println("As you were");
-          }
-        }
-        break;
+//       case NetworkingStage::WriteData:
+//         if (connectionConfig.networkSsid != nullptr && connectionConfig.networkPassword != nullptr) {
 
-    default:
-        break;
-    }
-    current_timestamp = esp_timer_get_time();
-    task_delta = (current_timestamp - last_timestamp) / 1000;
-    if (task_delta >= delay) {
-      // Serial.println("LAGGING!");
-      log_i("Lagging!\n");
-      continue;
-    }
-    vTaskDelay(delay - task_delta);
+//           DEBUG_SERIAL.println("Before");
+//           bool isBulkReady = kafkaTopic->writeDataRecord(connectionConfig, imuData, mqttClient);
+//           DEBUG_SERIAL.println("After");
+//           if (isBulkReady) {
+//             //xTaskCreate(sendMessageTask, "sendMessageTask", 2048, NULL, tskIDLE_PRIORITY+2, &sendMessageTaskHandle);
+//             DEBUG_SERIAL.println("Got signal indicating that bulk message is ready to send");
+//             sendMessageTask(NULL);
+//           } else {
+//             DEBUG_SERIAL.println("As you were");
+//           }
+//         }
+//         break;
+
+//     default:
+//         break;
+//     }
+//     current_timestamp = esp_timer_get_time();
+//     task_delta = (current_timestamp - last_timestamp) / 1000;
+//     if (task_delta >= delay) {
+//       // Serial.println("LAGGING!");
+//       log_i("Lagging!\n");
+//       continue;
+//     }
+//     vTaskDelay(delay - task_delta);
+//   }
+
+//   vTaskDelete( NULL );
+// }
+
+// void handleImuUpdateTask(void*) {
+//   const auto delay = 10 / portTICK_PERIOD_MS; // 10ms
+//   int iteration = 0;
+//   // int task_delta = 0;
+//   // long last_timestamp = 0;
+//   // long current_timestamp = 0;
+//   while(true) {
+//     if (!IMU_DUMMY_DATA) {
+//       // if (iteration == 0) {
+//       //   imuReader.calibrate();
+//       // }
+//       imuReader.update();
+//       imuReader.getImuData(&imuData);
+//     } else {
+//       imuData.timestamp = getTime();
+//       const auto randomNumber = esp_random();
+//       if (iteration % 600 == 0) {
+//         imuCalibration = randomNumber % 4;
+//       }
+//       for(int i = 0; i < 9; ++i) {
+//         imuData.data[i] = randomNumber + i;
+//       }
+//       imuData.accuracy = imuCalibration;
+//       iteration = (iteration + 1) % 600;
+//     }
+//     vTaskDelay(delay);
+//   }
+
+//   vTaskDelete( NULL );
+// }
+
+// Could use an atomic_thread_fence instead
+#ifdef USE_FREE_RTOS_LOCKS
+SemaphoreHandle_t has_ntp_update_happend_yet_lock;
+#else
+std::mutex has_ntp_update_happend_yet_lock{};
+#endif // USE_FREE_RTOS_LOCKS
+bool has_ntp_update_happend_yet = true;
+
+// Could use an atomic_thread_fence instead
+#ifdef USE_FREE_RTOS_LOCKS
+SemaphoreHandle_t local_time_offset_lock;
+#else
+std::mutex local_time_offset_lock{};
+#endif // USE_FREE_RTOS_LOCKS
+int64_t local_time_offset_us = 0;
+
+void calculateLocalTimeOffset() {
+  int64_t timestamp_before_us = esp_timer_get_time();
+  int64_t current_ntp_time_us = getTimeNowAsUs();
+  int64_t timestamp_after_us = esp_timer_get_time();
+  int64_t average_timestamp = timestamp_before_us + ((timestamp_after_us - timestamp_before_us) / 2);
+
+  // TODO: Interpolate if time change is too much
+  {
+    #ifdef USE_FREE_RTOS_LOCKS
+    xSemaphoreTake(local_time_offset_lock, portMAX_DELAY);
+    #else
+    std::lock_guard<std::mutex> guard(local_time_offset_lock);
+    #endif // USE_FREE_RTOS_LOCKS
+    local_time_offset_us = current_ntp_time_us - average_timestamp;
+    #ifdef USE_FREE_RTOS_LOCKS
+    xSemaphoreGive(local_time_offset_lock);
+    #endif // USE_FREE_RTOS_LOCKS
   }
-
-  vTaskDelete( NULL );
-}
-
-void handleImuUpdateTask(void*) {
-  const auto delay = 10 / portTICK_PERIOD_MS; // 10ms
-  int iteration = 0;
-  // int task_delta = 0;
-  // long last_timestamp = 0;
-  // long current_timestamp = 0;
-  while(true) {
-    if (!IMU_DUMMY_DATA) {
-      // if (iteration == 0) {
-      //   imuReader.calibrate();
-      // }
-      imuReader.update();
-      imuReader.getImuData(&imuData);
-    } else {
-      imuData.timestamp = getTime();
-      const auto randomNumber = esp_random();
-      if (iteration % 600 == 0) {
-        imuCalibration = randomNumber % 4;
-      }
-      for(int i = 0; i < 9; ++i) {
-        imuData.data[i] = randomNumber + i;
-      }
-      imuData.accuracy = imuCalibration;
-      iteration = (iteration + 1) % 600;
-    }
-    vTaskDelay(delay);
-  }
-
-  vTaskDelete( NULL );
 }
 
 void ntpSyncNotification(struct timeval* tv) {
-  // TODO: Something here
+  DEBUG_SERIAL.println("ntpSyncNotification");
+  calculateLocalTimeOffset();
+  {
+    #ifdef USE_FREE_RTOS_LOCKS
+    xSemaphoreTake(has_ntp_update_happend_yet_lock, portMAX_DELAY);
+    #else
+    std::lock_guard<std::mutex> guard(has_ntp_update_happend_yet_lock);
+    #endif // USE_FREE_RTOS_LOCKS
+    has_ntp_update_happend_yet = true;
+    #ifdef USE_FREE_RTOS_LOCKS
+    xSemaphoreGive(has_ntp_update_happend_yet_lock);
+    #endif // USE_FREE_RTOS_LOCKS
+  }
+  DEBUG_SERIAL.println("NTP Time Callback was hit");
 }
+
+void processSyncEvent (NTPEvent_t ntpEvent) {
+  switch (ntpEvent.event) {
+      case timeSyncd: {
+        DEBUG_SERIAL.println("ntpSyncNotification");
+        calculateLocalTimeOffset();
+        {
+          #ifdef USE_FREE_RTOS_LOCKS
+          xSemaphoreTake(has_ntp_update_happend_yet_lock, portMAX_DELAY);
+          #else
+          std::lock_guard<std::mutex> guard(has_ntp_update_happend_yet_lock);
+          #endif // USE_FREE_RTOS_LOCKS
+          has_ntp_update_happend_yet = true;
+          #ifdef USE_FREE_RTOS_LOCKS
+          xSemaphoreGive(has_ntp_update_happend_yet_lock);
+          #endif // USE_FREE_RTOS_LOCKS
+        }
+        DEBUG_SERIAL.println("NTP Time Callback was hit");
+        break;
+      }
+
+      case partlySync:
+      case syncNotNeeded:
+      case accuracyError:
+          DEBUG_SERIAL.printf ("[NTP-event] %s\n", NTP.ntpEvent2str (ntpEvent));
+          break;
+      default:
+          break;
+  }
+}
+
+int64_t getAdjustedLocalTimeUs() {
+  int64_t offset = 0;
+  {
+    #ifdef USE_FREE_RTOS_LOCKS
+    xSemaphoreTake(local_time_offset_lock, portMAX_DELAY);
+    #else
+    std::lock_guard<std::mutex> guard(local_time_offset_lock);
+    #endif // USE_FREE_RTOS_LOCKS
+    offset = local_time_offset_us;
+    #ifdef USE_FREE_RTOS_LOCKS
+    xSemaphoreGive(local_time_offset_lock);
+    #endif // USE_FREE_RTOS_LOCKS
+  }
+
+  return offset + esp_timer_get_time();
+}
+
+void handleNtpTask(void*) {
+  const auto delay = (1000 / portTICK_PERIOD_MS) * 10; // 10s
+
+  NTP.onNTPSyncEvent ([] (NTPEvent_t event) {
+    processSyncEvent(event);
+  });
+  NTP.setTimeZone (TZ_Etc_UTC);
+  NTP.setInterval (10*1000); // 10s
+  NTP.setNTPTimeout (5000);
+  // NTP.setMinSyncAccuracy (5000);
+  // NTP.settimeSyncThreshold (3000);
+  NTP.begin (ntpServer);
+
+  // sntp_setoperatingmode(SNTP_OPMODE_POLL);
+  // sntp_setservername(0, ntpServer);
+  // sntp_set_sync_interval(10*1000); // 10s
+  // printf("sntp_get_sync_interval %u\n",sntp_get_sync_interval());
+  // sntp_set_time_sync_notification_cb(ntpSyncNotification);
+  // sntp_init();
+  DEBUG_SERIAL.printf("NTP Was setup using %s\n", ntpServer);
+
+  vTaskDelete( NULL );
+}
+
 
 void handleNetworkingStagesAndImuJoinedTask(void*) {
   const auto delay_len = 10 / portTICK_PERIOD_MS; // 10ms
-  const auto delay_len_us = 10000; // 10 ms
-  const auto half_delay_len_us = 5000; // 5 ms
+  const auto delay_len_us = IMU_DELAY_BETWEEN_POLL_US;
+  const auto half_delay_len_us = IMU_DELAY_BETWEEN_POLL_US / 2;
   int task_delta = 0;
-  long last_timestamp = 0;
-  long current_timestamp = 0;
+  uint64_t last_timestamp = 0;
+  uint64_t current_timestamp = 0;
   Serial.println("Starting Network!");
   uint64_t next_expected_reading_timestamp = 0;
   while(true) {
@@ -320,7 +460,7 @@ void handleNetworkingStagesAndImuJoinedTask(void*) {
     switch(currentNetworkingStage) {
       case NetworkingStage::Disconnected:
         break;
-      
+
       case NetworkingStage::RecievedWifiCredentials:
         if (connectionConfig.networkSsid != nullptr && connectionConfig.networkPassword != nullptr) {
           currentNetworkMode = NetworkMode::ConnectingToWifi;
@@ -336,7 +476,7 @@ void handleNetworkingStagesAndImuJoinedTask(void*) {
           mqttClient.setServer(ipAddress, 1883);
           if (!mqttClient.setBufferSize(6200)) {
             currentNetworkingStage = NetworkingStage::Disconnected;
-            digitalWrite(13, HIGH);
+            //digitalWrite(13, HIGH);
             break;
           }
           // mqttClient.begin(ipAddress, 1883, wifiClient);
@@ -346,10 +486,10 @@ void handleNetworkingStagesAndImuJoinedTask(void*) {
           }
 
           static std::string ntpServerAddressString = connectionConfig.natKitServerAddress;
-          ntpServerAddressString += ":123";
+          //ntpServerAddressString += ":123";
           ntpServer = ntpServerAddressString.c_str();
-          
-          
+
+
           // configTime(gmtOffset_sec, daylightOffset_sec, ntpServerAddressString.c_str());
           // esp_sntp_config_t config = ESP_NETIF_SNTP_DEFAULT_CONFIG("pool.ntp.org");
           // esp_netif_sntp_init(&config);
@@ -379,9 +519,43 @@ void handleNetworkingStagesAndImuJoinedTask(void*) {
             kafkaTopic->writeMetaRecord(connectionConfig, mqttClient);
             DEBUG_SERIAL.println("EEEEEEEE");
 
-            vTaskDelay(1000 / portTICK_PERIOD_MS);
+            TaskHandle_t handleNtpTaskHandle = NULL;
+            xTaskCreate(handleNtpTask, "handleNtpTask", 2048, NULL, tskIDLE_PRIORITY+1, &handleNtpTaskHandle);
+
+            while (true) {
+              {
+                #ifdef USE_FREE_RTOS_LOCKS
+                xSemaphoreTake(has_ntp_update_happend_yet_lock, portMAX_DELAY);
+                #else
+                std::lock_guard<std::mutex> guard(has_ntp_update_happend_yet_lock);
+                #endif // USE_FREE_RTOS_LOCKS
+                if (has_ntp_update_happend_yet) {
+                  vTaskDelay(1000 / portTICK_PERIOD_MS);
+                  #ifdef USE_FREE_RTOS_LOCKS
+                  xSemaphoreGive(has_ntp_update_happend_yet_lock);
+                  #endif // USE_FREE_RTOS_LOCKS
+                  break;
+                }
+                #ifdef USE_FREE_RTOS_LOCKS
+                xSemaphoreGive(has_ntp_update_happend_yet_lock);
+                #endif // USE_FREE_RTOS_LOCKS
+              }
+              // sntp_sync_status_t status = sntp_get_sync_status();
+              // if (status == SNTP_SYNC_STATUS_RESET)
+              //   DEBUG_SERIAL.println("SNTP Reset");
+              // else if (status == SNTP_SYNC_STATUS_COMPLETED)
+              //   DEBUG_SERIAL.println("SNTP Completed");
+              // else if (status == SNTP_SYNC_STATUS_IN_PROGRESS)
+              //   DEBUG_SERIAL.println("SNTP In progress");
+              // else
+              //   assert(0);
+              DEBUG_SERIAL.println("Waiting for NTP Update");
+              vTaskDelay(1000 / portTICK_PERIOD_MS);
+            }
+            DEBUG_SERIAL.println("Proceeding after NTP Update");
+
             currentNetworkingStage = NetworkingStage::WriteData;
-            next_expected_reading_timestamp = (((getTime() + delay_len_us) / 1000000) + 1) * 1000000; // The start of the next second
+            next_expected_reading_timestamp = (((getAdjustedLocalTimeUs() + delay_len_us) / 1000000) + 1) * 1000000; // The start of the next second
           // }
         } else {
           DEBUG_SERIAL.println("Error: Either the network SSID or the network password was not set");
@@ -390,37 +564,51 @@ void handleNetworkingStagesAndImuJoinedTask(void*) {
         break;
 
       case NetworkingStage::WriteData:
-        
+
+
         if (connectionConfig.networkSsid != nullptr && connectionConfig.networkPassword != nullptr) {
-          current_timestamp = getTime();
-          if (current_timestamp > next_expected_reading_timestamp) {
-            DEBUG_SERIAL.println("Taking reading late!");
-            digitalWrite(13, HIGH);
+          // current_timestamp = getAdjustedLocalTimeUs();
+          // if (current_timestamp > next_expected_reading_timestamp) {
+          //   DEBUG_SERIAL.println("Taking reading late!");
+          //   //digitalWrite(13, HIGH);
+          // } else {
+          //   while(current_timestamp < (next_expected_reading_timestamp - half_delay_len_us)) {
+          //     //mqttClient.loop();
+          //     //DEBUG_SERIAL.printf("%lld < %lld\n", current_timestamp, next_expected_reading_timestamp);
+          //     current_timestamp = getAdjustedLocalTimeUs();
+          //     //DEBUG_SERIAL.printf("%lld\n", end - start);
+          //   }
+          //   //digitalWrite(12, HIGH);
+          //   while(current_timestamp < next_expected_reading_timestamp) {
+          //     current_timestamp = getAdjustedLocalTimeUs();
+          //   }
+          //   //digitalWrite(12, LOW);
+          //   //digitalWrite(13, LOW);
+          // }
+          // next_expected_reading_timestamp += delay_len_us;
+          imuReader.update3();
+          bool isBulkReady = false;
+          // DEBUG_SERIAL.println("Attempting to read data");
+          // DEBUG_SERIAL.printf("Total heap: %u, Free heap: %u, Total PSRAM: %u, Free PSRAM: %d\n", ESP.getHeapSize(), ESP.getFreeHeap(), ESP.getPsramSize(), ESP.getFreePsram());
+          if (imuReader.getImuData(&imuData)) {
+            // DEBUG_SERIAL.println("Read successful");
+            // DEBUG_SERIAL.println("Before");
+            isBulkReady = kafkaTopic->writeDataRecord(connectionConfig, imuData, mqttClient);
+            // DEBUG_SERIAL.println("After");
           } else {
-            while(current_timestamp < (next_expected_reading_timestamp - half_delay_len_us)) {
-              //mqttClient.loop();
-              DEBUG_SERIAL.printf("%lld < %lld\n", current_timestamp, next_expected_reading_timestamp);
-              current_timestamp = getTime();
-            }
-            digitalWrite(12, HIGH);
-            while(current_timestamp < next_expected_reading_timestamp) {
-              current_timestamp = getTime();
-            }
-            digitalWrite(12, LOW);
-            digitalWrite(13, LOW);
+            DEBUG_SERIAL.println("Nothing to read");
           }
-          next_expected_reading_timestamp += delay_len_us;
-          imuReader.update();
-          imuReader.getImuData(&imuData);
-          // DEBUG_SERIAL.println("Before");
-          bool isBulkReady = kafkaTopic->writeDataRecord(connectionConfig, imuData, mqttClient);
-          // DEBUG_SERIAL.println("After");
+
           if (isBulkReady) {
+            // DEBUG_SERIAL.println("Sending Bulk");
             BaseType_t result = xTaskCreate(sendMessageTask, "sendMessageTask", 16384 + 2048, NULL, tskIDLE_PRIORITY+2, &sendMessageTaskHandle);
-            if (result != pdPASS) {
-              DEBUG_SERIAL.println("Failed to create the send message task!");
-            } else {
+            // BaseType_t result = xTaskCreate(sendMessageTask, "sendMessageTask", 16384 + 8192, NULL, tskIDLE_PRIORITY+2, &sendMessageTaskHandle);
+            if (result == pdPASS) {
               DEBUG_SERIAL.println("--------------------------------------------- Created Task");
+            } else if (result == errCOULD_NOT_ALLOCATE_REQUIRED_MEMORY) {
+              DEBUG_SERIAL.println("Failed to create the send message task! Not enough heap memory!");
+            } else {
+              DEBUG_SERIAL.println("Failed to create the send message task!");
             }
             //DEBUG_SERIAL.println("Got signal indicating that bulk message is ready to send");
             //sendMessageTask(NULL);
@@ -467,19 +655,6 @@ void handleNetworkingStagesAndImuJoinedTask(void*) {
   }
 
   //vTaskDelete( NULL );
-}
-
-void handleNtpTask(void*) {
-  const auto delay = (1000 / portTICK_PERIOD_MS) * 60 * 5; // 5m
-  sntp_set_time_sync_notification_cb(ntpSyncNotification);
-  while(true) {
-    if (gConnectedToWifi) {
-      configTime(gmtOffset_sec, daylightOffset_sec, ntpServer);
-    }
-    vTaskDelay(delay);
-  }
-
-  vTaskDelete( NULL );
 }
 
 void handleUpdateImuTask(void*) {
@@ -571,7 +746,9 @@ void WiFiEvent(WiFiEvent_t event)
         case SYSTEM_EVENT_ETH_GOT_IP:
           log_i("Obtained IP address");
           break;
-    default: break;
+    default:
+      log_i("UNKNOWN EVENT OCCURED");
+      break;
   }
 }
 
@@ -580,7 +757,16 @@ void setup(){ //the order of the code is important and it is critical the the an
   pinMode(12, OUTPUT);
   pinMode(13, OUTPUT);
   pinMode(27, OUTPUT);
-  digitalWrite(2, HIGH);
+
+  #ifndef ENABLE_CAPTIVE_PORTAL
+  connectionConfig.networkSsid = "ssid";
+  connectionConfig.networkPassword = "password";
+  connectionConfig.natKitServerAddress = "192.168.0.1";
+  connectionConfig.natKitServerPort = "38082";
+  currentNetworkingStage = NetworkingStage::RecievedWifiCredentials;
+  #endif // ENABLE_CAPTIVE_PORTAL
+
+  //digitalWrite(2, HIGH);
   mqttClient.setBufferSize(16384);
   WiFi.onEvent(WiFiEvent);
 
@@ -598,14 +784,25 @@ void setup(){ //the order of the code is important and it is critical the the an
   Serial.printf("Unique ID is: %u\n", UNIQUE_ID);
   #endif
 
+  #ifdef USE_FREE_RTOS_LOCKS
+  has_ntp_update_happend_yet_lock = xSemaphoreCreateMutex();
+  assert(has_ntp_update_happend_yet_lock != nullptr);
+
+  local_time_offset_lock = xSemaphoreCreateMutex();
+  assert(local_time_offset_lock != nullptr);
+  #endif // USE_FREE_RTOS_LOCKS
+
+  #ifdef ENABLE_CAPTIVE_PORTAL
   sprintf(ssid, "natKit-ESP32-%lld", UNIQUE_ID);
+  #endif // ENABLE_CAPTIVE_PORTAL
 
   if (!IMU_DUMMY_DATA) {
     DEBUG_SERIAL.println("Starting IMU Reader");
-    imuReader.start();
+    imuReader.start2();
     DEBUG_SERIAL.println("Finished starting IMU Reader");
   }
 
+  #ifdef ENABLE_CAPTIVE_PORTAL
   WiFi.mode(WIFI_AP_STA); //access point mode
   WiFi.softAPConfig(localIP, gatewayIP, subnetMask);
   WiFi.softAP(ssid, password, WIFI_CHANNEL, 0, MAX_CLIENTS);
@@ -680,14 +877,17 @@ void setup(){ //the order of the code is important and it is critical the the an
   });
 
   server.begin();
+  #endif // ENABLE_CAPTIVE_PORTAL
 
   DEBUG_SERIAL.print("\n");
   DEBUG_SERIAL.print("Startup Time:"); //should be somewhere between 270-350 for Generic ESP32 (D0WDQ6 chip, can have a higher startup time on first boot)
   DEBUG_SERIAL.println(millis());
   DEBUG_SERIAL.print("\n");
 
+  #ifdef ENABLE_CAPTIVE_PORTAL
   TaskHandle_t handleApRequestsTaskHandle = NULL;
   xTaskCreate(handleApRequestsTask, "HandleApRequestsTask", 16384, NULL, tskIDLE_PRIORITY, &handleApRequestsTaskHandle);
+  #endif // ENABLE_CAPTIVE_PORTAL
 
   // TaskHandle_t handleNetworkingStagesTaskHandle = NULL;
   // xTaskCreate(handleNetworkingStagesTask, "HandleNetworkingStagesTask", 16384, NULL, tskIDLE_PRIORITY+1, &handleNetworkingStagesTaskHandle);
@@ -698,10 +898,10 @@ void setup(){ //the order of the code is important and it is critical the the an
   //TaskHandle_t handleNetworkingStagesAndImuJoinedTaskHandle = NULL;
   //xTaskCreatePinnedToCore(handleNetworkingStagesAndImuJoinedTask, "handleNetworkingStagesAndImuJoinedTask", 20384, NULL, tskIDLE_PRIORITY+2, &handleNetworkingStagesAndImuJoinedTaskHandle, 1);
 
-  TaskHandle_t handleNtpTaskHandle = NULL;
-  xTaskCreate(handleNtpTask, "handleNtpTask", 2048, NULL, tskIDLE_PRIORITY+1, &handleNtpTaskHandle);
+  // TaskHandle_t handleNtpTaskHandle = NULL;
+  // xTaskCreate(handleNtpTask, "handleNtpTask", 2048, NULL, tskIDLE_PRIORITY+1, &handleNtpTaskHandle);
 
-  
+
 
   // TaskHandle_t handleUpdateImuTaskHandle = NULL;
   // xTaskCreate(handleUpdateImuTask, "handleUpdateImuTask", 2048, NULL, tskIDLE_PRIORITY+1, &handleNtpTaskHandle);
@@ -718,7 +918,7 @@ void loop(){
 
 // #include "time.h"
 
-// unsigned long epochTime; 
+// unsigned long epochTime;
 
 // unsigned long getTime() {
 //   time_t now;
@@ -729,17 +929,15 @@ void loop(){
 //   time(&now);
 //   return now;
 // }
- 
-// const char* ssid = "selk";
-// const char* password =  "filberts";
+
 // unsigned long long start, end;
 // int count = 0;
- 
+
 // void setup() {
 //   Serial.begin(115200);
- 
+
 //   WiFi.begin(ssid, password);
-   
+
 //   while (WiFi.status() != WL_CONNECTED) {
 //     delay(500);
 //     Serial.println("Connecting to WiFi...");
@@ -757,13 +955,13 @@ void loop(){
 //       Serial.println("Ping failed");
 //       return;
 //     }
-  
+
 //     Serial.printf("64 bytes from 10.26.0.214: icmp_seq=%i ttl=64 time=%.3f ms\n", count, Ping.averageTime());
-  
+
 //     count += 1;
 //   }
 // }
- 
+
 // void loop() {
-  
+
 // }

@@ -1,5 +1,368 @@
 #pragma once
 
+// #include <array>
+
+// #include <Adafruit_SensorLab.h>
+// #include <Arduino.h>
+// #include <Adafruit_BNO08x.h>
+// #include <SPI.h>
+
+// #include <ImuData.hpp>
+// #include <macros.hpp>
+// #include <Time.hpp>
+
+// // For SPI mode, we need a CS pin
+// #define BNO08X_CS 15
+// #define BNO08X_INT 32
+
+// // For SPI mode, we also need a RESET 
+// #define BNO08X_RESET 14
+
+// #define BNO08X_SCK 5
+// #define BNO08X_MISO 21
+// #define BNO08X_MOSI 19
+
+// struct euler_t {
+//   float yaw;
+//   float pitch;
+//   float roll;
+// } ypr;
+
+
+
+
+// //#define FAST_MODE
+
+// #ifdef FAST_MODE
+//   // Top frequency is reported to be 1000Hz (but freq is somewhat variable)
+//   sh2_SensorId_t reportType = SH2_ROTATION_VECTOR;
+// //   sh2_SensorId_t reportType = SH2_GYRO_INTEGRATED_RV;
+//   long reportIntervalUs = 2000;
+// #else
+//   // Top frequency is about 250Hz but this report is more accurate
+//   //sh2_SensorId_t reportType = SH2_ARVR_STABILIZED_RV;
+//   sh2_SensorId_t reportType = SH2_ROTATION_VECTOR;
+//   long reportIntervalUs = 10000;
+// //   long reportIntervalUs = 10000;
+// #endif
+
+
+// // #if defined(ADAFRUIT_SENSOR_CALIBRATION_USE_EEPROM)
+// //   using AdafruitSensorCalibration_t = Adafruit_Sensor_Calibration_EEPROM;
+// // #else
+// //   using AdafruitSensorCalibration_t = Adafruit_Sensor_Calibration_SDFat;
+// // #endif
+
+// template <typename T, uint32_t Size>
+// struct UnitVector {
+//     UnitVector() = default;
+//     std::array<T, Size> data;
+// };
+
+// template <typename T>
+// class UnitVector3D : protected UnitVector<T, 3> {
+//     using UnitVector<T, 3>::data;
+
+// public:
+//     UnitVector3D() = default;
+//     UnitVector3D(T x, T y, T z) { data = {x, y, z}; }
+
+//     T& x() { return data[0]; }
+//     T& y() { return data[1]; }
+//     T& z() { return data[2]; }
+// };
+
+// template <typename T>
+// class RotationVectorData {
+//     std::array<T, 4> data;
+
+// public:
+//     RotationVectorData() = default;
+//     RotationVectorData(T real, T i, T j, T k) { data = {real, i, j, k}; }
+
+//     T& real() { return data[0]; }
+//     T& i() { return data[1]; }
+//     T& j() { return data[2]; }
+//     T& k() { return data[3]; }
+// };
+
+// using AccelerometerData = UnitVector3D<float>;
+// using GyroData = UnitVector3D<float>;
+// using MagnetometerData = UnitVector3D<float>;
+
+// class RotationData : protected UnitVector<float, 3> {
+//     using UnitVector<float, 3>::data;
+
+// public:
+//     RotationData() = default;
+//     RotationData(float pitch, float roll, float heading) { data = {pitch, roll, heading}; }
+
+//     float& pitch() { return data[0]; }
+//     float& roll() { return data[1]; }
+//     float& heading() { return data[2]; }
+// };
+
+// // enum class ImuFilter {
+// //     NxpSensorFusion,  // Slowest
+// //     Madgwick,
+// //     Mahony            // Fastest
+// // };
+
+// class ImuReader {
+//     SPIClass spiClass{};
+
+//     Adafruit_BNO08x bno08x{BNO08X_RESET};
+
+//     sh2_SensorValue_t sensorValue;
+
+//     Adafruit_SensorLab sensorLab;
+
+//     // TODO Add filter
+//     //ImuFilter selectedFilter;
+//     AccelerometerData accelerometerData;
+//     GyroData gyroData;
+//     MagnetometerData magnetometerData;
+//     RotationVectorData<float> rotationVectorData;
+//     int accuracy;
+
+//     Adafruit_Sensor* accelerometer;
+//     Adafruit_Sensor* gyroscope;
+//     Adafruit_Sensor* magnetometer;
+
+// public:
+//     ImuReader() {
+//         spiClass.begin(BNO08X_SCK, BNO08X_MISO, BNO08X_MOSI);
+//     }
+
+//     // DEBUG_SERIAL.println("Could not enable stabilized remote vector");
+
+
+//     // void setReports(sh2_SensorId_t reportType, long report_interval) {
+//     //     DEBUG_SERIAL.println("Setting desired reports");
+//     //     if (! bno08x.enableReport(reportType, report_interval)) {
+//     //         DEBUG_SERIAL.println("Could not enable stabilized remote vector");
+//     //     }
+//     // }
+
+//     void setupReports(Adafruit_BNO08x& bno08x, long report_interval) {
+//         if (!bno08x.enableReport(SH2_ACCELEROMETER, report_interval)) {
+//             Serial.println("Could not enable accelerometer");
+//         }
+//         if (!bno08x.enableReport(SH2_GYROSCOPE_CALIBRATED, report_interval)) {
+//             Serial.println("Could not enable gyroscope");
+//         }
+//         if (!bno08x.enableReport(SH2_MAGNETIC_FIELD_CALIBRATED, report_interval)) {
+//             Serial.println("Could not enable magnetic field calibrated");
+//         }
+//         if (!bno08x.enableReport(SH2_ROTATION_VECTOR, report_interval)) {
+//             Serial.println("Could not enable rotation vector");
+//         }
+//     }
+
+//     void start() {
+//         // sensorLab.begin();
+
+//         // accelerometer = sensorLab.getAccelerometer();
+//         // if (accelerometer == nullptr) {
+//         //     DEBUG_SERIAL.println("Could not find accelerometer");
+//         // }
+
+//         // gyroscope = sensorLab.getAccelerometer();
+//         // if (gyroscope == nullptr) {
+//         //     DEBUG_SERIAL.println("Could not find gyroscope");
+//         // }
+
+//         // magnetometer = sensorLab.getAccelerometer();
+//         // if (magnetometer == nullptr) {
+//         //     DEBUG_SERIAL.println("Could not find magnetometer");
+//         // }
+
+//          if (!bno08x.begin_SPI(BNO08X_CS, BNO08X_INT, &spiClass)) {
+//             DEBUG_SERIAL.println("Failed to find BNO08x chip");
+//             while (1) { delay(10); }
+//         }
+//         DEBUG_SERIAL.println("BNO08x Found!");
+        
+//         //setReports(reportType, reportIntervalUs);
+//         setupReports(bno08x, reportIntervalUs);
+
+//         DEBUG_SERIAL.println("Reading events");
+//     }
+
+//     void update() {
+//         if (bno08x.wasReset()) {
+//             DEBUG_SERIAL.print("sensor was reset ");
+//             setupReports(bno08x, reportIntervalUs);
+//         }
+        
+//         bool accelerometer_updated = false;
+//         bool gyro_updated = false;
+//         bool magnometer_updated = false;
+//         bool rotation_updated = false;
+        
+//         int accelerometer_count = 0;
+//         int gyro_count = 0;
+//         int magnometer_count = 0;
+//         int rotation_count = 0;
+//         int arvr_count = 0;
+//         int gyro_other_count = 0;
+//         int other_count = 0;
+//         digitalWrite(13, HIGH);
+//         while (bno08x.getSensorEvent(&sensorValue)) {
+//             // in this demo only one report type will be received depending on FAST_MODE define (above)
+//             switch (sensorValue.sensorId) {
+//                 case SH2_ACCELEROMETER:
+//                     accelerometerData.x() = sensorValue.un.accelerometer.x;
+//                     accelerometerData.y() = sensorValue.un.accelerometer.y;
+//                     accelerometerData.z() = sensorValue.un.accelerometer.z;
+//                     accelerometer_updated = true;
+//                     accelerometer_count += 1;
+//                     break;
+
+//                 case SH2_GYROSCOPE_CALIBRATED:
+//                     gyroData.x() = sensorValue.un.gyroscope.x;
+//                     gyroData.y() = sensorValue.un.gyroscope.y;
+//                     gyroData.z() = sensorValue.un.gyroscope.z;
+//                     gyro_updated = true;
+//                     gyro_count += 1;
+//                     break;
+
+//                 case SH2_MAGNETIC_FIELD_CALIBRATED:
+//                     magnetometerData.x() = sensorValue.un.magneticField.x;
+//                     magnetometerData.y() = sensorValue.un.magneticField.y;
+//                     magnetometerData.z() = sensorValue.un.magneticField.z;
+//                     magnometer_updated = true;
+//                     magnometer_count += 1;
+//                     break;
+
+//                 case SH2_ROTATION_VECTOR:
+//                     rotationVectorData.real() = sensorValue.un.rotationVector.real;
+//                     rotationVectorData.i() = sensorValue.un.rotationVector.i;
+//                     rotationVectorData.j() = sensorValue.un.rotationVector.j;
+//                     rotationVectorData.k() = sensorValue.un.rotationVector.k;
+//                     rotation_updated = true;
+//                     rotation_count += 1;
+//                     break;
+
+//                 case SH2_ARVR_STABILIZED_RV:
+//                     quaternionToEulerRV(&sensorValue.un.arvrStabilizedRV, &ypr, true);
+//                     arvr_count += 1;
+//                     accuracy = sensorValue.status & 3;
+//                     break;
+//                 case SH2_GYRO_INTEGRATED_RV:
+//                     // faster (more noise?)
+//                     quaternionToEulerGI(&sensorValue.un.gyroIntegratedRV, &ypr, true);
+//                     gyro_other_count += 1;
+//                     break;
+//                 default:
+//                     other_count += 1;
+//             }
+//             //static long last = 0;
+//             //long now = micros();
+//             // DEBUG_SERIAL.print(now - last);             DEBUG_SERIAL.print("\t");
+//             //last = now;
+//             // DEBUG_SERIAL.print(sensorValue.status);     DEBUG_SERIAL.print("\t");  // This is accuracy in the range of 0 to 3
+//             // DEBUG_SERIAL.print(ypr.yaw);                DEBUG_SERIAL.print("\t");
+//             // DEBUG_SERIAL.print(ypr.pitch);              DEBUG_SERIAL.print("\t");
+//             // DEBUG_SERIAL.println(ypr.roll);
+
+//             if (/*accelerometer_updated &&*/ gyro_updated && magnometer_updated && rotation_updated) {
+//                 break;
+//             } 
+//             // else {
+//             //     DEBUG_SERIAL.printf("Accelerometer: %d, Gyro: %d, Magno: %d, Rotation: %d, Avr: %d, Other Gyro: %d, Other: %d\n", accelerometer_count, gyro_count, magnometer_count, rotation_count, arvr_count, gyro_other_count, other_count);
+//             // }
+//         }
+//         digitalWrite(13, LOW);
+//         // sensors_event_t accelerometerEvent;
+//         // sensors_event_t gyroscopeEvent;
+//         // sensors_event_t magnetometerEvent;
+
+//         // accelerometer->getEvent(&accelerometerEvent);
+//         // gyroscope->getEvent(&gyroscopeEvent);
+//         // magnetometer->getEvent(&magnetometerEvent);
+
+//         // accelerometerData.x() = accelerometerEvent.acceleration.x;
+//         // accelerometerData.y() = accelerometerEvent.acceleration.y;
+//         // accelerometerData.z() = accelerometerEvent.acceleration.z;
+
+//         // // Gyroscope needs to be converted from Rad/s to Degree/s
+//         // // the rest are not unit-important
+//         // gyroData.x() = gyroscopeEvent.gyro.x * SENSORS_RADS_TO_DPS;
+//         // gyroData.y() = gyroscopeEvent.gyro.y * SENSORS_RADS_TO_DPS;
+//         // gyroData.z() = gyroscopeEvent.gyro.z * SENSORS_RADS_TO_DPS;
+
+//         // magnetometerData.x() = magnetometerEvent.magnetic.x;
+//         // magnetometerData.y() = magnetometerEvent.magnetic.y;
+//         // magnetometerData.z() = magnetometerEvent.magnetic.z;
+//         //DEBUG_SERIAL.printf("Accelerometer: %d, Gyro: %d, Magno: %d, Rotation: %d, Avr: %d, Other Gyro: %d, Other: %d\n", accelerometer_count, gyro_count, magnometer_count, rotation_count, arvr_count, gyro_other_count, other_count);
+
+//     }
+
+//     void calibrate() {
+//         // DEBUG_SERIAL.print(sensorValue.status);     DEBUG_SERIAL.print("\t");  // This is accuracy in the range of 0 to 3
+//         ;
+//     }
+
+//     void quaternionToEuler(float qr, float qi, float qj, float qk, euler_t* ypr, bool degrees = false) {
+
+//         float sqr = sq(qr);
+//         float sqi = sq(qi);
+//         float sqj = sq(qj);
+//         float sqk = sq(qk);
+
+//         ypr->yaw = atan2(2.0 * (qi * qj + qk * qr), (sqi - sqj - sqk + sqr));
+//         ypr->pitch = asin(-2.0 * (qi * qk - qj * qr) / (sqi + sqj + sqk + sqr));
+//         ypr->roll = atan2(2.0 * (qj * qk + qi * qr), (-sqi - sqj + sqk + sqr));
+
+//         if (degrees) {
+//         ypr->yaw *= RAD_TO_DEG;
+//         ypr->pitch *= RAD_TO_DEG;
+//         ypr->roll *= RAD_TO_DEG;
+//         }
+//     }
+
+//     void quaternionToEulerRV(sh2_RotationVectorWAcc_t* rotational_vector, euler_t* ypr, bool degrees = false) {
+//         quaternionToEuler(rotational_vector->real, rotational_vector->i, rotational_vector->j, rotational_vector->k, ypr, degrees);
+//     }
+
+//     void quaternionToEulerGI(sh2_GyroIntegratedRV_t* rotational_vector, euler_t* ypr, bool degrees = false) {
+//         quaternionToEuler(rotational_vector->real, rotational_vector->i, rotational_vector->j, rotational_vector->k, ypr, degrees);
+//     }
+
+
+//     void getImuData(ImuData* data) {
+//         data->timestamp = getTime();
+
+//         // // TODO: Assigning a reference here, don't do that
+//         data->data[0] = accelerometerData.x();
+//         data->data[1] = accelerometerData.y();
+//         data->data[2] = accelerometerData.z();
+
+//         data->data[3] = gyroData.x();
+//         data->data[4] = gyroData.y();
+//         data->data[5] = gyroData.z();
+
+//         data->data[6] = magnetometerData.x();
+//         data->data[7] = magnetometerData.y();
+//         data->data[8] = magnetometerData.z();
+
+//         data->data[9] = rotationVectorData.real();
+//         data->data[10] = rotationVectorData.i();
+//         data->data[11] = rotationVectorData.j();
+//         data->data[12] = rotationVectorData.k();
+
+//         data->accuracy = accuracy;
+//         if (accuracy == 0) {
+//             digitalWrite(12, LOW);
+//         } else {
+//             digitalWrite(12, HIGH);
+//         }
+//     }
+// };
+
+
+#include <Arduino.h>
 #include <array>
 
 #include <Adafruit_SensorLab.h>
@@ -10,6 +373,11 @@
 #include <ImuData.hpp>
 #include <macros.hpp>
 #include <Time.hpp>
+#include <Adafruit_NeoPixel.h>
+#include <SensorBuffer.hpp>
+#include <Bno08xDevice2.hpp>
+
+#define DELAY_BETWEEN_SAMPLES 20000
 
 // For SPI mode, we need a CS pin
 #define BNO08X_CS 15
@@ -22,21 +390,30 @@
 #define BNO08X_MISO 21
 #define BNO08X_MOSI 19
 
+// // For SPI mode, we need a CS pin
+// #define BNO08X_CS 14
+// #define BNO08X_INT 39
+
+// // For SPI mode, we also need a RESET 
+// #define BNO08X_RESET 4
+
+// #define BNO08X_SCK 5
+// #define BNO08X_MISO 21
+// #define BNO08X_MOSI 19
+
 struct euler_t {
   float yaw;
   float pitch;
   float roll;
 } ypr;
 
-
-
-
-// #define FAST_MODE
+#define FAST_MODE
 
 #ifdef FAST_MODE
   // Top frequency is reported to be 1000Hz (but freq is somewhat variable)
-  sh2_SensorId_t reportType = SH2_GYRO_INTEGRATED_RV;
-  long reportIntervalUs = 2000;
+  sh2_SensorId_t reportType = SH2_ROTATION_VECTOR;
+//   sh2_SensorId_t reportType = SH2_GYRO_INTEGRATED_RV;
+  long reportIntervalUs = 5000;
 #else
   // Top frequency is about 250Hz but this report is more accurate
   //sh2_SensorId_t reportType = SH2_ARVR_STABILIZED_RV;
@@ -60,6 +437,7 @@ struct UnitVector {
 
 template <typename T>
 class UnitVector3D : protected UnitVector<T, 3> {
+protected:
     using UnitVector<T, 3>::data;
 
 public:
@@ -74,20 +452,49 @@ public:
 template <typename T>
 class RotationVectorData {
     std::array<T, 4> data;
+    byte _accuracy;
 
 public:
     RotationVectorData() = default;
-    RotationVectorData(T real, T i, T j, T k) { data = {real, i, j, k}; }
+    RotationVectorData(T real, T i, T j, T k, byte accuracy) { data = {real, i, j, k}; _accuracy = accuracy; }
 
     T& real() { return data[0]; }
     T& i() { return data[1]; }
     T& j() { return data[2]; }
     T& k() { return data[3]; }
+    byte& accuracy() { return _accuracy; }
 };
 
-using AccelerometerData = UnitVector3D<float>;
-using GyroData = UnitVector3D<float>;
-using MagnetometerData = UnitVector3D<float>;
+//using AccelerometerData = UnitVector3D<float>;
+class AccelerometerData : public UnitVector3D<float> {
+    byte _accuracy;
+
+public:
+    AccelerometerData() = default;
+    AccelerometerData(float x, float y, float z, byte accuracy) { data = {x, y, z}; this->_accuracy = accuracy; }
+
+    byte& accuracy() { return _accuracy; }
+};
+//using GyroData = UnitVector3D<float>;
+class GyroData : public UnitVector3D<float> {
+    byte _accuracy;
+
+public:
+    GyroData() = default;
+    GyroData(float x, float y, float z, byte accuracy) { data = {x, y, z}; this->_accuracy = accuracy; }
+
+    byte& accuracy() { return _accuracy; }
+};
+//using MagnetometerData = UnitVector3D<float>;
+class MagnetometerData : public UnitVector3D<float> {
+    byte _accuracy;
+
+public:
+    MagnetometerData() = default;
+    MagnetometerData(float x, float y, float z, byte accuracy) { data = {x, y, z}; this->_accuracy = accuracy; }
+
+    byte& accuracy() { return _accuracy; }
+};
 
 class RotationData : protected UnitVector<float, 3> {
     using UnitVector<float, 3>::data;
@@ -107,10 +514,57 @@ public:
 //     Mahony            // Fastest
 // };
 
+struct Color {
+  uint8_t red;
+  uint8_t green;
+  uint8_t blue;
+};
+
+struct LedMessage {
+  virtual Color getColor(size_t tick_number) = 0;
+};
+
+class StaticLedMessage : public LedMessage {
+  Color color;
+
+public:
+  StaticLedMessage(Color color)
+    : color(color) {}
+
+  virtual Color getColor(size_t tick_number) {
+    return color;
+  }
+};
+
+template <size_t N>
+struct DataArray {
+  std::array<float, N> data;
+
+  DataArray()
+    : data() {}
+
+  DataArray(const DataArray<N>& other) {
+    for (size_t i = 0; i < N; ++i) {
+      data[i] = other.data[i];
+    }
+  }
+
+  DataArray(DataArray<N>&& other) {
+    for (size_t i = 0; i < N; ++i) {
+      data[i] = other.data[i];
+    }
+  }
+
+  // DataArray() = default;
+  // DataArray(const DataArray<N>& other) = default;
+  // DataArray(DataArray<N>&& other) = default;
+};
+
 class ImuReader {
     SPIClass spiClass{};
 
     Adafruit_BNO08x bno08x{BNO08X_RESET};
+    Bno08xDevice bno08x_device{};
 
     sh2_SensorValue_t sensorValue;
 
@@ -128,139 +582,690 @@ class ImuReader {
     Adafruit_Sensor* gyroscope;
     Adafruit_Sensor* magnetometer;
 
+    int lateAcceleromerterCount = 0;
+    int lateGyroCount = 0;
+    int lateMagnetometerCount = 0;
+    int lateRotationCount = 0;
+    uint64_t lastAccelerometerTimestampUs = 0;
+    uint64_t lastGyroTimestampUs = 0;
+    uint64_t lastMagnetometerTimestampUs = 0;
+    uint64_t lastRotationTimestampUs = 0;
+    bool accelerometerRead = false;
+    bool gyroRead = false;
+    bool magnometerRead = false;
+    bool rotationRead = false;
+    int accelerometerReads = 0;
+    int gyroReads = 0;
+    int magnetometerReads = 0;
+    int rotationReads = 0;
+    uint64_t largestAccelGap = 0;
+    uint64_t largestGyroGap = 0;
+    uint64_t largestMagnoGap = 0;
+    uint64_t largestRotationGap = 0;
+
+    uint64_t loopIteration = -1;
+    uint64_t loopLastTimestamp = 0;
+    uint64_t samplePollLastTimestamp = 0;
+
+    SensorBuffer<Bno08xEvent::ThreeDimensional> accelerometerBuffer{DELAY_BETWEEN_SAMPLES, DELAY_BETWEEN_SAMPLES + 1000};
+    SensorBuffer<Bno08xEvent::ThreeDimensional> gyroscopeBuffer{DELAY_BETWEEN_SAMPLES, DELAY_BETWEEN_SAMPLES + 1000};
+    // SensorBuffer<Bno08xEvent::ThreeDimensional> magnetometerBuffer{DELAY_BETWEEN_SAMPLES, DELAY_BETWEEN_SAMPLES + 1000};
+    SensorBuffer<Bno08xEvent::FourDimensional> rotationBuffer{DELAY_BETWEEN_SAMPLES, DELAY_BETWEEN_SAMPLES + 1000};
+
 public:
     ImuReader() {
-        spiClass.begin(BNO08X_SCK, BNO08X_MISO, BNO08X_MOSI);
-    }
-
-    // DEBUG_SERIAL.println("Could not enable stabilized remote vector");
-
-
-    void setReports(sh2_SensorId_t reportType, long report_interval) {
-        DEBUG_SERIAL.println("Setting desired reports");
-        if (! bno08x.enableReport(reportType, report_interval)) {
-            DEBUG_SERIAL.println("Could not enable stabilized remote vector");
-        }
+        // spiClass.begin(BNO08X_SCK, BNO08X_MISO, BNO08X_MOSI);
     }
 
     void setupReports(Adafruit_BNO08x& bno08x, long report_interval) {
-        if (!bno08x.enableReport(SH2_ACCELEROMETER, report_interval)) {
+        // if (!bno08x.enableReport(SH2_ACCELEROMETER, 8000)) {
+        //     Serial.println("Could not enable accelerometer");
+        // }
+        if (!bno08x.enableReport(SH2_RAW_ACCELEROMETER, 20000)) {
             Serial.println("Could not enable accelerometer");
         }
-        if (!bno08x.enableReport(SH2_GYROSCOPE_CALIBRATED, report_interval)) {
+        // if (!bno08x.enableReport(SH2_LINEAR_ACCELERATION, 8000)) {
+        //     Serial.println("Could not enable accelerometer");
+        // }
+        if (!bno08x.enableReport(SH2_GYROSCOPE_CALIBRATED, 20000)) {
             Serial.println("Could not enable gyroscope");
         }
-        if (!bno08x.enableReport(SH2_MAGNETIC_FIELD_CALIBRATED, report_interval)) {
-            Serial.println("Could not enable magnetic field calibrated");
-        }
-        if (!bno08x.enableReport(SH2_ROTATION_VECTOR, report_interval)) {
+        // if (!bno08x.enableReport(SH2_GYROSCOPE_UNCALIBRATED, 9000)) {
+        //     Serial.println("Could not enable gyroscope");
+        // }
+        // if (!bno08x.enableReport(SH2_MAGNETIC_FIELD_CALIBRATED, 8000)) {
+        //     Serial.println("Could not enable magnetic field calibrated");
+        // }
+        if (!bno08x.enableReport(SH2_ROTATION_VECTOR, 20000)) {
             Serial.println("Could not enable rotation vector");
         }
+        // if (!bno08x.enableReport(SH2_GEOMAGNETIC_ROTATION_VECTOR, 5000)) {
+        //   Serial.println("Could not eanble geo rotation vector");
+        // }
     }
 
     void start() {
-        // sensorLab.begin();
-
-        // accelerometer = sensorLab.getAccelerometer();
-        // if (accelerometer == nullptr) {
-        //     DEBUG_SERIAL.println("Could not find accelerometer");
-        // }
-
-        // gyroscope = sensorLab.getAccelerometer();
-        // if (gyroscope == nullptr) {
-        //     DEBUG_SERIAL.println("Could not find gyroscope");
-        // }
-
-        // magnetometer = sensorLab.getAccelerometer();
-        // if (magnetometer == nullptr) {
-        //     DEBUG_SERIAL.println("Could not find magnetometer");
-        // }
-
-         if (!bno08x.begin_SPI(BNO08X_CS, BNO08X_INT, &spiClass)) {
+        Serial.println("Starting the BNO08X");
+         while (!bno08x.begin_SPI(BNO08X_CS, BNO08X_INT, &spiClass)) {
+          Serial.println("Failed to start the BNO08X, trying again");
             DEBUG_SERIAL.println("Failed to find BNO08x chip");
-            while (1) { delay(10); }
+            int i = 0;
+            while (++i < 100) { delay(10); }
         }
+        Serial.println("BNO08X started");
         DEBUG_SERIAL.println("BNO08x Found!");
         
-        //setReports(reportType, reportIntervalUs);
         setupReports(bno08x, reportIntervalUs);
 
         DEBUG_SERIAL.println("Reading events");
     }
 
+    void start2() {
+      Serial.println("Starting the BNO08X");
+      bool was_successful;
+      std::string error_maybe = bno08x_device.start(was_successful);
+      if (!was_successful) {
+        Serial.printf("Failed to start the BNO08X chip because: %s\n", error_maybe);
+        return;
+      }
+      Serial.println("BNO08X Device Started");
+    }
+
+    void update_loop() {
+      static const uint64_t timeBetweenEachLoopUs = 1000; // 1ms
+        
+        uint64_t current_timestamp = esp_timer_get_time();
+        if (current_timestamp - loopLastTimestamp < timeBetweenEachLoopUs) {
+          return;
+        }
+        if (current_timestamp - samplePollLastTimestamp >= 10 * 1000) {
+          samplePollLastTimestamp = current_timestamp;
+          ++loopIteration;
+          if (loopIteration % 1000 == 0) {
+            Serial.printf("Late Counts");
+            if (accelerometerRead)
+              DEBUG_SERIAL.printf(", Accel: %d/%d (%d us)", lateAcceleromerterCount, accelerometerReads, largestAccelGap);
+            if (gyroRead)
+              DEBUG_SERIAL.printf(", Gyro: %d/%d (%d us)", lateGyroCount, gyroReads, largestGyroGap);
+            if (magnometerRead)
+              DEBUG_SERIAL.printf(", Magno: %d/%d (%d us)", lateMagnetometerCount, magnetometerReads, largestMagnoGap);
+            if (rotationRead)
+              DEBUG_SERIAL.printf(", Rotation: %d/%d (%d us)", lateRotationCount, rotationReads, largestRotationGap);
+            DEBUG_SERIAL.printf("\n");
+            lateAcceleromerterCount = 0;
+            lateGyroCount = 0;
+            lateMagnetometerCount = 0;
+            lateRotationCount = 0;
+            accelerometerRead = false;
+            gyroRead = false;
+            magnometerRead = false;
+            rotationRead = false;
+            accelerometerReads = 0;
+            gyroReads = 0;
+            magnetometerReads = 0;
+            rotationReads = 0;
+            largestAccelGap = 0;
+            largestGyroGap = 0;
+            largestMagnoGap = 0;
+            largestRotationGap = 0;
+            digitalWrite(12, LOW);
+          }
+        }
+        loopLastTimestamp = current_timestamp;
+        update();
+    }
+
     void update() {
+      const uint64_t maxTimeBetweenUpdatesUs = 10 * 1000; // 10ms
         if (bno08x.wasReset()) {
-            DEBUG_SERIAL.print("sensor was reset ");
-            setReports(reportType, reportIntervalUs);
+            DEBUG_SERIAL.print("sensor was reset \n");
+            setupReports(bno08x, reportIntervalUs);
         }
         
-        if (bno08x.getSensorEvent(&sensorValue)) {
-            // in this demo only one report type will be received depending on FAST_MODE define (above)
-            accuracy = sensorValue.status & 3;
-            switch (sensorValue.sensorId) {
-                case SH2_ACCELEROMETER:
-                    accelerometerData.x() = sensorValue.un.accelerometer.x;
-                    accelerometerData.y() = sensorValue.un.accelerometer.y;
-                    accelerometerData.z() = sensorValue.un.accelerometer.z;
-                    break;
-
-                case SH2_GYROSCOPE_CALIBRATED:
-                    gyroData.x() = sensorValue.un.gyroscope.x;
-                    gyroData.y() = sensorValue.un.gyroscope.y;
-                    gyroData.z() = sensorValue.un.gyroscope.z;
-                    break;
-
-                case SH2_MAGNETIC_FIELD_CALIBRATED:
-                    magnetometerData.x() = sensorValue.un.magneticField.x;
-                    magnetometerData.y() = sensorValue.un.magneticField.y;
-                    magnetometerData.z() = sensorValue.un.magneticField.z;
-                    break;
-
-                case SH2_ROTATION_VECTOR:
-                    rotationVectorData.real() = sensorValue.un.rotationVector.real;
-                    rotationVectorData.i() = sensorValue.un.rotationVector.i;
-                    rotationVectorData.j() = sensorValue.un.rotationVector.j;
-                    rotationVectorData.k() = sensorValue.un.rotationVector.k;
-                    break;
-
-                case SH2_ARVR_STABILIZED_RV:
-                    quaternionToEulerRV(&sensorValue.un.arvrStabilizedRV, &ypr, true);
-                    break;
-                case SH2_GYRO_INTEGRATED_RV:
-                    // faster (more noise?)
-                    quaternionToEulerGI(&sensorValue.un.gyroIntegratedRV, &ypr, true);
-                    break;
-            }
-            //static long last = 0;
-            //long now = micros();
-            // DEBUG_SERIAL.print(now - last);             DEBUG_SERIAL.print("\t");
-            //last = now;
-            // DEBUG_SERIAL.print(sensorValue.status);     DEBUG_SERIAL.print("\t");  // This is accuracy in the range of 0 to 3
-            // DEBUG_SERIAL.print(ypr.yaw);                DEBUG_SERIAL.print("\t");
-            // DEBUG_SERIAL.print(ypr.pitch);              DEBUG_SERIAL.print("\t");
-            // DEBUG_SERIAL.println(ypr.roll);
+        // bool accelerometer_updated = false;
+        // bool gyro_updated = false;
+        // bool magnometer_updated = false;
+        // bool rotation_updated = false;
+        
+        // int accelerometer_count = 0;
+        // int gyro_count = 0;
+        // int magnometer_count = 0;
+        // int rotation_count = 0;
+        // int arvr_count = 0;
+        // int gyro_other_count = 0;
+        // int other_count = 0;
+        digitalWrite(13, HIGH);
+        if (!bno08x.getSensorEvent(&sensorValue)) {
+            DEBUG_SERIAL.printf("There was an error!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!\n");
         }
-        // sensors_event_t accelerometerEvent;
-        // sensors_event_t gyroscopeEvent;
-        // sensors_event_t magnetometerEvent;
+        uint64_t currentTimestamp{};
+        uint64_t timeGap{};
+        // in this demo only one report type will be received depending on FAST_MODE define (above)
+        switch (sensorValue.sensorId) {
+            case SH2_ACCELEROMETER:
+                accelerometerData.x() = sensorValue.un.accelerometer.x;
+                accelerometerData.y() = sensorValue.un.accelerometer.y;
+                accelerometerData.z() = sensorValue.un.accelerometer.z;
+                accelerometerData.accuracy() = sensorValue.status;
+                accelerometerReads += 1;
+                currentTimestamp = esp_timer_get_time();
+                timeGap = currentTimestamp - lastAccelerometerTimestampUs;
+                if (timeGap > (13 * 1000) && lastAccelerometerTimestampUs != 0) {
+                  ++lateAcceleromerterCount;
+                  digitalWrite(12, HIGH);
+                }
+                if (timeGap > largestAccelGap) {
+                  largestAccelGap = timeGap;
+                }
+                lastAccelerometerTimestampUs = currentTimestamp;
+                accelerometerRead = true;
+                // accelerometer_updated = true;
+                // accelerometer_count += 1;
+                break;
 
-        // accelerometer->getEvent(&accelerometerEvent);
-        // gyroscope->getEvent(&gyroscopeEvent);
-        // magnetometer->getEvent(&magnetometerEvent);
+            case SH2_RAW_ACCELEROMETER:
+                accelerometerData.x() = sensorValue.un.linearAcceleration.x;
+                accelerometerData.y() = sensorValue.un.linearAcceleration.y;
+                accelerometerData.z() = sensorValue.un.linearAcceleration.z;
+                accelerometerData.accuracy() = sensorValue.status;
+                accelerometerReads += 1;
+                currentTimestamp = esp_timer_get_time();
+                timeGap = currentTimestamp - lastAccelerometerTimestampUs;
+                if (timeGap > (13 * 1000) && lastAccelerometerTimestampUs != 0) {
+                  ++lateAcceleromerterCount;
+                  digitalWrite(12, HIGH);
+                }
+                if (timeGap > largestAccelGap) {
+                  largestAccelGap = timeGap;
+                }
+                lastAccelerometerTimestampUs = currentTimestamp;
+                accelerometerRead = true;
+                // accelerometer_updated = true;
+                // accelerometer_count += 1;
+                break;
 
-        // accelerometerData.x() = accelerometerEvent.acceleration.x;
-        // accelerometerData.y() = accelerometerEvent.acceleration.y;
-        // accelerometerData.z() = accelerometerEvent.acceleration.z;
+            case SH2_LINEAR_ACCELERATION:
+                accelerometerData.x() = sensorValue.un.linearAcceleration.x;
+                accelerometerData.y() = sensorValue.un.linearAcceleration.y;
+                accelerometerData.z() = sensorValue.un.linearAcceleration.z;
+                accelerometerData.accuracy() = sensorValue.status;
+                accelerometerReads += 1;
+                currentTimestamp = esp_timer_get_time();
+                timeGap = currentTimestamp - lastAccelerometerTimestampUs;
+                if (timeGap > (13 * 1000) && lastAccelerometerTimestampUs != 0) {
+                  ++lateAcceleromerterCount;
+                  digitalWrite(12, HIGH);
+                }
+                if (timeGap > largestAccelGap) {
+                  largestAccelGap = timeGap;
+                }
+                lastAccelerometerTimestampUs = currentTimestamp;
+                accelerometerRead = true;
+                // accelerometer_updated = true;
+                // accelerometer_count += 1;
+                break;
 
-        // // Gyroscope needs to be converted from Rad/s to Degree/s
-        // // the rest are not unit-important
-        // gyroData.x() = gyroscopeEvent.gyro.x * SENSORS_RADS_TO_DPS;
-        // gyroData.y() = gyroscopeEvent.gyro.y * SENSORS_RADS_TO_DPS;
-        // gyroData.z() = gyroscopeEvent.gyro.z * SENSORS_RADS_TO_DPS;
+            case SH2_GYROSCOPE_CALIBRATED:
+                gyroData.x() = sensorValue.un.gyroscope.x;
+                gyroData.y() = sensorValue.un.gyroscope.y;
+                gyroData.z() = sensorValue.un.gyroscope.z;
+                gyroData.accuracy() = sensorValue.status;
+                gyroReads += 1;
+                currentTimestamp = esp_timer_get_time();
+                timeGap = currentTimestamp - lastGyroTimestampUs;
+                if (timeGap > (13 * 1000) && lastGyroTimestampUs != 0) {
+                  ++lateGyroCount;
+                  digitalWrite(12, HIGH);
+                }
+                if (timeGap > largestGyroGap) {
+                  largestGyroGap = timeGap;
+                }
+                lastGyroTimestampUs = currentTimestamp;
+                gyroRead = true;
+                // gyro_updated = true;
+                // gyro_count += 1;
+                break;
 
-        // magnetometerData.x() = magnetometerEvent.magnetic.x;
-        // magnetometerData.y() = magnetometerEvent.magnetic.y;
-        // magnetometerData.z() = magnetometerEvent.magnetic.z;
+            case SH2_GYROSCOPE_UNCALIBRATED:
+                gyroData.x() = sensorValue.un.gyroscope.x;
+                gyroData.y() = sensorValue.un.gyroscope.y;
+                gyroData.z() = sensorValue.un.gyroscope.z;
+                gyroData.accuracy() = sensorValue.status;
+                gyroReads += 1;
+                currentTimestamp = esp_timer_get_time();
+                timeGap = currentTimestamp - lastGyroTimestampUs;
+                if (timeGap > (13 * 1000) && lastGyroTimestampUs != 0) {
+                  ++lateGyroCount;
+                  digitalWrite(12, HIGH);
+                }
+                if (timeGap > largestGyroGap) {
+                  largestGyroGap = timeGap;
+                }
+                lastGyroTimestampUs = currentTimestamp;
+                gyroRead = true;
+                // gyro_updated = true;
+                // gyro_count += 1;
+                break;
+
+            case SH2_MAGNETIC_FIELD_CALIBRATED:
+                magnetometerData.x() = sensorValue.un.magneticField.x;
+                magnetometerData.y() = sensorValue.un.magneticField.y;
+                magnetometerData.z() = sensorValue.un.magneticField.z;
+                magnetometerData.accuracy() = sensorValue.status;
+                magnetometerReads += 1;
+                currentTimestamp = esp_timer_get_time();
+                timeGap = currentTimestamp - lastMagnetometerTimestampUs;
+                if (timeGap > (13 * 1000) && lastMagnetometerTimestampUs != 0) {
+                  ++lateMagnetometerCount;
+                  digitalWrite(12, HIGH);
+                }
+                if (timeGap > largestMagnoGap) {
+                  largestMagnoGap = timeGap;
+                }
+                lastMagnetometerTimestampUs = currentTimestamp;
+                magnometerRead = true;
+                // magnometer_updated = true;
+                // magnometer_count += 1;
+                break;
+
+            case SH2_ROTATION_VECTOR:
+                rotationVectorData.real() = sensorValue.un.rotationVector.real;
+                rotationVectorData.i() = sensorValue.un.rotationVector.i;
+                rotationVectorData.j() = sensorValue.un.rotationVector.j;
+                rotationVectorData.k() = sensorValue.un.rotationVector.k;
+                rotationVectorData.accuracy() = sensorValue.status;
+                rotationReads += 1;
+                currentTimestamp = esp_timer_get_time();
+                timeGap = currentTimestamp - lastRotationTimestampUs;
+                if (timeGap > (13 * 1000) && lastRotationTimestampUs != 0) {
+                  ++lateRotationCount;
+                  digitalWrite(12, HIGH);
+                }
+                if (timeGap > largestRotationGap) {
+                  largestRotationGap = timeGap;
+                }
+                lastRotationTimestampUs = currentTimestamp;
+                rotationRead = true;
+                // rotation_updated = true;
+                // rotation_count += 1;
+                break;
+
+            case SH2_GEOMAGNETIC_ROTATION_VECTOR:
+                rotationVectorData.real() = sensorValue.un.rotationVector.real;
+                rotationVectorData.i() = sensorValue.un.rotationVector.i;
+                rotationVectorData.j() = sensorValue.un.rotationVector.j;
+                rotationVectorData.k() = sensorValue.un.rotationVector.k;
+                rotationVectorData.accuracy() = sensorValue.status;
+                rotationReads += 1;
+                currentTimestamp = esp_timer_get_time();
+                timeGap = currentTimestamp - lastRotationTimestampUs;
+                if (timeGap > (13 * 1000) && lastRotationTimestampUs != 0) {
+                  ++lateRotationCount;
+                  digitalWrite(12, HIGH);
+                }
+                if (timeGap > largestAccelGap) {
+                  largestAccelGap = timeGap;
+                }
+                lastRotationTimestampUs = currentTimestamp;
+                rotationRead = true;
+                // rotation_updated = true;
+                // rotation_count += 1;
+                break;
+
+            // case SH2_ARVR_STABILIZED_RV:
+            //     quaternionToEulerRV(&sensorValue.un.arvrStabilizedRV, &ypr, true);
+            //     // arvr_count += 1;
+            //     // accuracy = sensorValue.status & 3;
+            //     break;
+            // case SH2_GYRO_INTEGRATED_RV:
+            //     // faster (more noise?)
+            //     quaternionToEulerGI(&sensorValue.un.gyroIntegratedRV, &ypr, true);
+            //     gyro_other_count += 1;
+            //     break;
+            // default:
+            //     other_count += 1;
+        }
+            // else {
+            //     DEBUG_SERIAL.printf("Accelerometer: %d, Gyro: %d, Magno: %d, Rotation: %d, Avr: %d, Other Gyro: %d, Other: %d\n", accelerometer_count, gyro_count, magnometer_count, rotation_count, arvr_count, gyro_other_count, other_count);
+            // }
+        digitalWrite(13, LOW);
+    }
+
+    void update_loop2() {
+      static const uint64_t timeBetweenEachLoopUs = 500; // 1ms
+        
+        uint64_t current_timestamp = esp_timer_get_time();
+        if (current_timestamp - loopLastTimestamp < timeBetweenEachLoopUs) {
+          return;
+        }
+        if (current_timestamp - samplePollLastTimestamp >= 10 * 1000) {
+          samplePollLastTimestamp = current_timestamp;
+          ++loopIteration;
+          if (loopIteration % 1000 == 0) {
+            Serial.printf("Late Counts");
+            int total = 0;
+            int dropped = 0;
+            int max_dropped = 0;
+            int current_dropped = 0;
+            while (true) {
+              const auto sample_maybe = accelerometerBuffer.tryGetNext();
+              if (!sample_maybe) {
+                break;
+              }
+
+              ++total;
+              if (!sample_maybe->dataMaybe.has_value()) {
+                ++dropped;
+                ++current_dropped;
+              } else {
+                if (current_dropped > max_dropped) {
+                  max_dropped = current_dropped;
+                }
+                current_dropped = 0;
+              }
+            }
+            DEBUG_SERIAL.printf(", Accel: %d/%d (%d)", dropped, total, max_dropped);
+
+            total = 0;
+            dropped = 0;
+            max_dropped = 0;
+            current_dropped = 0;
+            while (true) {
+              const auto sample_maybe = gyroscopeBuffer.tryGetNext();
+              if (!sample_maybe) {
+                break;
+              }
+
+              ++total;
+              if (!sample_maybe->dataMaybe.has_value()) {
+                ++dropped;
+                ++current_dropped;
+              } else {
+                if (current_dropped > max_dropped) {
+                  max_dropped = current_dropped;
+                }
+                current_dropped = 0;
+              }
+            }
+            DEBUG_SERIAL.printf(", Gyro: %d/%d (%d)", dropped, total, max_dropped);
+
+            total = 0;
+            dropped = 0;
+            max_dropped = 0;
+            current_dropped = 0;
+            while (true) {
+              const auto sample_maybe = rotationBuffer.tryGetNext();
+              if (!sample_maybe) {
+                break;
+              }
+
+              ++total;
+              if (!sample_maybe->dataMaybe.has_value()) {
+                ++dropped;
+                ++current_dropped;
+              } else {
+                if (current_dropped > max_dropped) {
+                  max_dropped = current_dropped;
+                }
+                current_dropped = 0;
+              }
+            }
+            DEBUG_SERIAL.printf(", Rotation: %d/%d (%d)", dropped, total, max_dropped);
+            DEBUG_SERIAL.printf("\n");
+            lateAcceleromerterCount = 0;
+            lateGyroCount = 0;
+            lateMagnetometerCount = 0;
+            lateRotationCount = 0;
+            accelerometerRead = false;
+            gyroRead = false;
+            magnometerRead = false;
+            rotationRead = false;
+            accelerometerReads = 0;
+            gyroReads = 0;
+            magnetometerReads = 0;
+            rotationReads = 0;
+            largestAccelGap = 0;
+            largestGyroGap = 0;
+            largestMagnoGap = 0;
+            largestRotationGap = 0;
+            digitalWrite(12, LOW);
+          }
+        }
+        loopLastTimestamp = current_timestamp;
+        update3();
+    }
+
+    void update2() {
+      const uint64_t maxTimeBetweenUpdatesUs = 10 * 1000; // 10ms
+        if (bno08x.wasReset()) {
+            DEBUG_SERIAL.print("sensor was reset \n");
+            setupReports(bno08x, reportIntervalUs);
+        }
+        
+        // bool accelerometer_updated = false;
+        // bool gyro_updated = false;
+        // bool magnometer_updated = false;
+        // bool rotation_updated = false;
+        
+        // int accelerometer_count = 0;
+        // int gyro_count = 0;
+        // int magnometer_count = 0;
+        // int rotation_count = 0;
+        // int arvr_count = 0;
+        // int gyro_other_count = 0;
+        // int other_count = 0;
+        digitalWrite(13, HIGH);
+        if (!bno08x.getSensorEvent(&sensorValue)) {
+            DEBUG_SERIAL.printf("There was an error!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!\n");
+        }
+        uint64_t currentTimestamp{};
+        uint64_t timeGap{};
+        // in this demo only one report type will be received depending on FAST_MODE define (above)
+        //DEBUG_SERIAL.printf("Starting\n");
+        switch (sensorValue.sensorId) {
+            case SH2_ACCELEROMETER: {
+                SensorDataPoint<Bno08xEvent::ThreeDimensional> data_point{};
+                currentTimestamp = esp_timer_get_time();
+                data_point.timestamp = currentTimestamp;
+                data_point.calibration = sensorValue.status;
+                data_point.dataMaybe = Bno08xEvent::ThreeDimensional();
+                data_point.dataMaybe.value().x = sensorValue.un.accelerometer.x;
+                data_point.dataMaybe.value().y = sensorValue.un.accelerometer.y;
+                data_point.dataMaybe.value().z = sensorValue.un.accelerometer.z;
+                accelerometerBuffer.push(data_point);
+                accelerometerRead = true;
+                break;
+              }
+
+            case SH2_RAW_ACCELEROMETER: {
+                SensorDataPoint<Bno08xEvent::ThreeDimensional> data_point{};
+                currentTimestamp = esp_timer_get_time();
+                data_point.timestamp = currentTimestamp;
+                data_point.calibration = sensorValue.status;
+                data_point.dataMaybe = Bno08xEvent::ThreeDimensional();
+                data_point.dataMaybe.value().x = sensorValue.un.accelerometer.x;
+                data_point.dataMaybe.value().y = sensorValue.un.accelerometer.y;
+                data_point.dataMaybe.value().z = sensorValue.un.accelerometer.z;
+                accelerometerBuffer.push(data_point);
+                accelerometerRead = true;
+                break;
+              }
+
+            case SH2_LINEAR_ACCELERATION: {
+                SensorDataPoint<Bno08xEvent::ThreeDimensional> data_point{};
+                currentTimestamp = esp_timer_get_time();
+                data_point.timestamp = currentTimestamp;
+                data_point.calibration = sensorValue.status;
+                data_point.dataMaybe = Bno08xEvent::ThreeDimensional();
+                data_point.dataMaybe.value().x = sensorValue.un.linearAcceleration.x;
+                data_point.dataMaybe.value().y = sensorValue.un.linearAcceleration.y;
+                data_point.dataMaybe.value().z = sensorValue.un.linearAcceleration.z;
+                accelerometerBuffer.push(data_point);
+                accelerometerRead = true;
+                break;
+              }
+
+            case SH2_GYROSCOPE_CALIBRATED: {
+                SensorDataPoint<Bno08xEvent::ThreeDimensional> data_point{};
+                currentTimestamp = esp_timer_get_time();
+                data_point.timestamp = currentTimestamp;
+                data_point.calibration = sensorValue.status;
+                data_point.dataMaybe = Bno08xEvent::ThreeDimensional();
+                data_point.dataMaybe.value().x = sensorValue.un.gyroscope.x;
+                data_point.dataMaybe.value().y = sensorValue.un.gyroscope.y;
+                data_point.dataMaybe.value().z = sensorValue.un.gyroscope.z;
+                gyroscopeBuffer.push(data_point);
+                gyroRead = true;
+                break;
+              }
+
+            case SH2_GYROSCOPE_UNCALIBRATED: {
+                SensorDataPoint<Bno08xEvent::ThreeDimensional> data_point{};
+                currentTimestamp = esp_timer_get_time();
+                data_point.timestamp = currentTimestamp;
+                data_point.calibration = sensorValue.status;
+                data_point.dataMaybe = Bno08xEvent::ThreeDimensional();
+                data_point.dataMaybe.value().x = sensorValue.un.gyroscope.x;
+                data_point.dataMaybe.value().y = sensorValue.un.gyroscope.y;
+                data_point.dataMaybe.value().z = sensorValue.un.gyroscope.z;
+                gyroscopeBuffer.push(data_point);
+                gyroRead = true;
+                break;
+              }
+
+            // case SH2_MAGNETIC_FIELD_CALIBRATED:
+            //     magnetometerData.x() = sensorValue.un.magneticField.x;
+            //     magnetometerData.y() = sensorValue.un.magneticField.y;
+            //     magnetometerData.z() = sensorValue.un.magneticField.z;
+            //     magnetometerData.accuracy() = sensorValue.status;
+            //     magnetometerReads += 1;
+            //     currentTimestamp = esp_timer_get_time();
+            //     timeGap = currentTimestamp - lastMagnetometerTimestampUs;
+            //     if (timeGap > (13 * 1000) && lastMagnetometerTimestampUs != 0) {
+            //       ++lateMagnetometerCount;
+            //       digitalWrite(12, HIGH);
+            //     }
+            //     if (timeGap > largestMagnoGap) {
+            //       largestMagnoGap = timeGap;
+            //     }
+            //     lastMagnetometerTimestampUs = currentTimestamp;
+            //     magnometerRead = true;
+            //     // magnometer_updated = true;
+            //     // magnometer_count += 1;
+            //     break;
+
+            case SH2_ROTATION_VECTOR: {
+                SensorDataPoint<Bno08xEvent::FourDimensional> data_point{};
+                currentTimestamp = esp_timer_get_time();
+                data_point.timestamp = currentTimestamp;
+                data_point.calibration = sensorValue.status;
+                data_point.dataMaybe = Bno08xEvent::FourDimensional();
+                data_point.dataMaybe.value().real = sensorValue.un.rotationVector.real;
+                data_point.dataMaybe.value().i = sensorValue.un.rotationVector.i;
+                data_point.dataMaybe.value().j = sensorValue.un.rotationVector.j;
+                data_point.dataMaybe.value().k = sensorValue.un.rotationVector.k;
+                rotationBuffer.push(data_point);
+                rotationRead = true;
+                break;
+              }
+
+            case SH2_GEOMAGNETIC_ROTATION_VECTOR: {
+                SensorDataPoint<Bno08xEvent::FourDimensional> data_point{};
+                currentTimestamp = esp_timer_get_time();
+                data_point.timestamp = currentTimestamp;
+                data_point.calibration = sensorValue.status;
+                data_point.dataMaybe = Bno08xEvent::FourDimensional();
+                data_point.dataMaybe.value().real = sensorValue.un.rotationVector.real;
+                data_point.dataMaybe.value().i = sensorValue.un.rotationVector.i;
+                data_point.dataMaybe.value().j = sensorValue.un.rotationVector.j;
+                data_point.dataMaybe.value().k = sensorValue.un.rotationVector.k;
+                rotationBuffer.push(data_point);
+                rotationRead = true;
+                break;
+              }
+
+            // case SH2_ARVR_STABILIZED_RV:
+            //     quaternionToEulerRV(&sensorValue.un.arvrStabilizedRV, &ypr, true);
+            //     // arvr_count += 1;
+            //     // accuracy = sensorValue.status & 3;
+            //     break;
+            // case SH2_GYRO_INTEGRATED_RV:
+            //     // faster (more noise?)
+            //     quaternionToEulerGI(&sensorValue.un.gyroIntegratedRV, &ypr, true);
+            //     gyro_other_count += 1;
+            //     break;
+            // default:
+            //     other_count += 1;
+        }
+        //DEBUG_SERIAL.printf("Collected\n");
+            // else {
+            //     DEBUG_SERIAL.printf("Accelerometer: %d, Gyro: %d, Magno: %d, Rotation: %d, Avr: %d, Other Gyro: %d, Other: %d\n", accelerometer_count, gyro_count, magnometer_count, rotation_count, arvr_count, gyro_other_count, other_count);
+            // }
+        digitalWrite(13, LOW);
+    }
+
+    void update3() {
+      bool was_successful;
+      const auto event = bno08x_device.get_event(was_successful);
+      if (!was_successful) {
+        // DEBUG_SERIAL.printf("There was an error!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!\n");
+        return;
+      } else {
+        // DEBUG_SERIAL.printf("All good\n");
+      }
+      uint64_t currentTimestamp{};
+      switch (event.event_type) {
+          case Bno08xEvent::EventType::Accelerometer:
+          case Bno08xEvent::EventType::RawAccelerometer:
+          case Bno08xEvent::EventType::LinearAcceleration: {
+            SensorDataPoint<Bno08xEvent::ThreeDimensional> data_point{};
+            currentTimestamp = esp_timer_get_time();
+            data_point.timestamp = currentTimestamp;
+            data_point.calibration = event.accuracy;
+            data_point.dataMaybe = event.data.three_dimensional;
+            // DEBUG_SERIAL.printf("Accelerometer\n");
+            accelerometerBuffer.push(data_point);
+            break;
+          }
+
+          case Bno08xEvent::EventType::GyroscopeCalibrated:
+          case Bno08xEvent::EventType::GyroscopeUncalibrated: {
+            SensorDataPoint<Bno08xEvent::ThreeDimensional> data_point{};
+            currentTimestamp = esp_timer_get_time();
+            data_point.timestamp = currentTimestamp;
+            data_point.calibration = event.accuracy;
+            data_point.dataMaybe = event.data.three_dimensional;
+            // DEBUG_SERIAL.printf("Gyro\n");
+            gyroscopeBuffer.push(data_point);
+            break;
+          }
+
+          case Bno08xEvent::EventType::MagneticFieldCalibrated: {
+            // SensorDataPoint<Bno08xEvent::ThreeDimensional> data_point{};
+            // currentTimestamp = esp_timer_get_time();
+            // data_point.timestamp = currentTimestamp;
+            // data_point.calibration = event.accuracy;
+            // data_point.dataMaybe = event.data.three_dimensional;
+            // magnetometerBuffer.push(data_point);
+            // DEBUG_SERIAL.printf("Magnetic Field\n");
+            break;
+          }
+
+          case Bno08xEvent::EventType::RotationVector:
+          case Bno08xEvent::EventType::GeomagneticRotationVector: {
+            SensorDataPoint<Bno08xEvent::FourDimensional> data_point{};
+            currentTimestamp = esp_timer_get_time();
+            data_point.timestamp = currentTimestamp;
+            data_point.calibration = event.accuracy;
+            data_point.dataMaybe = event.data.four_dimensional;
+            // DEBUG_SERIAL.printf("Rotation\n");
+            rotationBuffer.push(data_point);
+            break;
+            }
+
+          default:
+            DEBUG_SERIAL.printf("No Good\n");
+      }
     }
 
     void calibrate() {
@@ -295,27 +1300,112 @@ public:
     }
 
 
-    void getImuData(ImuData* data) {
-        data->timestamp = getTime();
+    // void getImuData(ImuData* data) {
+    //     data->timestamp = getTime();
 
-        // // TODO: Assigning a reference here, don't do that
-        data->data[0] = accelerometerData.x();
-        data->data[1] = accelerometerData.y();
-        data->data[2] = accelerometerData.z();
+    //     // // TODO: Assigning a reference here, don't do that
+    //     data->data[0] = accelerometerData.x();
+    //     data->data[1] = accelerometerData.y();
+    //     data->data[2] = accelerometerData.z();
 
-        data->data[3] = gyroData.x();
-        data->data[4] = gyroData.y();
-        data->data[5] = gyroData.z();
+    //     data->data[3] = gyroData.x();
+    //     data->data[4] = gyroData.y();
+    //     data->data[5] = gyroData.z();
 
-        data->data[6] = magnetometerData.x();
-        data->data[7] = magnetometerData.y();
-        data->data[8] = magnetometerData.z();
+    //     data->data[6] = magnetometerData.x();
+    //     data->data[7] = magnetometerData.y();
+    //     data->data[8] = magnetometerData.z();
 
-        data->data[9] = rotationVectorData.real();
-        data->data[10] = rotationVectorData.i();
-        data->data[11] = rotationVectorData.j();
-        data->data[12] = rotationVectorData.k();
+    //     data->data[9] = rotationVectorData.real();
+    //     data->data[10] = rotationVectorData.i();
+    //     data->data[11] = rotationVectorData.j();
+    //     data->data[12] = rotationVectorData.k();
 
-        data->accuracy = accuracy;
+    //     data->accuracy = accuracy;
+    //     if (accuracy == 0) {
+    //         digitalWrite(12, LOW);
+    //     } else {
+    //         digitalWrite(12, HIGH);
+    //     }
+    // }
+
+    bool getImuData(ImuData* data) {
+        constexpr uint8_t accelerometer_bit = 0b100;
+        constexpr uint8_t gyroscopt_bit = 0b010;
+        constexpr uint8_t rotation_bit = 0b001;
+        auto accelerometer_sample_maybe = accelerometerBuffer.tryGetNext();
+        auto gyroscope_sample_maybe = gyroscopeBuffer.tryGetNext();
+        // auto magnetometer_sample_maybe = magnetometerBuffer.tryGetNext();
+        auto rotation_sample_maybe = rotationBuffer.tryGetNext();
+
+        data->accuracies = 0;
+        data->has_data = 0;
+
+        uint64_t min_timestamp = -1;
+        if (accelerometer_sample_maybe != nullptr) {
+            if (accelerometer_sample_maybe->timestamp < min_timestamp) {
+                min_timestamp = accelerometer_sample_maybe->timestamp;
+            }
+            data->accuracies |= static_cast<uint8_t>(accelerometer_sample_maybe->calibration) << 4;
+            if (accelerometer_sample_maybe->dataMaybe.has_value()) {
+              data->has_data |= accelerometer_bit;
+              data->data[0] = accelerometer_sample_maybe->dataMaybe.value().x;
+              data->data[1] = accelerometer_sample_maybe->dataMaybe.value().y;
+              data->data[2] = accelerometer_sample_maybe->dataMaybe.value().z;
+            }
+        }
+        if (gyroscope_sample_maybe != nullptr) {
+            if (gyroscope_sample_maybe->timestamp < min_timestamp) {
+                min_timestamp = gyroscope_sample_maybe->timestamp;
+            }
+            data->accuracies |= static_cast<uint8_t>(gyroscope_sample_maybe->calibration) << 2;
+            if (gyroscope_sample_maybe->dataMaybe.has_value()) {
+              data->has_data |= gyroscopt_bit;
+              data->data[3] = gyroscope_sample_maybe->dataMaybe.value().x;
+              data->data[4] = gyroscope_sample_maybe->dataMaybe.value().y;
+              data->data[5] = gyroscope_sample_maybe->dataMaybe.value().z;
+            }
+        }
+        // if (magnetometer_sample_maybe != nullptr) {
+        //     if (magnetometer_sample_maybe->timestamp < min_timestamp) {
+        //         min_timestamp = magnetometer_sample_maybe->timestamp;
+        //     }
+        //     data->accuracies |= static_cast<uint8_t>(magnetometer_sample_maybe->calibration) << 2;
+        //     data->has_data |= gyroscopt_bit;
+        // }
+        if (rotation_sample_maybe != nullptr) {
+            if (rotation_sample_maybe->timestamp < min_timestamp) {
+                min_timestamp = rotation_sample_maybe->timestamp;
+            }
+            data->accuracies |= static_cast<uint8_t>(rotation_sample_maybe->calibration);
+            if (rotation_sample_maybe->dataMaybe.has_value()) {
+              data->has_data |= rotation_bit;
+              data->data[6] = rotation_sample_maybe->dataMaybe.value().real;
+              data->data[7] = rotation_sample_maybe->dataMaybe.value().i;
+              data->data[8] = rotation_sample_maybe->dataMaybe.value().j;
+              data->data[9] = rotation_sample_maybe->dataMaybe.value().k;
+            }
+        }
+
+        if (min_timestamp == -1) {
+            return false;
+        } else {
+            data->timestamp = min_timestamp;
+            const uint64_t threshold = min_timestamp + DELAY_BETWEEN_SAMPLES;
+            if (accelerometer_sample_maybe != nullptr && accelerometer_sample_maybe->timestamp > threshold) {
+                data->has_data &= 0b011;
+            }
+            if (gyroscope_sample_maybe != nullptr && gyroscope_sample_maybe->timestamp > threshold) {
+                data->has_data &= 0b101;
+            }
+            // if (magnetometer_sample_maybe != nullptr && magnetometer_sample_maybe->timestamp > threshold) {
+            //     data->has_data &= 0b101;
+            // }
+            if (rotation_sample_maybe != nullptr && rotation_sample_maybe->timestamp > threshold) {
+                data->has_data &= 0b110;
+            }
+
+            return true;
+        }
     }
 };

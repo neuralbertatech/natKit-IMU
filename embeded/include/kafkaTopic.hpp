@@ -9,16 +9,24 @@
 #include <MQTT.h>
 #include <libnatkit-core.hpp>
 #include <PubSubClient.h>
-#include <mutex>
 // #include "mqtt_client.h"
 
+#ifdef USE_FREE_RTOS_LOCKS
+#include "freertos/FreeRTOS.h"
+#include "freertos/semphr.h"
+#else
+#include <mutex>
+#endif
+
+#define IMU_POLLING_HZ 100
+#define IMU_DELAY_BETWEEN_POLL_US 1000
 
 char kafkaUrlBuffer[256];
 byte kafkaRecordDataBuffer[6200];
 //char mqttBuffer[16384];
 uint32_t indexes[10];
 uint32_t currentIndex = 0;
-nat::core::NatImuDataSchema imuDataList[100];
+nat::core::NatImuDataSchema imuDataList[IMU_POLLING_HZ];
 uint32_t currentImuDataIndex = 0;
 
 class KafkaTopic {
@@ -34,7 +42,12 @@ class KafkaTopic {
 
     nat::core::NatImuBulkDataSchema bulkImuData{};
     bool bulkImuDataReadyToSend;
-    std::mutex bulkImuDataLock;
+    #ifdef USE_FREE_RTOS_LOCKS
+    SemaphoreHandle_t bulkImuDataLock;
+    #else
+    std::mutex bulkImuDataLock{};
+    #endif // USE_FREE_RTOS_LOCKS
+
     // static String createTopicPostStringTemplate;
     // static String createTopicUrlTemplate;
     // static String writeRecordUrlTemplate;
@@ -52,7 +65,20 @@ public:
         dataTopicString = dataStream.toTopicString().c_str();
         bulkDataTopicString = bulkDataStream.toTopicString().c_str();
         metaTopicString = metaStream.toTopicString().c_str();
+
+        #ifdef USE_FREE_RTOS_LOCKS
+        bulkImuDataLock = xSemaphoreCreateMutex();
+        assert(bulkImuDataLock != nullptr);
+        #endif // USE_FREE_RTOS_LOCKS
       }
+
+    ~KafkaTopic() {
+        #ifdef USE_FREE_RTOS_LOCKS
+        if (bulkImuDataLock) {
+            vSemaphoreDelete(bulkImuDataLock);
+        }
+        #endif // USE_FREE_RTOS_LOCKS
+    }
 
     //void createKafkaStream(const ConnectionConfig& connectionConfig);
 
@@ -257,25 +283,32 @@ bool KafkaTopic::writeDataRecord(const ConnectionConfig& connectionConfig, const
         //     //vTaskDelay(delay_len);
         // }
 
-        nat::core::NatImuDataSchema data{imuDatum.timestamp, nat::core::NatImuDataSchema::convertIntToSensorAccuracy(imuDatum.accuracy), imuDatum.data, 13};
+        nat::core::NatImuDataSchema data{imuDatum.timestamp, imuDatum.accuracies, imuDatum.has_data, imuDatum.data, 10};
         imuDataList[currentImuDataIndex++] = data;
-        if (currentImuDataIndex == 100) {
+        if (currentImuDataIndex == IMU_POLLING_HZ) {
             DEBUG_SERIAL.println("Bulk Message Is Ready to Send");
             currentImuDataIndex = 0;
-            DEBUG_SERIAL.println("AA");
+            // DEBUG_SERIAL.println("AA");
             {
-                DEBUG_SERIAL.println("BB");
-                std::lock_guard<std::mutex> gaurd(bulkImuDataLock);
-                DEBUG_SERIAL.println("CC");
-                bulkImuData.setData(imuDataList, 100);
-                DEBUG_SERIAL.println("DD");
+                // DEBUG_SERIAL.println("BB");
+                #ifdef USE_FREE_RTOS_LOCKS
+                xSemaphoreTake(bulkImuDataLock, portMAX_DELAY);
+                #else
+                std::lock_guard<std::mutex> guard(bulkImuDataLock);
+                #endif // USE_FREE_RTOS_LOCKS
+                // DEBUG_SERIAL.println("CC");
+                bulkImuData.setData(imuDataList, IMU_POLLING_HZ);
+                // DEBUG_SERIAL.println("DD");
                 bulkImuDataReadyToSend = true;
-                DEBUG_SERIAL.println("EE");
+                #ifdef USE_FREE_RTOS_LOCKS
+                xSemaphoreGive(bulkImuDataLock);
+                #endif // USE_FREE_RTOS_LOCKS
+                // DEBUG_SERIAL.println("EE");
                 //digitalWrite(12, LOW);
-                DEBUG_SERIAL.println("FF");
+                // DEBUG_SERIAL.println("FF");
                 return true;
             }
-            DEBUG_SERIAL.println("GG");
+            // DEBUG_SERIAL.println("GG");
         } else {
             //digitalWrite(12, LOW);
             return false;
@@ -320,15 +353,22 @@ bool KafkaTopic::writeDataRecord(const ConnectionConfig& connectionConfig, const
 
 void KafkaTopic::writeBulkDataRecord(const ConnectionConfig& connectionConfig, PubSubClient& mqttClient) {
     {
-        DEBUG_SERIAL.println("Sending Bulk Message");
-        std::lock_guard<std::mutex> gaurd(bulkImuDataLock);
+        // DEBUG_SERIAL.println("Sending Bulk Message");
+        #ifdef USE_FREE_RTOS_LOCKS
+        xSemaphoreTake(bulkImuDataLock, portMAX_DELAY);
+        #else
+        std::lock_guard<std::mutex> guard(bulkImuDataLock);
+        #endif // USE_FREE_RTOS_LOCKS
         if (!bulkImuDataReadyToSend) {
             DEBUG_SERIAL.println("Exit Early");
+            #ifdef USE_FREE_RTOS_LOCKS
+            xSemaphoreGive(bulkImuDataLock);
+            #endif // USE_FREE_RTOS_LOCKS
             return;
         }
         //static const auto delay_len = 10 / portTICK_PERIOD_MS; // 10ms
         if (WiFi.status() == WL_CONNECTED) {
-            digitalWrite(27, HIGH);
+            //digitalWrite(27, HIGH);
             //digitalWrite(12, HIGH);
             //digitalWrite(13, LOW);
             // const uint32_t urlSize = writeRecordUrlTemplate.length() +
@@ -370,10 +410,11 @@ void KafkaTopic::writeBulkDataRecord(const ConnectionConfig& connectionConfig, P
                 }
                 //vTaskDelay(delay_len);
             }
-            DEBUG_SERIAL.println("MQTT Client is connected");
+            // DEBUG_SERIAL.println("MQTT Client is connected");
 
             const auto bytes = bulkImuData.encodeToBytes(nat::core::SerializationType::Binary);
-            DEBUG_SERIAL.println("Bytes Encoded");
+            // const auto bytes = bulkImuData.encodeToBytes(nat::core::SerializationType::Csv);
+            // DEBUG_SERIAL.println("Bytes Encoded");
             if (bytes == nullptr) {
                 DEBUG_SERIAL.println("Error: Failed to encode CSV data!");
             }
@@ -382,9 +423,9 @@ void KafkaTopic::writeBulkDataRecord(const ConnectionConfig& connectionConfig, P
             DEBUG_SERIAL.printf("%d\n", bytes->size());
             for (int i = 0; i < bytes->size(); ++i)
                 kafkaRecordDataBuffer[i] = (*bytes)[i];
-            DEBUG_SERIAL.println("Bytes moved into buffer");
+            // DEBUG_SERIAL.println("Bytes moved into buffer");
             //kafkaRecordDataBuffer[bytes->size()] = 0;
-            DEBUG_SERIAL.printf("%d\n", bytes->size());
+            // DEBUG_SERIAL.printf("%d\n", bytes->size());
             // DEBUG_SERIAL.printf("%s\n", kafkaRecordDataBuffer);
             sprintf(kafkaUrlBuffer, mqttUrlTemplate.c_str(), bulkDataTopicString.c_str());
             // DEBUG_SERIAL.printf("%s\n", kafkaUrlBuffer);
@@ -408,9 +449,13 @@ void KafkaTopic::writeBulkDataRecord(const ConnectionConfig& connectionConfig, P
             //     DEBUG_SERIAL.printf("Error: Failed to POST a new meta record: %d\n", httpResponseCode);
             // }
             mqttClient.loop();
-            digitalWrite(27, LOW);
+            //digitalWrite(27, LOW);
             //digitalWrite(12, LOW);
         }
+
+        #ifdef USE_FREE_RTOS_LOCKS
+        xSemaphoreGive(bulkImuDataLock);
+        #endif // USE_FREE_RTOS_LOCKS
     }
 }
 
