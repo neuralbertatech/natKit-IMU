@@ -28,3 +28,10 @@ static int64_t getTimeNowAsUs() {
 
   return (int64_t)tv.tv_usec + (tv.tv_sec * 1000000ll);
 }
+
+static int64_t getTimeNowAsMs() {
+  struct timeval tv;
+  gettimeofday(&tv, NULL);
+
+  return (int64_t)(tv.tv_usec / 1000) + (tv.tv_sec * 1000ll);
+}

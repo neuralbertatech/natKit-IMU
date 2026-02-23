@@ -593,6 +593,10 @@ std::string Bno08xDevice::setup(bool& was_successful) {
     }
     #endif // NAT_BNO08X_ENABLE_GEOMAGNETIC_ROTATION_VECTOR
 
+    // Best-effort dynamic calibration and persistence setup.
+    (void)sh2_setCalConfig(SH2_CAL_ACCEL | SH2_CAL_GYRO | SH2_CAL_MAG);
+    (void)sh2_setDcdAutoSave(true);
+
     return error_msg;
 }
 

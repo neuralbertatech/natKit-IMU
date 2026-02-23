@@ -55,12 +55,11 @@ public:
                 previous_data_point_maybe = nat::core::make_unique<std::pair<SensorDataPoint<T>, uint64_t>>(std::make_pair(*data_point_maybe, current_data_point.timestamp));
                 return data_point_maybe;
             } else {
-                // Missed sample
-                uint64_t adjusted_current_timestamp = adjusted_previous_timestamp + expected_delay;
-                current_data_point.timestamp = adjusted_current_timestamp;
-                current_data_point.dataMaybe = {};
-                previous_data_point_maybe = nat::core::make_unique<std::pair<SensorDataPoint<T>, uint64_t>>(std::make_pair(*data_point_maybe, adjusted_current_timestamp));
-                return nat::core::make_unique<SensorDataPoint<T>>(current_data_point);
+                // If stream timing drifts, prefer emitting the real buffered sample
+                // instead of synthesizing an empty sample that clears has_data.
+                buffer.pop();
+                previous_data_point_maybe = nat::core::make_unique<std::pair<SensorDataPoint<T>, uint64_t>>(std::make_pair(*data_point_maybe, current_data_point.timestamp));
+                return data_point_maybe;
             }
         } else {
             // TODO: We are doing this if/else because we don't know when the expected first timestamp should be.

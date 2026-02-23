@@ -1,0 +1,13 @@
+#pragma once
+
+// Development Configuration
+// Copy this file to DevConfig.hpp and update with your local settings.
+// DevConfig.hpp is gitignored and should NOT be committed.
+
+// WiFi credentials for development (only used when ENABLE_CAPTIVE_PORTAL is not defined)
+#define DEV_WIFI_SSID "your_wifi_ssid"
+#define DEV_WIFI_PASSWORD "your_wifi_password"
+
+// natKit server address (IP or hostname of machine running docker-compose)
+#define DEV_NATKIT_SERVER_ADDRESS "192.168.1.100"
+#define DEV_NATKIT_SERVER_PORT "38082"

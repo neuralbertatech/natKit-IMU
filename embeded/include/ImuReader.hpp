@@ -15,7 +15,7 @@
 // #define BNO08X_CS 15
 // #define BNO08X_INT 32
 
-// // For SPI mode, we also need a RESET 
+// // For SPI mode, we also need a RESET
 // #define BNO08X_RESET 14
 
 // #define BNO08X_SCK 5
@@ -182,7 +182,7 @@
 //             while (1) { delay(10); }
 //         }
 //         DEBUG_SERIAL.println("BNO08x Found!");
-        
+
 //         //setReports(reportType, reportIntervalUs);
 //         setupReports(bno08x, reportIntervalUs);
 
@@ -194,12 +194,12 @@
 //             DEBUG_SERIAL.print("sensor was reset ");
 //             setupReports(bno08x, reportIntervalUs);
 //         }
-        
+
 //         bool accelerometer_updated = false;
 //         bool gyro_updated = false;
 //         bool magnometer_updated = false;
 //         bool rotation_updated = false;
-        
+
 //         int accelerometer_count = 0;
 //         int gyro_count = 0;
 //         int magnometer_count = 0;
@@ -268,7 +268,7 @@
 
 //             if (/*accelerometer_updated &&*/ gyro_updated && magnometer_updated && rotation_updated) {
 //                 break;
-//             } 
+//             }
 //             // else {
 //             //     DEBUG_SERIAL.printf("Accelerometer: %d, Gyro: %d, Magno: %d, Rotation: %d, Avr: %d, Other Gyro: %d, Other: %d\n", accelerometer_count, gyro_count, magnometer_count, rotation_count, arvr_count, gyro_other_count, other_count);
 //             // }
@@ -383,18 +383,25 @@
 #define BNO08X_CS 15
 #define BNO08X_INT 32
 
-// For SPI mode, we also need a RESET 
+// For SPI mode, we also need a RESET
 #define BNO08X_RESET 14
 
 #define BNO08X_SCK 5
 #define BNO08X_MISO 21
 #define BNO08X_MOSI 19
+#define STATUS_NEOPIXEL_PIN 4
+#define STATUS_NEOPIXEL_NUM_PIXELS 1
+#define STATUS_NEOPIXEL_BRIGHTNESS 24
+#define ONBOARD_NEOPIXEL_PIN 0
+#define ONBOARD_NEOPIXEL_POWER_PIN 2
+#define ONBOARD_NEOPIXEL_NUM_PIXELS 1
+#define ONBOARD_NEOPIXEL_BRIGHTNESS 24
 
 // // For SPI mode, we need a CS pin
 // #define BNO08X_CS 14
 // #define BNO08X_INT 39
 
-// // For SPI mode, we also need a RESET 
+// // For SPI mode, we also need a RESET
 // #define BNO08X_RESET 4
 
 // #define BNO08X_SCK 5
@@ -607,10 +614,143 @@ class ImuReader {
     uint64_t loopLastTimestamp = 0;
     uint64_t samplePollLastTimestamp = 0;
 
-    SensorBuffer<Bno08xEvent::ThreeDimensional> accelerometerBuffer{DELAY_BETWEEN_SAMPLES, DELAY_BETWEEN_SAMPLES + 1000};
-    SensorBuffer<Bno08xEvent::ThreeDimensional> gyroscopeBuffer{DELAY_BETWEEN_SAMPLES, DELAY_BETWEEN_SAMPLES + 1000};
-    // SensorBuffer<Bno08xEvent::ThreeDimensional> magnetometerBuffer{DELAY_BETWEEN_SAMPLES, DELAY_BETWEEN_SAMPLES + 1000};
-    SensorBuffer<Bno08xEvent::FourDimensional> rotationBuffer{DELAY_BETWEEN_SAMPLES, DELAY_BETWEEN_SAMPLES + 1000};
+    static constexpr uint64_t SENSOR_BUFFER_EXPECTED_DELAY_US = DELAY_BETWEEN_SAMPLES;
+    static constexpr uint64_t SENSOR_BUFFER_MAX_DELAY_US = DELAY_BETWEEN_SAMPLES * 4;
+    SensorBuffer<Bno08xEvent::ThreeDimensional> accelerometerBuffer{SENSOR_BUFFER_EXPECTED_DELAY_US, SENSOR_BUFFER_MAX_DELAY_US};
+    SensorBuffer<Bno08xEvent::ThreeDimensional> gyroscopeBuffer{SENSOR_BUFFER_EXPECTED_DELAY_US, SENSOR_BUFFER_MAX_DELAY_US};
+    // SensorBuffer<Bno08xEvent::ThreeDimensional> magnetometerBuffer{SENSOR_BUFFER_EXPECTED_DELAY_US, SENSOR_BUFFER_MAX_DELAY_US};
+    SensorBuffer<Bno08xEvent::FourDimensional> rotationBuffer{SENSOR_BUFFER_EXPECTED_DELAY_US, SENSOR_BUFFER_MAX_DELAY_US};
+    SensorDataPoint<Bno08xEvent::ThreeDimensional> latestAccelerometerSample{};
+    SensorDataPoint<Bno08xEvent::ThreeDimensional> latestGyroscopeSample{};
+    SensorDataPoint<Bno08xEvent::FourDimensional> latestRotationSample{};
+    bool hasLatestAccelerometerSample = false;
+    bool hasLatestGyroscopeSample = false;
+    bool hasLatestRotationSample = false;
+    Adafruit_NeoPixel statusPixel{STATUS_NEOPIXEL_NUM_PIXELS, STATUS_NEOPIXEL_PIN, NEO_GRB + NEO_KHZ800};
+    Adafruit_NeoPixel sourceIndicatorPixel{ONBOARD_NEOPIXEL_NUM_PIXELS, ONBOARD_NEOPIXEL_PIN, NEO_GRB + NEO_KHZ800};
+    bool statusPixelInitialized = false;
+    uint8_t accelerometerCalibration = 0;
+    uint8_t gyroscopeCalibration = 0;
+    uint8_t rotationCalibration = 0;
+    bool hasAccelerometerCalibration = false;
+    bool hasGyroscopeCalibration = false;
+    bool hasRotationCalibration = false;
+    uint8_t lastOverallCalibration = 255;
+
+    enum class CalibrationSource : uint8_t {
+        None = 0,
+        Accelerometer,
+        Gyroscope,
+        Rotation,
+    };
+
+    struct CalibrationSelection {
+        uint8_t calibration;
+        CalibrationSource source;
+    };
+
+    uint8_t sanitizeCalibration(uint8_t calibration) const {
+        return calibration & 0b11;
+    }
+
+    CalibrationSelection getDisplayedCalibration() const {
+        bool hasAnyCalibration = false;
+        CalibrationSelection selection{};
+        selection.calibration = 0;
+        selection.source = CalibrationSource::None;
+
+        if (hasAccelerometerCalibration) {
+            hasAnyCalibration = true;
+            selection.calibration = accelerometerCalibration;
+            selection.source = CalibrationSource::Accelerometer;
+        }
+        if (hasGyroscopeCalibration) {
+            if (!hasAnyCalibration || gyroscopeCalibration < selection.calibration) {
+                selection.calibration = gyroscopeCalibration;
+                selection.source = CalibrationSource::Gyroscope;
+            }
+            hasAnyCalibration = true;
+        }
+        if (hasRotationCalibration) {
+            if (!hasAnyCalibration || rotationCalibration < selection.calibration) {
+                selection.calibration = rotationCalibration;
+                selection.source = CalibrationSource::Rotation;
+            }
+            hasAnyCalibration = true;
+        }
+
+        if (!hasAnyCalibration) {
+            selection.calibration = 0;
+            selection.source = CalibrationSource::None;
+        }
+
+        return selection;
+    }
+
+    uint32_t calibrationToColor(uint8_t calibration) {
+        switch (sanitizeCalibration(calibration)) {
+            case 0: // Unknown
+                return statusPixel.Color(0, 0, 255);
+            case 1: // Low
+                return statusPixel.Color(255, 0, 0);
+            case 2: // Medium
+                return statusPixel.Color(255, 160, 0);
+            case 3: // High
+                return statusPixel.Color(0, 255, 0);
+            default:
+                return statusPixel.Color(0, 0, 255);
+        }
+    }
+
+    void updateSourceIndicatorLed(CalibrationSource source) {
+        uint32_t sourceColor = 0;
+        switch (source) {
+            case CalibrationSource::Accelerometer:
+                sourceColor = sourceIndicatorPixel.Color(255, 120, 0); // Orange
+                break;
+            case CalibrationSource::Gyroscope:
+                sourceColor = sourceIndicatorPixel.Color(0, 180, 255); // Cyan
+                break;
+            case CalibrationSource::Rotation:
+                sourceColor = sourceIndicatorPixel.Color(200, 0, 255); // Purple
+                break;
+            case CalibrationSource::None:
+            default:
+                sourceColor = 0;
+                break;
+        }
+        sourceIndicatorPixel.setPixelColor(0, sourceColor);
+        sourceIndicatorPixel.show();
+    }
+
+    void updateCalibrationLed() {
+        if (!statusPixelInitialized) {
+            return;
+        }
+        const CalibrationSelection selection = getDisplayedCalibration();
+        if (selection.calibration != lastOverallCalibration) {
+            lastOverallCalibration = selection.calibration;
+            statusPixel.setPixelColor(0, calibrationToColor(selection.calibration));
+            statusPixel.show();
+        }
+        updateSourceIndicatorLed(selection.source);
+    }
+
+    void initializeCalibrationLed() {
+        pinMode(ONBOARD_NEOPIXEL_POWER_PIN, OUTPUT);
+        digitalWrite(ONBOARD_NEOPIXEL_POWER_PIN, HIGH);
+
+        statusPixel.begin();
+        statusPixel.setBrightness(STATUS_NEOPIXEL_BRIGHTNESS);
+
+        sourceIndicatorPixel.begin();
+        sourceIndicatorPixel.setBrightness(ONBOARD_NEOPIXEL_BRIGHTNESS);
+        sourceIndicatorPixel.setPixelColor(0, 0);
+        sourceIndicatorPixel.show();
+
+        statusPixelInitialized = true;
+        updateCalibrationLed();
+    }
 
 public:
     ImuReader() {
@@ -654,13 +794,14 @@ public:
         }
         Serial.println("BNO08X started");
         DEBUG_SERIAL.println("BNO08x Found!");
-        
+
         setupReports(bno08x, reportIntervalUs);
 
         DEBUG_SERIAL.println("Reading events");
     }
 
     void start2() {
+      initializeCalibrationLed();
       Serial.println("Starting the BNO08X");
       bool was_successful;
       std::string error_maybe = bno08x_device.start(was_successful);
@@ -673,7 +814,7 @@ public:
 
     void update_loop() {
       static const uint64_t timeBetweenEachLoopUs = 1000; // 1ms
-        
+
         uint64_t current_timestamp = esp_timer_get_time();
         if (current_timestamp - loopLastTimestamp < timeBetweenEachLoopUs) {
           return;
@@ -721,12 +862,12 @@ public:
             DEBUG_SERIAL.print("sensor was reset \n");
             setupReports(bno08x, reportIntervalUs);
         }
-        
+
         // bool accelerometer_updated = false;
         // bool gyro_updated = false;
         // bool magnometer_updated = false;
         // bool rotation_updated = false;
-        
+
         // int accelerometer_count = 0;
         // int gyro_count = 0;
         // int magnometer_count = 0;
@@ -933,7 +1074,7 @@ public:
 
     void update_loop2() {
       static const uint64_t timeBetweenEachLoopUs = 500; // 1ms
-        
+
         uint64_t current_timestamp = esp_timer_get_time();
         if (current_timestamp - loopLastTimestamp < timeBetweenEachLoopUs) {
           return;
@@ -1041,12 +1182,12 @@ public:
             DEBUG_SERIAL.print("sensor was reset \n");
             setupReports(bno08x, reportIntervalUs);
         }
-        
+
         // bool accelerometer_updated = false;
         // bool gyro_updated = false;
         // bool magnometer_updated = false;
         // bool rotation_updated = false;
-        
+
         // int accelerometer_count = 0;
         // int gyro_count = 0;
         // int magnometer_count = 0;
@@ -1214,29 +1355,36 @@ public:
         // DEBUG_SERIAL.printf("All good\n");
       }
       uint64_t currentTimestamp{};
+      bool calibrationUpdated = false;
       switch (event.event_type) {
           case Bno08xEvent::EventType::Accelerometer:
           case Bno08xEvent::EventType::RawAccelerometer:
           case Bno08xEvent::EventType::LinearAcceleration: {
             SensorDataPoint<Bno08xEvent::ThreeDimensional> data_point{};
-            currentTimestamp = esp_timer_get_time();
+            currentTimestamp = getTimeNowAsUs();
             data_point.timestamp = currentTimestamp;
             data_point.calibration = event.accuracy;
             data_point.dataMaybe = event.data.three_dimensional;
             // DEBUG_SERIAL.printf("Accelerometer\n");
             accelerometerBuffer.push(data_point);
+            accelerometerCalibration = sanitizeCalibration(event.accuracy);
+            hasAccelerometerCalibration = true;
+            calibrationUpdated = true;
             break;
           }
 
           case Bno08xEvent::EventType::GyroscopeCalibrated:
           case Bno08xEvent::EventType::GyroscopeUncalibrated: {
             SensorDataPoint<Bno08xEvent::ThreeDimensional> data_point{};
-            currentTimestamp = esp_timer_get_time();
+            currentTimestamp = getTimeNowAsUs();
             data_point.timestamp = currentTimestamp;
             data_point.calibration = event.accuracy;
             data_point.dataMaybe = event.data.three_dimensional;
             // DEBUG_SERIAL.printf("Gyro\n");
             gyroscopeBuffer.push(data_point);
+            gyroscopeCalibration = sanitizeCalibration(event.accuracy);
+            hasGyroscopeCalibration = true;
+            calibrationUpdated = true;
             break;
           }
 
@@ -1254,17 +1402,23 @@ public:
           case Bno08xEvent::EventType::RotationVector:
           case Bno08xEvent::EventType::GeomagneticRotationVector: {
             SensorDataPoint<Bno08xEvent::FourDimensional> data_point{};
-            currentTimestamp = esp_timer_get_time();
+            currentTimestamp = getTimeNowAsUs();
             data_point.timestamp = currentTimestamp;
             data_point.calibration = event.accuracy;
             data_point.dataMaybe = event.data.four_dimensional;
             // DEBUG_SERIAL.printf("Rotation\n");
             rotationBuffer.push(data_point);
+            rotationCalibration = sanitizeCalibration(event.accuracy);
+            hasRotationCalibration = true;
+            calibrationUpdated = true;
             break;
             }
 
           default:
-            DEBUG_SERIAL.printf("No Good\n");
+            break;
+      }
+      if (calibrationUpdated) {
+        updateCalibrationLed();
       }
     }
 
@@ -1333,78 +1487,83 @@ public:
         constexpr uint8_t accelerometer_bit = 0b100;
         constexpr uint8_t gyroscopt_bit = 0b010;
         constexpr uint8_t rotation_bit = 0b001;
-        auto accelerometer_sample_maybe = accelerometerBuffer.tryGetNext();
-        auto gyroscope_sample_maybe = gyroscopeBuffer.tryGetNext();
-        // auto magnetometer_sample_maybe = magnetometerBuffer.tryGetNext();
-        auto rotation_sample_maybe = rotationBuffer.tryGetNext();
+        bool hasAnyFreshSample = false;
+
+        while (true) {
+            auto accelerometer_sample_maybe = accelerometerBuffer.tryGetNext();
+            if (accelerometer_sample_maybe == nullptr) {
+                break;
+            }
+            latestAccelerometerSample = *accelerometer_sample_maybe;
+            hasLatestAccelerometerSample = accelerometer_sample_maybe->dataMaybe.has_value();
+            hasAnyFreshSample = true;
+        }
+
+        while (true) {
+            auto gyroscope_sample_maybe = gyroscopeBuffer.tryGetNext();
+            if (gyroscope_sample_maybe == nullptr) {
+                break;
+            }
+            latestGyroscopeSample = *gyroscope_sample_maybe;
+            hasLatestGyroscopeSample = gyroscope_sample_maybe->dataMaybe.has_value();
+            hasAnyFreshSample = true;
+        }
+
+        while (true) {
+            auto rotation_sample_maybe = rotationBuffer.tryGetNext();
+            if (rotation_sample_maybe == nullptr) {
+                break;
+            }
+            latestRotationSample = *rotation_sample_maybe;
+            hasLatestRotationSample = rotation_sample_maybe->dataMaybe.has_value();
+            hasAnyFreshSample = true;
+        }
+
+        if (!hasAnyFreshSample) {
+            return false;
+        }
 
         data->accuracies = 0;
         data->has_data = 0;
 
-        uint64_t min_timestamp = -1;
-        if (accelerometer_sample_maybe != nullptr) {
-            if (accelerometer_sample_maybe->timestamp < min_timestamp) {
-                min_timestamp = accelerometer_sample_maybe->timestamp;
-            }
-            data->accuracies |= static_cast<uint8_t>(accelerometer_sample_maybe->calibration) << 4;
-            if (accelerometer_sample_maybe->dataMaybe.has_value()) {
-              data->has_data |= accelerometer_bit;
-              data->data[0] = accelerometer_sample_maybe->dataMaybe.value().x;
-              data->data[1] = accelerometer_sample_maybe->dataMaybe.value().y;
-              data->data[2] = accelerometer_sample_maybe->dataMaybe.value().z;
+        uint64_t max_timestamp = 0;
+        if (hasLatestAccelerometerSample) {
+            data->accuracies |= static_cast<uint8_t>(latestAccelerometerSample.calibration) << 4;
+            data->has_data |= accelerometer_bit;
+            data->data[0] = latestAccelerometerSample.dataMaybe.value().x;
+            data->data[1] = latestAccelerometerSample.dataMaybe.value().y;
+            data->data[2] = latestAccelerometerSample.dataMaybe.value().z;
+            if (latestAccelerometerSample.timestamp > max_timestamp) {
+                max_timestamp = latestAccelerometerSample.timestamp;
             }
         }
-        if (gyroscope_sample_maybe != nullptr) {
-            if (gyroscope_sample_maybe->timestamp < min_timestamp) {
-                min_timestamp = gyroscope_sample_maybe->timestamp;
-            }
-            data->accuracies |= static_cast<uint8_t>(gyroscope_sample_maybe->calibration) << 2;
-            if (gyroscope_sample_maybe->dataMaybe.has_value()) {
-              data->has_data |= gyroscopt_bit;
-              data->data[3] = gyroscope_sample_maybe->dataMaybe.value().x;
-              data->data[4] = gyroscope_sample_maybe->dataMaybe.value().y;
-              data->data[5] = gyroscope_sample_maybe->dataMaybe.value().z;
+        if (hasLatestGyroscopeSample) {
+            data->accuracies |= static_cast<uint8_t>(latestGyroscopeSample.calibration) << 2;
+            data->has_data |= gyroscopt_bit;
+            data->data[3] = latestGyroscopeSample.dataMaybe.value().x;
+            data->data[4] = latestGyroscopeSample.dataMaybe.value().y;
+            data->data[5] = latestGyroscopeSample.dataMaybe.value().z;
+            if (latestGyroscopeSample.timestamp > max_timestamp) {
+                max_timestamp = latestGyroscopeSample.timestamp;
             }
         }
-        // if (magnetometer_sample_maybe != nullptr) {
-        //     if (magnetometer_sample_maybe->timestamp < min_timestamp) {
-        //         min_timestamp = magnetometer_sample_maybe->timestamp;
-        //     }
-        //     data->accuracies |= static_cast<uint8_t>(magnetometer_sample_maybe->calibration) << 2;
-        //     data->has_data |= gyroscopt_bit;
-        // }
-        if (rotation_sample_maybe != nullptr) {
-            if (rotation_sample_maybe->timestamp < min_timestamp) {
-                min_timestamp = rotation_sample_maybe->timestamp;
-            }
-            data->accuracies |= static_cast<uint8_t>(rotation_sample_maybe->calibration);
-            if (rotation_sample_maybe->dataMaybe.has_value()) {
-              data->has_data |= rotation_bit;
-              data->data[6] = rotation_sample_maybe->dataMaybe.value().real;
-              data->data[7] = rotation_sample_maybe->dataMaybe.value().i;
-              data->data[8] = rotation_sample_maybe->dataMaybe.value().j;
-              data->data[9] = rotation_sample_maybe->dataMaybe.value().k;
+        if (hasLatestRotationSample) {
+            data->accuracies |= static_cast<uint8_t>(latestRotationSample.calibration);
+            data->has_data |= rotation_bit;
+            data->data[6] = latestRotationSample.dataMaybe.value().real;
+            data->data[7] = latestRotationSample.dataMaybe.value().i;
+            data->data[8] = latestRotationSample.dataMaybe.value().j;
+            data->data[9] = latestRotationSample.dataMaybe.value().k;
+            if (latestRotationSample.timestamp > max_timestamp) {
+                max_timestamp = latestRotationSample.timestamp;
             }
         }
 
-        if (min_timestamp == -1) {
+        if (max_timestamp == 0) {
             return false;
         } else {
-            data->timestamp = min_timestamp;
-            const uint64_t threshold = min_timestamp + DELAY_BETWEEN_SAMPLES;
-            if (accelerometer_sample_maybe != nullptr && accelerometer_sample_maybe->timestamp > threshold) {
-                data->has_data &= 0b011;
-            }
-            if (gyroscope_sample_maybe != nullptr && gyroscope_sample_maybe->timestamp > threshold) {
-                data->has_data &= 0b101;
-            }
-            // if (magnetometer_sample_maybe != nullptr && magnetometer_sample_maybe->timestamp > threshold) {
-            //     data->has_data &= 0b101;
-            // }
-            if (rotation_sample_maybe != nullptr && rotation_sample_maybe->timestamp > threshold) {
-                data->has_data &= 0b110;
-            }
-
+            // Convert from microseconds to milliseconds to match frontend marker timestamps
+            data->timestamp = max_timestamp / 1000;
             return true;
         }
     }

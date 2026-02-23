@@ -8,6 +8,17 @@
 #include <ConnectionConfig.hpp>
 #include <macros.hpp>
 #include <kafkaTopic.hpp>
+#include <version.hpp>
+
+// Development configuration - copy DevConfig.hpp.example to DevConfig.hpp
+// and update with your local settings (DevConfig.hpp is gitignored)
+#ifndef ENABLE_CAPTIVE_PORTAL
+#if __has_include(<DevConfig.hpp>)
+#include <DevConfig.hpp>
+#else
+#error "DevConfig.hpp not found. Copy DevConfig.hpp.example to DevConfig.hpp and configure your settings."
+#endif
+#endif
 
 //#include <Arduino.h> //not needed in the arduino ide
 
@@ -21,6 +32,7 @@
 #endif // ENABLE_CAPTIVE_PORTAL
 
 #include <esp_random.h>
+#include <esp_task_wdt.h>
 #include <ImuData.hpp>
 #include <ImuReader.hpp>
 #include <libnatkit-core.hpp>
@@ -52,13 +64,7 @@
 
 //Pre reading on the fundamentals of captive portals https://textslashplain.com/2022/06/24/captive-portals/
 
-enum class NetworkMode {
-  GetConfigFromUser,
-  ConnectingToWifi,
-  ConnectedToWifi
-};
 
-NetworkMode currentNetworkMode = NetworkMode::GetConfigFromUser;
 
 //const char* ntpServer = "pool.ntp.org";
 // const long  gmtOffset_sec = 3600;
@@ -72,8 +78,35 @@ char ssid[32];
 const char * password = NULL; // no password
 #endif // ENABLE_CAPTIVE_PORTAL
 
-#define MAX_CLIENTS 4 //ESP32 supports up to 10 but I have not tested it yet
-#define WIFI_CHANNEL 6 //2.4ghz channel 6 https://en.wikipedia.org/wiki/List_of_WLAN_channels#2.4_GHz_(802.11b/g/n/ax)
+// Network configuration
+#define MAX_CLIENTS 4  // ESP32 supports up to 10 but not tested
+#define WIFI_CHANNEL 6 // 2.4GHz channel 6
+
+// MQTT configuration
+constexpr uint16_t MQTT_BUFFER_SIZE = 16384;          // Buffer size for MQTT messages
+constexpr uint16_t MQTT_CONNECT_BUFFER_SIZE = 6200;   // Buffer size during connection phase
+constexpr uint8_t MQTT_MAX_CONNECT_RETRIES = 30;      // Max connection attempts before giving up
+constexpr uint16_t MQTT_CONNECT_RETRY_DELAY_MS = 500; // Delay between connection retries
+
+// FreeRTOS task stack sizes (in bytes)
+constexpr uint32_t SEND_MESSAGE_TASK_STACK_SIZE = 18432;  // 16384 + 2048 for sendMessageTask
+constexpr uint32_t AP_REQUESTS_TASK_STACK_SIZE = 16384;   // For handleApRequestsTask
+constexpr uint32_t NTP_TASK_STACK_SIZE = 2048;            // For handleNtpTask
+
+// xTaskCreate expects stack depth in words, not bytes.
+constexpr uint32_t stackBytesToWords(uint32_t bytes) {
+  return (bytes + sizeof(StackType_t) - 1U) / sizeof(StackType_t);
+}
+
+// WiFi reconnection settings
+constexpr uint8_t WIFI_MAX_RECONNECT_ATTEMPTS = 10;       // Max reconnection attempts before restart
+constexpr uint16_t WIFI_RECONNECT_DELAY_MS = 5000;        // Delay between reconnection attempts
+
+// Watchdog timer settings
+constexpr uint32_t WATCHDOG_TIMEOUT_SEC = 30;             // Watchdog timeout in seconds
+
+// NTP synchronization settings
+constexpr uint8_t NTP_MAX_WAIT_SECONDS = 60;              // Max time to wait for NTP sync before proceeding
 
 
 const IPAddress localIP(4, 3, 2, 1); // the IP address the web server, Samsung requires the IP to be in public space
@@ -140,25 +173,16 @@ AsyncWebServer server(80);
 ConnectionConfig connectionConfig{};
 
 WiFiClient wifiClient;
-// MQTTClient mqttClient{512, 512};
 PubSubClient mqttClient{};
-// esp_mqtt_client_config_t mqtt_cfg{};// = {
-//     .broker.address.uri = "10.26.0.214",
-// };
-// esp_mqtt_client_handle_t mqttClient;
 
-bool gConnectedToWifi = false;
-bool gCreatedKafkaDataTopic = false;
-bool gCreatedKafkaMetaTopic = false;
-bool gSendKafkaMetaRecord = false;
+// WiFi connection state (volatile for ISR access)
+volatile bool wifiConnected = false;
+volatile bool wifiReconnectNeeded = false;
+uint8_t wifiReconnectAttempts = 0;
+
 enum class NetworkingStage {
   Disconnected,
   RecievedWifiCredentials,
-  ConnectedToWifi,
-  RecievedKafkaClusterId,
-  CreatedKafkaDataTopic,
-  CreatedKafkaMetaTopic,
-  SentKafkaMetaRecord,
   WriteData
 };
 NetworkingStage currentNetworkingStage = NetworkingStage::Disconnected;
@@ -171,6 +195,10 @@ int imuCalibration{0};
 bool IMU_DUMMY_DATA{false};
 
 TaskHandle_t sendMessageTaskHandle = NULL;
+TaskHandle_t networkingAndImuTaskHandle = NULL;
+
+// FreeRTOS task stack size for networking/IMU task
+constexpr uint32_t NETWORKING_IMU_TASK_STACK_SIZE = 16384;
 
 #ifdef ENABLE_CAPTIVE_PORTAL
 void handleApRequestsTask(void*) {
@@ -185,149 +213,21 @@ void handleApRequestsTask(void*) {
 #endif // ENABLE_CAPTIVE_PORTAL
 
 void sendMessageTask(void*) {
-  // DEBUG_SERIAL.println("Send Message Task run");
-  kafkaTopic->writeBulkDataRecord(connectionConfig, mqttClient);
-  // DEBUG_SERIAL.println("Finishing Message Task");
-  vTaskDelete( NULL );
+  while (true) {
+    ulTaskNotifyTake(pdTRUE, portMAX_DELAY);
+    if (kafkaTopic != nullptr) {
+      kafkaTopic->writeBulkDataRecord(connectionConfig, mqttClient);
+    }
+  }
 }
-
-// void handleNetworkingStagesTask(void*) {
-//   const auto delay = 10 / portTICK_PERIOD_MS; // 10ms
-//   int task_delta = 0;
-//   long last_timestamp = 0;
-//   long current_timestamp = 0;
-//   Serial.println("Starting Network!");
-//   while(true) {
-//     last_timestamp = esp_timer_get_time();
-//     switch(currentNetworkingStage) {
-//       case NetworkingStage::Disconnected:
-//         break;
-
-//       case NetworkingStage::RecievedWifiCredentials:
-//         if (connectionConfig.networkSsid != nullptr && connectionConfig.networkPassword != nullptr) {
-//           currentNetworkMode = NetworkMode::ConnectingToWifi;
-//           WiFi.begin(connectionConfig.networkSsid, connectionConfig.networkPassword);
-//           while (WiFi.status() != WL_CONNECTED) {
-//             vTaskDelay(delay*100);
-//             DEBUG_SERIAL.println("Connecting to WiFi..");
-//           }
-//           gConnectedToWifi = true;
-//           IPAddress ipAddress{};
-//           ipAddress.fromString(connectionConfig.natKitServerAddress);
-//           mqttClient.setClient(wifiClient);
-//           mqttClient.setServer(ipAddress, 1883);
-//           // mqttClient.begin(ipAddress, 1883, wifiClient);
-//           while (!mqttClient.connect("natKit-IMU")) {
-//               Serial.print(".");
-//               DEBUG_SERIAL.println("Connecting to mqtt..");
-//           }
-
-//           static std::string ntpServerAddressString = connectionConfig.natKitServerAddress;
-//           ntpServerAddressString += ":123";
-//           ntpServer = ntpServerAddressString.c_str();
-//           //configTime(gmtOffset_sec, daylightOffset_sec, ntpServer.c_str());
-//           // mqtt_cfg.broker.address.uri = "10.26.0.214";
-//           // mqttClient = esp_mqtt_client_init(&mqtt_cfg);
-//           // esp_mqtt_client_register_event(client, ESP_EVENT_ANY_ID, mqtt_event_handler, client);
-//           // esp_mqtt_client_start(mqttClient);
-//           DEBUG_SERIAL.print("ESP32 IP on the WiFi network: ");
-//           DEBUG_SERIAL.println(WiFi.localIP());
-//           // request->send_P(200, "text/html", formCompletionResponseHtml);
-//           //uint8_t size;
-//           //const auto clusterId = KafkaTopic::getKafkaCluster(connectionConfig, size);
-//           DEBUG_SERIAL.println("AAAAAAAAA");
-//           // vTaskDelay(500);
-//           // if (size > 0) {
-//             // DEBUG_SERIAL.printf("HI %s\n", clusterId);
-//             const String boardId{UNIQUE_ID};
-//             DEBUG_SERIAL.println("BBBBBBBBB");
-
-//             // kafkaTopic = KafkaTopic::create(esp_random(), boardId);
-//             kafkaTopic = KafkaTopic::create(UNIQUE_ID, boardId);
-//             DEBUG_SERIAL.println("CCCCCCCCC");
-//             //kafkaTopic->createKafkaStream(connectionConfig);
-//             vTaskDelay(500);
-//             DEBUG_SERIAL.println("DDDDDDDDD");
-//             kafkaTopic->writeMetaRecord(connectionConfig, mqttClient);
-//             DEBUG_SERIAL.println("EEEEEEEE");
-//             currentNetworkingStage = NetworkingStage::WriteData;
-//           // }
-//         } else {
-//           DEBUG_SERIAL.println("Error: Either the network SSID or the network password was not set");
-//           // request->send_P(400, "text/html", formCompletionResponseHtml);
-//         }
-//         break;
-
-//       case NetworkingStage::WriteData:
-//         if (connectionConfig.networkSsid != nullptr && connectionConfig.networkPassword != nullptr) {
-
-//           DEBUG_SERIAL.println("Before");
-//           bool isBulkReady = kafkaTopic->writeDataRecord(connectionConfig, imuData, mqttClient);
-//           DEBUG_SERIAL.println("After");
-//           if (isBulkReady) {
-//             //xTaskCreate(sendMessageTask, "sendMessageTask", 2048, NULL, tskIDLE_PRIORITY+2, &sendMessageTaskHandle);
-//             DEBUG_SERIAL.println("Got signal indicating that bulk message is ready to send");
-//             sendMessageTask(NULL);
-//           } else {
-//             DEBUG_SERIAL.println("As you were");
-//           }
-//         }
-//         break;
-
-//     default:
-//         break;
-//     }
-//     current_timestamp = esp_timer_get_time();
-//     task_delta = (current_timestamp - last_timestamp) / 1000;
-//     if (task_delta >= delay) {
-//       // Serial.println("LAGGING!");
-//       log_i("Lagging!\n");
-//       continue;
-//     }
-//     vTaskDelay(delay - task_delta);
-//   }
-
-//   vTaskDelete( NULL );
-// }
-
-// void handleImuUpdateTask(void*) {
-//   const auto delay = 10 / portTICK_PERIOD_MS; // 10ms
-//   int iteration = 0;
-//   // int task_delta = 0;
-//   // long last_timestamp = 0;
-//   // long current_timestamp = 0;
-//   while(true) {
-//     if (!IMU_DUMMY_DATA) {
-//       // if (iteration == 0) {
-//       //   imuReader.calibrate();
-//       // }
-//       imuReader.update();
-//       imuReader.getImuData(&imuData);
-//     } else {
-//       imuData.timestamp = getTime();
-//       const auto randomNumber = esp_random();
-//       if (iteration % 600 == 0) {
-//         imuCalibration = randomNumber % 4;
-//       }
-//       for(int i = 0; i < 9; ++i) {
-//         imuData.data[i] = randomNumber + i;
-//       }
-//       imuData.accuracy = imuCalibration;
-//       iteration = (iteration + 1) % 600;
-//     }
-//     vTaskDelay(delay);
-//   }
-
-//   vTaskDelete( NULL );
-// }
 
 // Could use an atomic_thread_fence instead
 #ifdef USE_FREE_RTOS_LOCKS
-SemaphoreHandle_t has_ntp_update_happend_yet_lock;
+SemaphoreHandle_t has_ntp_update_happened_yet_lock;
 #else
-std::mutex has_ntp_update_happend_yet_lock{};
+std::mutex has_ntp_update_happened_yet_lock{};
 #endif // USE_FREE_RTOS_LOCKS
-bool has_ntp_update_happend_yet = true;
+bool has_ntp_update_happened_yet = true;
 
 // Could use an atomic_thread_fence instead
 #ifdef USE_FREE_RTOS_LOCKS
@@ -362,13 +262,13 @@ void ntpSyncNotification(struct timeval* tv) {
   calculateLocalTimeOffset();
   {
     #ifdef USE_FREE_RTOS_LOCKS
-    xSemaphoreTake(has_ntp_update_happend_yet_lock, portMAX_DELAY);
+    xSemaphoreTake(has_ntp_update_happened_yet_lock, portMAX_DELAY);
     #else
-    std::lock_guard<std::mutex> guard(has_ntp_update_happend_yet_lock);
+    std::lock_guard<std::mutex> guard(has_ntp_update_happened_yet_lock);
     #endif // USE_FREE_RTOS_LOCKS
-    has_ntp_update_happend_yet = true;
+    has_ntp_update_happened_yet = true;
     #ifdef USE_FREE_RTOS_LOCKS
-    xSemaphoreGive(has_ntp_update_happend_yet_lock);
+    xSemaphoreGive(has_ntp_update_happened_yet_lock);
     #endif // USE_FREE_RTOS_LOCKS
   }
   DEBUG_SERIAL.println("NTP Time Callback was hit");
@@ -381,13 +281,13 @@ void processSyncEvent (NTPEvent_t ntpEvent) {
         calculateLocalTimeOffset();
         {
           #ifdef USE_FREE_RTOS_LOCKS
-          xSemaphoreTake(has_ntp_update_happend_yet_lock, portMAX_DELAY);
+          xSemaphoreTake(has_ntp_update_happened_yet_lock, portMAX_DELAY);
           #else
-          std::lock_guard<std::mutex> guard(has_ntp_update_happend_yet_lock);
+          std::lock_guard<std::mutex> guard(has_ntp_update_happened_yet_lock);
           #endif // USE_FREE_RTOS_LOCKS
-          has_ntp_update_happend_yet = true;
+          has_ntp_update_happened_yet = true;
           #ifdef USE_FREE_RTOS_LOCKS
-          xSemaphoreGive(has_ntp_update_happend_yet_lock);
+          xSemaphoreGive(has_ntp_update_happened_yet_lock);
           #endif // USE_FREE_RTOS_LOCKS
         }
         DEBUG_SERIAL.println("NTP Time Callback was hit");
@@ -463,155 +363,115 @@ void handleNetworkingStagesAndImuJoinedTask(void*) {
 
       case NetworkingStage::RecievedWifiCredentials:
         if (connectionConfig.networkSsid != nullptr && connectionConfig.networkPassword != nullptr) {
-          currentNetworkMode = NetworkMode::ConnectingToWifi;
           WiFi.begin(connectionConfig.networkSsid, connectionConfig.networkPassword);
           while (WiFi.status() != WL_CONNECTED) {
             vTaskDelay(delay_len*100);
             DEBUG_SERIAL.println("Connecting to WiFi..");
           }
-          gConnectedToWifi = true;
           IPAddress ipAddress{};
           ipAddress.fromString(connectionConfig.natKitServerAddress);
           mqttClient.setClient(wifiClient);
           mqttClient.setServer(ipAddress, 1883);
-          if (!mqttClient.setBufferSize(6200)) {
+          if (!mqttClient.setBufferSize(MQTT_CONNECT_BUFFER_SIZE)) {
+            DEBUG_SERIAL.println("Failed to set MQTT buffer size");
             currentNetworkingStage = NetworkingStage::Disconnected;
-            //digitalWrite(13, HIGH);
             break;
           }
-          // mqttClient.begin(ipAddress, 1883, wifiClient);
+
+          // Connect to MQTT with retry limit
+          uint8_t mqttRetries = 0;
           while (!mqttClient.connect("natKit-IMU")) {
-              Serial.print(".");
-              DEBUG_SERIAL.println("Connecting to mqtt..");
+            mqttRetries++;
+            if (mqttRetries >= MQTT_MAX_CONNECT_RETRIES) {
+              DEBUG_SERIAL.println("MQTT connection failed: max retries exceeded");
+              currentNetworkingStage = NetworkingStage::Disconnected;
+              break;
+            }
+            DEBUG_SERIAL.printf("Connecting to MQTT... (attempt %d/%d)\n", mqttRetries, MQTT_MAX_CONNECT_RETRIES);
+            vTaskDelay(MQTT_CONNECT_RETRY_DELAY_MS / portTICK_PERIOD_MS);
+          }
+          if (currentNetworkingStage == NetworkingStage::Disconnected) {
+            break;
           }
 
           static std::string ntpServerAddressString = connectionConfig.natKitServerAddress;
-          //ntpServerAddressString += ":123";
           ntpServer = ntpServerAddressString.c_str();
 
-
-          // configTime(gmtOffset_sec, daylightOffset_sec, ntpServerAddressString.c_str());
-          // esp_sntp_config_t config = ESP_NETIF_SNTP_DEFAULT_CONFIG("pool.ntp.org");
-          // esp_netif_sntp_init(&config);
-          //configTime(gmtOffset_sec, daylightOffset_sec, ntpServer.c_str());
-          // mqtt_cfg.broker.address.uri = "10.26.0.214";
-          // mqttClient = esp_mqtt_client_init(&mqtt_cfg);
-          // esp_mqtt_client_register_event(client, ESP_EVENT_ANY_ID, mqtt_event_handler, client);
-          // esp_mqtt_client_start(mqttClient);
           DEBUG_SERIAL.print("ESP32 IP on the WiFi network: ");
           DEBUG_SERIAL.println(WiFi.localIP());
-          // request->send_P(200, "text/html", formCompletionResponseHtml);
-          //uint8_t size;
-          //const auto clusterId = KafkaTopic::getKafkaCluster(connectionConfig, size);
-          DEBUG_SERIAL.println("AAAAAAAAA");
-          // vTaskDelay(500);
-          // if (size > 0) {
-            // DEBUG_SERIAL.printf("HI %s\n", clusterId);
-            const String boardId{UNIQUE_ID};
-            DEBUG_SERIAL.println("BBBBBBBBB");
 
-            // kafkaTopic = KafkaTopic::create(esp_random(), boardId);
-            kafkaTopic = KafkaTopic::create(UNIQUE_ID, boardId);
-            DEBUG_SERIAL.println("CCCCCCCCC");
-            //kafkaTopic->createKafkaStream(connectionConfig);
-            vTaskDelay(500);
-            DEBUG_SERIAL.println("DDDDDDDDD");
-            kafkaTopic->writeMetaRecord(connectionConfig, mqttClient);
-            DEBUG_SERIAL.println("EEEEEEEE");
+          DEBUG_SERIAL.println("Creating Kafka topic...");
+          const String boardId{UNIQUE_ID};
+
+          kafkaTopic = KafkaTopic::create(UNIQUE_ID, boardId);
+          DEBUG_SERIAL.println("Kafka topic created");
+
+          vTaskDelay(500);
+          DEBUG_SERIAL.println("Writing meta record...");
+          kafkaTopic->writeMetaRecord(connectionConfig, mqttClient);
+          DEBUG_SERIAL.println("Meta record written");
 
             TaskHandle_t handleNtpTaskHandle = NULL;
-            xTaskCreate(handleNtpTask, "handleNtpTask", 2048, NULL, tskIDLE_PRIORITY+1, &handleNtpTaskHandle);
+            xTaskCreate(handleNtpTask, "handleNtpTask", stackBytesToWords(NTP_TASK_STACK_SIZE), NULL, tskIDLE_PRIORITY+1, &handleNtpTaskHandle);
 
-            while (true) {
+            // Wait for NTP sync with timeout
+            uint8_t ntpWaitSeconds = 0;
+            bool ntpSynced = false;
+            while (ntpWaitSeconds < NTP_MAX_WAIT_SECONDS) {
               {
                 #ifdef USE_FREE_RTOS_LOCKS
-                xSemaphoreTake(has_ntp_update_happend_yet_lock, portMAX_DELAY);
+                xSemaphoreTake(has_ntp_update_happened_yet_lock, portMAX_DELAY);
                 #else
-                std::lock_guard<std::mutex> guard(has_ntp_update_happend_yet_lock);
+                std::lock_guard<std::mutex> guard(has_ntp_update_happened_yet_lock);
                 #endif // USE_FREE_RTOS_LOCKS
-                if (has_ntp_update_happend_yet) {
-                  vTaskDelay(1000 / portTICK_PERIOD_MS);
+                if (has_ntp_update_happened_yet) {
+                  ntpSynced = true;
                   #ifdef USE_FREE_RTOS_LOCKS
-                  xSemaphoreGive(has_ntp_update_happend_yet_lock);
+                  xSemaphoreGive(has_ntp_update_happened_yet_lock);
                   #endif // USE_FREE_RTOS_LOCKS
                   break;
                 }
                 #ifdef USE_FREE_RTOS_LOCKS
-                xSemaphoreGive(has_ntp_update_happend_yet_lock);
+                xSemaphoreGive(has_ntp_update_happened_yet_lock);
                 #endif // USE_FREE_RTOS_LOCKS
               }
-              // sntp_sync_status_t status = sntp_get_sync_status();
-              // if (status == SNTP_SYNC_STATUS_RESET)
-              //   DEBUG_SERIAL.println("SNTP Reset");
-              // else if (status == SNTP_SYNC_STATUS_COMPLETED)
-              //   DEBUG_SERIAL.println("SNTP Completed");
-              // else if (status == SNTP_SYNC_STATUS_IN_PROGRESS)
-              //   DEBUG_SERIAL.println("SNTP In progress");
-              // else
-              //   assert(0);
-              DEBUG_SERIAL.println("Waiting for NTP Update");
+              DEBUG_SERIAL.printf("Waiting for NTP sync... (%d/%d sec)\n", ntpWaitSeconds, NTP_MAX_WAIT_SECONDS);
               vTaskDelay(1000 / portTICK_PERIOD_MS);
+              ntpWaitSeconds++;
             }
-            DEBUG_SERIAL.println("Proceeding after NTP Update");
+            
+            if (ntpSynced) {
+              DEBUG_SERIAL.println("NTP synchronized successfully");
+            } else {
+              DEBUG_SERIAL.println("WARNING: NTP sync timeout - proceeding with local time");
+              // Use local time as fallback - timestamps may be inaccurate
+            }
+            vTaskDelay(1000 / portTICK_PERIOD_MS);
 
             currentNetworkingStage = NetworkingStage::WriteData;
             next_expected_reading_timestamp = (((getAdjustedLocalTimeUs() + delay_len_us) / 1000000) + 1) * 1000000; // The start of the next second
-          // }
         } else {
           DEBUG_SERIAL.println("Error: Either the network SSID or the network password was not set");
-          // request->send_P(400, "text/html", formCompletionResponseHtml);
         }
         break;
 
       case NetworkingStage::WriteData:
-
-
         if (connectionConfig.networkSsid != nullptr && connectionConfig.networkPassword != nullptr) {
-          // current_timestamp = getAdjustedLocalTimeUs();
-          // if (current_timestamp > next_expected_reading_timestamp) {
-          //   DEBUG_SERIAL.println("Taking reading late!");
-          //   //digitalWrite(13, HIGH);
-          // } else {
-          //   while(current_timestamp < (next_expected_reading_timestamp - half_delay_len_us)) {
-          //     //mqttClient.loop();
-          //     //DEBUG_SERIAL.printf("%lld < %lld\n", current_timestamp, next_expected_reading_timestamp);
-          //     current_timestamp = getAdjustedLocalTimeUs();
-          //     //DEBUG_SERIAL.printf("%lld\n", end - start);
-          //   }
-          //   //digitalWrite(12, HIGH);
-          //   while(current_timestamp < next_expected_reading_timestamp) {
-          //     current_timestamp = getAdjustedLocalTimeUs();
-          //   }
-          //   //digitalWrite(12, LOW);
-          //   //digitalWrite(13, LOW);
-          // }
-          // next_expected_reading_timestamp += delay_len_us;
           imuReader.update3();
           bool isBulkReady = false;
-          // DEBUG_SERIAL.println("Attempting to read data");
-          // DEBUG_SERIAL.printf("Total heap: %u, Free heap: %u, Total PSRAM: %u, Free PSRAM: %d\n", ESP.getHeapSize(), ESP.getFreeHeap(), ESP.getPsramSize(), ESP.getFreePsram());
+
           if (imuReader.getImuData(&imuData)) {
-            // DEBUG_SERIAL.println("Read successful");
-            // DEBUG_SERIAL.println("Before");
             isBulkReady = kafkaTopic->writeDataRecord(connectionConfig, imuData, mqttClient);
-            // DEBUG_SERIAL.println("After");
           } else {
             DEBUG_SERIAL.println("Nothing to read");
           }
 
           if (isBulkReady) {
-            // DEBUG_SERIAL.println("Sending Bulk");
-            BaseType_t result = xTaskCreate(sendMessageTask, "sendMessageTask", 16384 + 2048, NULL, tskIDLE_PRIORITY+2, &sendMessageTaskHandle);
-            // BaseType_t result = xTaskCreate(sendMessageTask, "sendMessageTask", 16384 + 8192, NULL, tskIDLE_PRIORITY+2, &sendMessageTaskHandle);
-            if (result == pdPASS) {
-              DEBUG_SERIAL.println("--------------------------------------------- Created Task");
-            } else if (result == errCOULD_NOT_ALLOCATE_REQUIRED_MEMORY) {
-              DEBUG_SERIAL.println("Failed to create the send message task! Not enough heap memory!");
+            if (sendMessageTaskHandle != NULL) {
+              xTaskNotifyGive(sendMessageTaskHandle);
             } else {
-              DEBUG_SERIAL.println("Failed to create the send message task!");
+              DEBUG_SERIAL.println("Send message task handle is null");
             }
-            //DEBUG_SERIAL.println("Got signal indicating that bulk message is ready to send");
-            //sendMessageTask(NULL);
           }
         }
         break;
@@ -619,42 +479,53 @@ void handleNetworkingStagesAndImuJoinedTask(void*) {
     default:
         break;
     }
-    // digitalWrite(13, LOW);
-    // current_timestamp = getTimeNowAsUs();
-    // task_delta = (next_expected_reading_timestamp - current_timestamp);
-    // if (current_timestamp > next_expected_reading_timestamp) {
-    //   digitalWrite(13, HIGH);
-    // } else {
-    //   while(current_timestamp < (next_expected_reading_timestamp - half_delay_len_us)) {
-    //     mqttClient.loop();
-    //     current_timestamp = getTimeNowAsUs();
-    //   }
-    //   digitalWrite(12, HIGH);
-    //   while(current_timestamp < next_expected_reading_timestamp) {
-    //     current_timestamp = getTimeNowAsUs();
-    //   }
-    //   digitalWrite(12, LOW);
-    //   do {
-    //     current_timestamp = esp_timer_get_time();
-    //     task_delta = (current_timestamp - last_timestamp) / 1000;
-    //   } while (task_delta < (delay_len / 2));
-    //   digitalWrite(12, HIGH);
-    //   do {
-    //     current_timestamp = esp_timer_get_time();
-    //     task_delta = (current_timestamp - last_timestamp) / 1000;
-    //   } while (task_delta < delay_len);
-    // }
-    // digitalWrite(12, LOW);
-    // if (task_delta >= delay_len) {
-    //   // Serial.println("LAGGING!");
-    //   log_i("Lagging!\n");
-    //   vTaskDelay(0);
-    //   continue;
-    // }
-    // vTaskDelay(delay_len - task_delta);
-  }
 
-  //vTaskDelete( NULL );
+    // Handle WiFi reconnection if needed
+    if (wifiReconnectNeeded && currentNetworkingStage == NetworkingStage::WriteData) {
+      DEBUG_SERIAL.println("Attempting WiFi reconnection...");
+      wifiReconnectAttempts++;
+      
+      if (wifiReconnectAttempts > WIFI_MAX_RECONNECT_ATTEMPTS) {
+        DEBUG_SERIAL.println("Max reconnection attempts reached - restarting device");
+        vTaskDelay(1000 / portTICK_PERIOD_MS);
+        ESP.restart();
+      }
+      
+      DEBUG_SERIAL.printf("Reconnection attempt %d/%d\n", wifiReconnectAttempts, WIFI_MAX_RECONNECT_ATTEMPTS);
+      WiFi.disconnect();
+      vTaskDelay(100 / portTICK_PERIOD_MS);
+      WiFi.begin(connectionConfig.networkSsid, connectionConfig.networkPassword);
+      
+      // Wait for connection with timeout
+      int waitCount = 0;
+      while (WiFi.status() != WL_CONNECTED && waitCount < 20) {
+        vTaskDelay(500 / portTICK_PERIOD_MS);
+        waitCount++;
+        DEBUG_SERIAL.print(".");
+      }
+      DEBUG_SERIAL.println();
+      
+      if (WiFi.status() == WL_CONNECTED) {
+        DEBUG_SERIAL.println("WiFi reconnected successfully");
+        wifiReconnectNeeded = false;
+        wifiConnected = true;
+        wifiReconnectAttempts = 0;
+        
+        // Reconnect MQTT
+        IPAddress ipAddress{};
+        ipAddress.fromString(connectionConfig.natKitServerAddress);
+        mqttClient.setServer(ipAddress, 1883);
+        if (mqttClient.connect("natKit-IMU")) {
+          DEBUG_SERIAL.println("MQTT reconnected");
+        } else {
+          DEBUG_SERIAL.println("MQTT reconnection failed");
+        }
+      } else {
+        DEBUG_SERIAL.println("WiFi reconnection failed - will retry");
+        vTaskDelay(WIFI_RECONNECT_DELAY_MS / portTICK_PERIOD_MS);
+      }
+    }
+  }
 }
 
 void handleUpdateImuTask(void*) {
@@ -675,79 +546,83 @@ void handleUpdateImuTask(void*) {
 
 void WiFiEvent(WiFiEvent_t event)
 {
-   log_i( "[WiFi-event] event: %d\n", event );
+  log_i("[WiFi-event] event: %d\n", event);
   switch (event) {
-        case SYSTEM_EVENT_WIFI_READY:
-          log_i("WiFi interface ready");
-          break;
-        case SYSTEM_EVENT_SCAN_DONE:
-          log_i("Completed scan for access points");
-          break;
-        case SYSTEM_EVENT_STA_START:
-          log_i("WiFi client started");
-          break;
-        case SYSTEM_EVENT_STA_STOP:
-          log_i("WiFi clients stopped");
-          break;
+    case SYSTEM_EVENT_WIFI_READY:
+      log_i("WiFi interface ready");
+      break;
+    case SYSTEM_EVENT_SCAN_DONE:
+      log_i("Completed scan for access points");
+      break;
+    case SYSTEM_EVENT_STA_START:
+      log_i("WiFi client started");
+      break;
+    case SYSTEM_EVENT_STA_STOP:
+      log_i("WiFi clients stopped");
+      break;
     case SYSTEM_EVENT_STA_CONNECTED:
       log_i("Connected to access point");
       break;
     case SYSTEM_EVENT_STA_DISCONNECTED:
       log_i("Disconnected from WiFi access point");
+      wifiConnected = false;
+      // Only trigger reconnect if we were previously in WriteData stage
+      if (currentNetworkingStage == NetworkingStage::WriteData) {
+        wifiReconnectNeeded = true;
+        DEBUG_SERIAL.println("WiFi disconnected - reconnection needed");
+      }
       break;
-        case SYSTEM_EVENT_STA_AUTHMODE_CHANGE:
-          log_i("Authentication mode of access point has changed");
-          break;
-        case SYSTEM_EVENT_STA_GOT_IP:
-          log_i ("Obtained IP address: %s",  WiFi.localIP() );
-          break;
-        case SYSTEM_EVENT_STA_LOST_IP:
-          log_i("Lost IP address and IP address is reset to 0");
-          //      vTaskDelay( 5000 );
-          //      ESP.restart();
-          break;
-        case SYSTEM_EVENT_STA_WPS_ER_SUCCESS:
-          log_i("WiFi Protected Setup (WPS): succeeded in enrollee mode");
-          break;
-        case SYSTEM_EVENT_STA_WPS_ER_FAILED:
-          log_i("WiFi Protected Setup (WPS): failed in enrollee mode");
-          //      ESP.restart();
-          break;
-        case SYSTEM_EVENT_STA_WPS_ER_TIMEOUT:
-          log_i("WiFi Protected Setup (WPS): timeout in enrollee mode");
-          break;
-        case SYSTEM_EVENT_STA_WPS_ER_PIN:
-          log_i("WiFi Protected Setup (WPS): pin code in enrollee mode");
-          break;
-        case SYSTEM_EVENT_AP_START:
-          log_i("WiFi access point started");
-          break;
-        case SYSTEM_EVENT_AP_STOP:
-          log_i("WiFi access point  stopped");
-          //      WiFi.mode( WIFI_OFF);
-          //      esp_sleep_enable_timer_wakeup( 1000000 * 2 ); // 1 second times how many seconds wanted
-          //      esp_deep_sleep_start();
-          break;
-        case SYSTEM_EVENT_AP_STACONNECTED:
-          log_i("Client connected");
-          break;
+    case SYSTEM_EVENT_STA_AUTHMODE_CHANGE:
+      log_i("Authentication mode of access point has changed");
+      break;
+    case SYSTEM_EVENT_STA_GOT_IP:
+      log_i("Obtained IP address: %s", WiFi.localIP());
+      wifiConnected = true;
+      wifiReconnectNeeded = false;
+      wifiReconnectAttempts = 0;
+      break;
+    case SYSTEM_EVENT_STA_LOST_IP:
+      log_i("Lost IP address and IP address is reset to 0");
+      wifiConnected = false;
+      break;
+    case SYSTEM_EVENT_STA_WPS_ER_SUCCESS:
+      log_i("WiFi Protected Setup (WPS): succeeded in enrollee mode");
+      break;
+    case SYSTEM_EVENT_STA_WPS_ER_FAILED:
+      log_i("WiFi Protected Setup (WPS): failed in enrollee mode");
+      break;
+    case SYSTEM_EVENT_STA_WPS_ER_TIMEOUT:
+      log_i("WiFi Protected Setup (WPS): timeout in enrollee mode");
+      break;
+    case SYSTEM_EVENT_STA_WPS_ER_PIN:
+      log_i("WiFi Protected Setup (WPS): pin code in enrollee mode");
+      break;
+    case SYSTEM_EVENT_AP_START:
+      log_i("WiFi access point started");
+      break;
+    case SYSTEM_EVENT_AP_STOP:
+      log_i("WiFi access point stopped");
+      break;
+    case SYSTEM_EVENT_AP_STACONNECTED:
+      log_i("Client connected");
+      break;
     case SYSTEM_EVENT_AP_STADISCONNECTED:
       log_i("WiFi client disconnected");
-          break;
-        case SYSTEM_EVENT_AP_STAIPASSIGNED:
-          log_i("Assigned IP address to client");
-          break;
-        case SYSTEM_EVENT_AP_PROBEREQRECVED:
-          log_i("Received probe request");
-          break;
-        case SYSTEM_EVENT_GOT_IP6:
-          log_i("IPv6 is preferred");
-          break;
-        case SYSTEM_EVENT_ETH_GOT_IP:
-          log_i("Obtained IP address");
-          break;
+      break;
+    case SYSTEM_EVENT_AP_STAIPASSIGNED:
+      log_i("Assigned IP address to client");
+      break;
+    case SYSTEM_EVENT_AP_PROBEREQRECVED:
+      log_i("Received probe request");
+      break;
+    case SYSTEM_EVENT_GOT_IP6:
+      log_i("IPv6 is preferred");
+      break;
+    case SYSTEM_EVENT_ETH_GOT_IP:
+      log_i("Obtained IP address");
+      break;
     default:
-      log_i("UNKNOWN EVENT OCCURED");
+      log_i("Unknown WiFi event: %d", event);
       break;
   }
 }
@@ -758,16 +633,21 @@ void setup(){ //the order of the code is important and it is critical the the an
   pinMode(13, OUTPUT);
   pinMode(27, OUTPUT);
 
+  // Initialize watchdog timer
+  esp_task_wdt_init(WATCHDOG_TIMEOUT_SEC, true); // true = panic on timeout (restart)
+  esp_task_wdt_add(NULL); // Add current task (loop task) to watchdog
+  DEBUG_SERIAL.printf("Watchdog initialized with %d second timeout\n", WATCHDOG_TIMEOUT_SEC);
+
   #ifndef ENABLE_CAPTIVE_PORTAL
-  connectionConfig.networkSsid = "ssid";
-  connectionConfig.networkPassword = "password";
-  connectionConfig.natKitServerAddress = "192.168.0.1";
-  connectionConfig.natKitServerPort = "38082";
+  // Development config loaded from DevConfig.hpp (gitignored)
+  connectionConfig.networkSsid = DEV_WIFI_SSID;
+  connectionConfig.networkPassword = DEV_WIFI_PASSWORD;
+  connectionConfig.natKitServerAddress = DEV_NATKIT_SERVER_ADDRESS;
+  connectionConfig.natKitServerPort = DEV_NATKIT_SERVER_PORT;
   currentNetworkingStage = NetworkingStage::RecievedWifiCredentials;
   #endif // ENABLE_CAPTIVE_PORTAL
 
-  //digitalWrite(2, HIGH);
-  mqttClient.setBufferSize(16384);
+  mqttClient.setBufferSize(MQTT_BUFFER_SIZE);
   WiFi.onEvent(WiFiEvent);
 
   esp_efuse_mac_get_default(MAC_ADDRESS);
@@ -780,16 +660,22 @@ void setup(){ //the order of the code is important and it is critical the the an
   #if USE_SERIAL == true
   Serial.begin(115200);
   while (!Serial);
-  Serial.println("\n\nCaptive Test, V0.4.0 compiled " __DATE__ " " __TIME__ " by CD_FER"); //__DATE__ is provided by the platformio ide
-  Serial.printf("Unique ID is: %u\n", UNIQUE_ID);
+  Serial.printf("\n\nnatKit-IMU v%s (built %s %s)\n", NATKIT_IMU_VERSION_STRING, NATKIT_IMU_BUILD_DATE, NATKIT_IMU_BUILD_TIME);
+  Serial.printf("Unique ID: %llu\n", UNIQUE_ID);
   #endif
 
   #ifdef USE_FREE_RTOS_LOCKS
-  has_ntp_update_happend_yet_lock = xSemaphoreCreateMutex();
-  assert(has_ntp_update_happend_yet_lock != nullptr);
+  has_ntp_update_happened_yet_lock = xSemaphoreCreateMutex();
+  if (has_ntp_update_happened_yet_lock == nullptr) {
+    DEBUG_SERIAL.println("FATAL: Failed to create NTP update mutex");
+    while(true) { vTaskDelay(1000 / portTICK_PERIOD_MS); } // Halt - unrecoverable
+  }
 
   local_time_offset_lock = xSemaphoreCreateMutex();
-  assert(local_time_offset_lock != nullptr);
+  if (local_time_offset_lock == nullptr) {
+    DEBUG_SERIAL.println("FATAL: Failed to create time offset mutex");
+    while(true) { vTaskDelay(1000 / portTICK_PERIOD_MS); } // Halt - unrecoverable
+  }
   #endif // USE_FREE_RTOS_LOCKS
 
   #ifdef ENABLE_CAPTIVE_PORTAL
@@ -834,15 +720,8 @@ void setup(){ //the order of the code is important and it is critical the the an
 	server.on("/success.txt",[](AsyncWebServerRequest *request){request->send(200);}); //firefox captive portal call home
 	server.on("/ncsi.txt",[](AsyncWebServerRequest *request){request->redirect(localIPURL);}); //windows call home
 
-	//B Tier (uncommon)
-	// server.on("/chrome-variations/seed",[](AsyncWebServerRequest *request){request->send(200);}); //chrome captive portal call home
-	// server.on("/service/update2/json",[](AsyncWebServerRequest *request){request->send(200);}); //firefox?
-	// server.on("/chat",[](AsyncWebServerRequest *request){request->send(404);}); //No stop asking Whatsapp, there is no internet connection
-	// server.on("/startpage",[](AsyncWebServerRequest *request){request->redirect(localIPURL);});
-
-
-  //return 404 to webpage icon
-  server.on("/favicon.ico",[](AsyncWebServerRequest *request){request->send(404);}); //webpage icon
+  // Return 404 for favicon
+  server.on("/favicon.ico",[](AsyncWebServerRequest *request){request->send(404);});
 
   //Serve Basic HTML Page
   server.on("/", HTTP_ANY, [](AsyncWebServerRequest *request){
@@ -886,82 +765,43 @@ void setup(){ //the order of the code is important and it is critical the the an
 
   #ifdef ENABLE_CAPTIVE_PORTAL
   TaskHandle_t handleApRequestsTaskHandle = NULL;
-  xTaskCreate(handleApRequestsTask, "HandleApRequestsTask", 16384, NULL, tskIDLE_PRIORITY, &handleApRequestsTaskHandle);
+  xTaskCreate(handleApRequestsTask, "HandleApRequestsTask", stackBytesToWords(AP_REQUESTS_TASK_STACK_SIZE), NULL, tskIDLE_PRIORITY, &handleApRequestsTaskHandle);
   #endif // ENABLE_CAPTIVE_PORTAL
 
-  // TaskHandle_t handleNetworkingStagesTaskHandle = NULL;
-  // xTaskCreate(handleNetworkingStagesTask, "HandleNetworkingStagesTask", 16384, NULL, tskIDLE_PRIORITY+1, &handleNetworkingStagesTaskHandle);
+  BaseType_t sendTaskResult = xTaskCreate(
+    sendMessageTask,
+    "SendMessageTask",
+    stackBytesToWords(SEND_MESSAGE_TASK_STACK_SIZE),
+    NULL,
+    tskIDLE_PRIORITY + 2,
+    &sendMessageTaskHandle
+  );
+  if (sendTaskResult != pdPASS) {
+    DEBUG_SERIAL.println("FATAL: Failed to create send message task");
+    while(true) { vTaskDelay(1000 / portTICK_PERIOD_MS); }
+  }
 
-  // TaskHandle_t handleImuUpdateTaskHandle = NULL;
-  // xTaskCreate(handleImuUpdateTask, "HandleImuUpdateTask", 20384, NULL, tskIDLE_PRIORITY+2, &handleImuUpdateTaskHandle);
-
-  //TaskHandle_t handleNetworkingStagesAndImuJoinedTaskHandle = NULL;
-  //xTaskCreatePinnedToCore(handleNetworkingStagesAndImuJoinedTask, "handleNetworkingStagesAndImuJoinedTask", 20384, NULL, tskIDLE_PRIORITY+2, &handleNetworkingStagesAndImuJoinedTaskHandle, 1);
-
-  // TaskHandle_t handleNtpTaskHandle = NULL;
-  // xTaskCreate(handleNtpTask, "handleNtpTask", 2048, NULL, tskIDLE_PRIORITY+1, &handleNtpTaskHandle);
-
-
-
-  // TaskHandle_t handleUpdateImuTaskHandle = NULL;
-  // xTaskCreate(handleUpdateImuTask, "handleUpdateImuTask", 2048, NULL, tskIDLE_PRIORITY+1, &handleNtpTaskHandle);
-
+  // Start the main networking and IMU task
+  BaseType_t result = xTaskCreate(
+    handleNetworkingStagesAndImuJoinedTask,
+    "NetworkingImuTask",
+    stackBytesToWords(NETWORKING_IMU_TASK_STACK_SIZE),
+    NULL,
+    tskIDLE_PRIORITY + 1,
+    &networkingAndImuTaskHandle
+  );
+  if (result != pdPASS) {
+    DEBUG_SERIAL.println("FATAL: Failed to create networking/IMU task");
+    while(true) { vTaskDelay(1000 / portTICK_PERIOD_MS); } // Halt - unrecoverable
+  }
+  DEBUG_SERIAL.println("Networking/IMU task started");
 }
 
 void loop(){
-  //vTaskDelay(500);
-  handleNetworkingStagesAndImuJoinedTask(nullptr);
+  // Feed the watchdog - if this doesn't happen within WATCHDOG_TIMEOUT_SEC, device will restart
+  esp_task_wdt_reset();
+  
+  // The main work is done in the networkingAndImuTask FreeRTOS task
+  // This loop just needs to feed the watchdog periodically
+  vTaskDelay(100 / portTICK_PERIOD_MS);
 }
-
-// #include <WiFi.h>
-// #include <ESP32Ping.h>
-
-// #include "time.h"
-
-// unsigned long epochTime;
-
-// unsigned long getTime() {
-//   time_t now;
-//   struct tm timeinfo;
-//   if (!getLocalTime(&timeinfo)) {
-//     return 0;
-//   }
-//   time(&now);
-//   return now;
-// }
-
-// unsigned long long start, end;
-// int count = 0;
-
-// void setup() {
-//   Serial.begin(115200);
-
-//   WiFi.begin(ssid, password);
-
-//   while (WiFi.status() != WL_CONNECTED) {
-//     delay(500);
-//     Serial.println("Connecting to WiFi...");
-//   }
-
-//   Serial.println("Connected");
-
-//   while (count < 100) {
-//     start = esp_timer_get_time();
-//     bool success = Ping.ping("10.26.0.214", 1);
-//     end = esp_timer_get_time();
-//     double diff = end - start;
-
-//     if(!success){
-//       Serial.println("Ping failed");
-//       return;
-//     }
-
-//     Serial.printf("64 bytes from 10.26.0.214: icmp_seq=%i ttl=64 time=%.3f ms\n", count, Ping.averageTime());
-
-//     count += 1;
-//   }
-// }
-
-// void loop() {
-
-// }
