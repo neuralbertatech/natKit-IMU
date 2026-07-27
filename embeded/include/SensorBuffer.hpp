@@ -4,32 +4,14 @@
 #include <optional>
 #include <utility>
 
-// Minimal inline optional (no heap, no C++17). Drop-in for the .value()/
-// .has_value()/`= T{}` subset used by SensorDataPoint — replaces
-// nat::core::Optional<T>, which heap-allocated its value on every copy.
-template <typename T>
-struct InlineOptional {
-    T val{};
-    bool present = false;
-
-    InlineOptional() = default;
-    InlineOptional(const T& v) : val(v), present(true) {}
-    InlineOptional& operator=(const T& v) { val = v; present = true; return *this; }
-
-    bool has_value() const { return present; }
-    T& value() { return val; }
-    const T& value() const { return val; }
-};
-
 template <typename T>
 struct SensorDataPoint {
     uint64_t timestamp;
-    // InlineOptional stores T INLINE (no heap). The previous nat::core::Optional<T>
-    // heap-allocated its value (new T) on every copy; with SensorDataPoints copied
-    // many times per sample through 3×512-slot circular buffers, that churned/grew
-    // the heap until encodeToBytes() hit std::bad_alloc and the device rebooted.
-    // (std::optional would need C++17; the Arduino build here is gnu++11.)
-    InlineOptional<T> dataMaybe;
+    // nat::core::Optional<T> now stores T inline (no heap) — so copying a
+    // SensorDataPoint per sample no longer allocates. (Previously it wrapped a
+    // std::unique_ptr<T>, heap-allocating the value on every copy, which churned
+    // the heap until encodeToBytes() hit std::bad_alloc and rebooted the device.)
+    nat::core::Optional<T> dataMaybe;
     uint8_t calibration;
 
     SensorDataPoint()
