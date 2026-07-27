@@ -20,6 +20,10 @@
 
 #define IMU_POLLING_HZ 100
 #define IMU_DELAY_BETWEEN_POLL_US 1000
+#define IMU_HEARTBEAT_INTERVAL_MS 1000
+
+// NTP-adjusted wall-clock time in microseconds; defined in main.cpp.
+int64_t getAdjustedLocalTimeUs();
 
 char kafkaUrlBuffer[256];
 byte kafkaRecordDataBuffer[6200];
@@ -35,13 +39,18 @@ class KafkaTopic {
     String dataTopicString;
     String bulkDataTopicString;
     String metaTopicString;
+    String statusTopicString;
     // String clusterId;
     nat::core::Stream dataStream;
     nat::core::Stream metaStream;
     nat::core::Stream bulkDataStream;
+    nat::core::Stream statusStream;
 
     nat::core::NatImuBulkDataSchema bulkImuData{};
     bool bulkImuDataReadyToSend;
+    uint64_t bulkSeqNo = 0;       // monotonic per-device frame counter
+    uint64_t heartbeatSeqNo = 0;  // monotonic per-device status counter
+    uint32_t lastHeartbeatMs = 0; // millis() of the last status publish
     #ifdef USE_FREE_RTOS_LOCKS
     SemaphoreHandle_t bulkImuDataLock;
     #else
@@ -61,10 +70,12 @@ public:
       dataStream(std::string(name.c_str()), nat::core::StreamType::DATA, id, nat::core::toString(nat::core::SerializationType::Json), nat::core::NatImuDataSchema::name),
       bulkDataStream(std::string(name.c_str()), nat::core::StreamType::DATA, id, nat::core::toString(nat::core::SerializationType::Binary), nat::core::NatImuBulkDataSchema::name),
       metaStream(std::string(name.c_str()), nat::core::StreamType::META, id, nat::core::toString(nat::core::SerializationType::Json), nat::core::BasicMetaInfoSchema::name),
+      statusStream(std::string(name.c_str()), nat::core::StreamType::LOGGING_HEARTBEAT, id, nat::core::toString(nat::core::SerializationType::Json), std::string("DeviceFirmwareStatusV1")),
       bulkImuDataReadyToSend(false) {
         dataTopicString = dataStream.toTopicString().c_str();
         bulkDataTopicString = bulkDataStream.toTopicString().c_str();
         metaTopicString = metaStream.toTopicString().c_str();
+        statusTopicString = statusStream.toTopicString().c_str();
 
         #ifdef USE_FREE_RTOS_LOCKS
         bulkImuDataLock = xSemaphoreCreateMutex();
@@ -88,6 +99,17 @@ public:
     bool writeDataRecord(const ConnectionConfig& connectionConfig, const ImuData& data, PubSubClient& mqttClient);
 
     void writeBulkDataRecord(const ConnectionConfig& connectionConfig, PubSubClient& mqttClient);
+
+    // Keeps the MQTT link healthy independent of the data rate: reconnects if the
+    // broker dropped us and pumps loop() so keepalive PINGs are sent and a dead
+    // link is detected promptly. MUST be called only from the MQTT-owning task
+    // (sendMessageTask), on a fixed cadence — not just when data is published.
+    void serviceConnection(const ConnectionConfig& connectionConfig, PubSubClient& mqttClient);
+
+    // Publishes a ~1 Hz device.firmware.status.v1 heartbeat on the Heartbeat
+    // topic. Piggybacked on the data publisher, so it only fires while data is
+    // flowing (a total capture stall stops the heartbeat too).
+    void writeStatusRecord(const ConnectionConfig& connectionConfig, PubSubClient& mqttClient);
 
     static KafkaTopic* create(uint64_t topicId, const String& boardId) {
         const String name = "ESP32-" + boardId;
@@ -234,8 +256,39 @@ void KafkaTopic::writeMetaRecord(const ConnectionConfig& connectionConfig, PubSu
         // memcpy(kafkaRecordDataBuffer, bytes.get(), bytes->size());
         // esp_mqtt_client_publish(mqttClient, kafkaUrlBuffer, kafkaRecordDataBuffer, strlen(kafkaUrlBuffer), 0, false);
         mqttClient.publish(kafkaUrlBuffer, kafkaRecordDataBuffer, bytes->size() + 1);
-        
+
     }
+}
+
+void KafkaTopic::writeStatusRecord(const ConnectionConfig& connectionConfig, PubSubClient& mqttClient) {
+    if (WiFi.status() != WL_CONNECTED || !mqttClient.connected())
+        return;
+
+    char statusBuffer[512];
+    const int written = snprintf(
+        statusBuffer, sizeof(statusBuffer),
+        "{\"schema_version\":\"device.firmware.status.v1\","
+        "\"device_id\":\"%s\",\"seq_no\":%llu,\"transport_mode\":\"wireless\","
+        "\"frames_published\":%llu,\"sample_rate_hz\":%d,"
+        "\"wifi_connected\":%s,\"mqtt_connected\":%s,"
+        "\"rssi_dbm\":%d,\"uptime_ms\":%lu,\"emitted_at_us\":%lld}",
+        name.c_str(),
+        (unsigned long long)heartbeatSeqNo++,
+        (unsigned long long)bulkSeqNo,
+        IMU_POLLING_HZ,
+        (WiFi.status() == WL_CONNECTED) ? "true" : "false",
+        mqttClient.connected() ? "true" : "false",
+        (int)WiFi.RSSI(),
+        (unsigned long)millis(),
+        (long long)getAdjustedLocalTimeUs());
+
+    if (written <= 0 || written >= (int)sizeof(statusBuffer)) {
+        DEBUG_SERIAL.println("Error: status record did not fit in buffer");
+        return;
+    }
+
+    sprintf(kafkaUrlBuffer, mqttUrlTemplate.c_str(), statusTopicString.c_str());
+    mqttClient.publish(kafkaUrlBuffer, (const uint8_t*)statusBuffer, written);
 }
 
 bool KafkaTopic::writeDataRecord(const ConnectionConfig& connectionConfig, const ImuData& imuDatum, PubSubClient& mqttClient) {
@@ -298,6 +351,10 @@ bool KafkaTopic::writeDataRecord(const ConnectionConfig& connectionConfig, const
                 #endif // USE_FREE_RTOS_LOCKS
                 // DEBUG_SERIAL.println("CC");
                 bulkImuData.setData(imuDataList, IMU_POLLING_HZ);
+                // Frame envelope: deviceTsUs is the first sample's timestamp in
+                // microseconds (per-sample time is carried in milliseconds).
+                const uint64_t deviceTsUs = static_cast<uint64_t>(imuDataList[0].getTime()) * 1000ULL;
+                bulkImuData.setFrameHeader(bulkSeqNo++, deviceTsUs, IMU_POLLING_HZ);
                 // DEBUG_SERIAL.println("DD");
                 bulkImuDataReadyToSend = true;
                 #ifdef USE_FREE_RTOS_LOCKS
@@ -351,6 +408,25 @@ bool KafkaTopic::writeDataRecord(const ConnectionConfig& connectionConfig, const
     //}
 }
 
+void KafkaTopic::serviceConnection(const ConnectionConfig& connectionConfig, PubSubClient& mqttClient) {
+    if (WiFi.status() != WL_CONNECTED) {
+        return; // WiFi layer handles its own reconnect; nothing to do here.
+    }
+    if (!mqttClient.connected()) {
+        // Broker dropped us (or first connect). Attempt one non-blocking
+        // reconnect per tick; if it fails we retry on the next service call.
+        if (mqttClient.connect("natKit-IMU")) {
+            DEBUG_SERIAL.println("MQTT (re)connected");
+        } else {
+            DEBUG_SERIAL.println("MQTT reconnect pending...");
+            return;
+        }
+    }
+    // Pump the client so keepalive PINGREQs go out and a dead link is detected
+    // even when the sensor is producing no data.
+    mqttClient.loop();
+}
+
 void KafkaTopic::writeBulkDataRecord(const ConnectionConfig& connectionConfig, PubSubClient& mqttClient) {
     {
         // DEBUG_SERIAL.println("Sending Bulk Message");
@@ -400,17 +476,17 @@ void KafkaTopic::writeBulkDataRecord(const ConnectionConfig& connectionConfig, P
             //     log_i("Memory Sucessfully Allocated\n");
             // free(memory);
 
-            while (!mqttClient.connect("natKit-IMU")) {
-                if (WiFi.status() != WL_CONNECTED) {
-                    WiFi.begin(connectionConfig.networkSsid, connectionConfig.networkPassword);
-                    while (WiFi.status() != WL_CONNECTED) {
-                        //vTaskDelay(delay_len*100);
-                        DEBUG_SERIAL.println("Connecting to WiFi..");
-                    }
-                }
-                //vTaskDelay(delay_len);
+            // Connection health is maintained by serviceConnection() on this same
+            // task. If the link is down right now, leave the frame queued
+            // (bulkImuDataReadyToSend stays true) and bail — it publishes once the
+            // link is back. This replaces a blocking connect-spin that could never
+            // recover a half-open ("zombie connected") socket.
+            if (!mqttClient.connected()) {
+                #ifdef USE_FREE_RTOS_LOCKS
+                xSemaphoreGive(bulkImuDataLock);
+                #endif // USE_FREE_RTOS_LOCKS
+                return;
             }
-            // DEBUG_SERIAL.println("MQTT Client is connected");
 
             const auto bytes = bulkImuData.encodeToBytes(nat::core::SerializationType::Binary);
             // const auto bytes = bulkImuData.encodeToBytes(nat::core::SerializationType::Csv);
@@ -439,6 +515,14 @@ void KafkaTopic::writeBulkDataRecord(const ConnectionConfig& connectionConfig, P
             if (mqttClient.publish(kafkaUrlBuffer, kafkaRecordDataBuffer, bytes->size())) {
                 DEBUG_SERIAL.printf("-------------------------------- Sent message to %s --------------------------------\n", kafkaUrlBuffer);
                 bulkImuDataReadyToSend = false;
+
+                // Emit a heartbeat at most once per interval, on the same task
+                // that just published data (so PubSubClient stays single-writer).
+                const uint32_t nowMs = millis();
+                if (nowMs - lastHeartbeatMs >= IMU_HEARTBEAT_INTERVAL_MS) {
+                    lastHeartbeatMs = nowMs;
+                    writeStatusRecord(connectionConfig, mqttClient);
+                }
             } else {
                 DEBUG_SERIAL.printf("-------------------------------- ERROR --------------------------------\n");
                 //digitalWrite(13, HIGH);

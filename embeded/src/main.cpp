@@ -214,8 +214,16 @@ void handleApRequestsTask(void*) {
 
 void sendMessageTask(void*) {
   while (true) {
-    ulTaskNotifyTake(pdTRUE, portMAX_DELAY);
-    if (kafkaTopic != nullptr) {
+    // Wake on a "bulk ready" notification, or at least every 200ms so the MQTT
+    // link is serviced (keepalive PINGs + dropped-link detection/reconnect) even
+    // when the sensor produces no data for a while. All MQTT I/O stays on this
+    // one task because PubSubClient is not thread-safe.
+    ulTaskNotifyTake(pdTRUE, pdMS_TO_TICKS(200));
+    // Only own MQTT once the other task has finished the initial connect + meta
+    // publish (WriteData stage). Before that, mqttClient belongs to the
+    // networking-stage task and touching it here would race.
+    if (kafkaTopic != nullptr && currentNetworkingStage == NetworkingStage::WriteData) {
+      kafkaTopic->serviceConnection(connectionConfig, mqttClient);
       kafkaTopic->writeBulkDataRecord(connectionConfig, mqttClient);
     }
   }
@@ -510,16 +518,9 @@ void handleNetworkingStagesAndImuJoinedTask(void*) {
         wifiReconnectNeeded = false;
         wifiConnected = true;
         wifiReconnectAttempts = 0;
-        
-        // Reconnect MQTT
-        IPAddress ipAddress{};
-        ipAddress.fromString(connectionConfig.natKitServerAddress);
-        mqttClient.setServer(ipAddress, 1883);
-        if (mqttClient.connect("natKit-IMU")) {
-          DEBUG_SERIAL.println("MQTT reconnected");
-        } else {
-          DEBUG_SERIAL.println("MQTT reconnection failed");
-        }
+        // MQTT reconnection is handled by KafkaTopic::serviceConnection() on the
+        // sender task (single MQTT owner) — don't touch mqttClient from this task
+        // or it races the sender's publish/loop.
       } else {
         DEBUG_SERIAL.println("WiFi reconnection failed - will retry");
         vTaskDelay(WIFI_RECONNECT_DELAY_MS / portTICK_PERIOD_MS);
