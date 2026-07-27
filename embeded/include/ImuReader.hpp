@@ -365,7 +365,6 @@
 #include <Arduino.h>
 #include <array>
 
-#include <Adafruit_SensorLab.h>
 #include <Arduino.h>
 #include <Adafruit_BNO08x.h>
 #include <SPI.h>
@@ -581,8 +580,6 @@ class ImuReader {
     Bno08xDevice bno08x_device{};
 
     sh2_SensorValue_t sensorValue;
-
-    Adafruit_SensorLab sensorLab;
 
     // TODO Add filter
     //ImuFilter selectedFilter;

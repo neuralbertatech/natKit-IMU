@@ -6,7 +6,6 @@
 //#include <ArduinoJson.h>
 #include <HTTPClient.h>
 #include <ImuData.hpp>
-#include <MQTT.h>
 #include <libnatkit-core.hpp>
 #include <PubSubClient.h>
 // #include "mqtt_client.h"

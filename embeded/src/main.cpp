@@ -36,7 +36,6 @@
 #include <ImuData.hpp>
 #include <ImuReader.hpp>
 #include <libnatkit-core.hpp>
-#include <MQTT.h>
 #include <Time.hpp>
 #include <esp_timer.h>
 #include <PubSubClient.h>

@@ -18,7 +18,6 @@
 #define NAT_BNO08X_BUFFER_SIZE 128
 
 #else
-#include <Adafruit_SensorLab.h>
 #include <Adafruit_BNO08x.h>
 
 // Set the pins needed for SPI mode on the BNO08x chip
@@ -148,7 +147,6 @@ class Bno08xDevice {
 #else
     SPIClass spiClass{};
     Adafruit_BNO08x bno08x{BNO08X_RESET};
-    Adafruit_SensorLab sensorLab;
     sh2_SensorValue_t sensorValue;
 #endif // NAT_SIMULATE_BNO08X
 
