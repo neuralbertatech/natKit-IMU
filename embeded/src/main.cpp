@@ -387,18 +387,26 @@ void handleNetworkingStagesAndImuJoinedTask(void*) {
 
           // Connect to MQTT with retry limit
           uint8_t mqttRetries = 0;
+          bool mqttConnectRetryExhausted = false;
           while (!mqttClient.connect("natKit-IMU")) {
             mqttRetries++;
             if (mqttRetries >= MQTT_MAX_CONNECT_RETRIES) {
-              DEBUG_SERIAL.println("MQTT connection failed: max retries exceeded");
-              currentNetworkingStage = NetworkingStage::Disconnected;
+              // Don't strand the device (the old code went to a dead Disconnected
+              // state, needing a manual reset if the broker was down at boot).
+              // Back off and re-run the whole WiFi+MQTT bring-up from the top;
+              // nothing has been allocated yet (kafkaTopic is created only after a
+              // successful connect below), so retrying forever is safe.
+              DEBUG_SERIAL.println("MQTT connect failed after max retries; backing off and retrying bring-up...");
+              vTaskDelay((MQTT_CONNECT_RETRY_DELAY_MS * 4) / portTICK_PERIOD_MS);
+              currentNetworkingStage = NetworkingStage::RecievedWifiCredentials;
+              mqttConnectRetryExhausted = true;
               break;
             }
             DEBUG_SERIAL.printf("Connecting to MQTT... (attempt %d/%d)\n", mqttRetries, MQTT_MAX_CONNECT_RETRIES);
             vTaskDelay(MQTT_CONNECT_RETRY_DELAY_MS / portTICK_PERIOD_MS);
           }
-          if (currentNetworkingStage == NetworkingStage::Disconnected) {
-            break;
+          if (mqttConnectRetryExhausted) {
+            break; // re-enter RecievedWifiCredentials next loop and try again
           }
 
           static std::string ntpServerAddressString = connectionConfig.natKitServerAddress;
