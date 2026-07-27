@@ -67,8 +67,8 @@ public:
     KafkaTopic(uint64_t id, const String& name)
       : name(name), meta(name.c_str()),
       dataStream(std::string(name.c_str()), nat::core::StreamType::DATA, id, nat::core::toString(nat::core::SerializationType::Json), nat::core::NatImuDataSchema::name),
-      bulkDataStream(std::string(name.c_str()), nat::core::StreamType::DATA, id, nat::core::toString(nat::core::SerializationType::Binary), nat::core::NatImuBulkDataSchema::name),
       metaStream(std::string(name.c_str()), nat::core::StreamType::META, id, nat::core::toString(nat::core::SerializationType::Json), nat::core::BasicMetaInfoSchema::name),
+      bulkDataStream(std::string(name.c_str()), nat::core::StreamType::DATA, id, nat::core::toString(nat::core::SerializationType::Binary), nat::core::NatImuBulkDataSchema::name),
       statusStream(std::string(name.c_str()), nat::core::StreamType::LOGGING_HEARTBEAT, id, nat::core::toString(nat::core::SerializationType::Json), std::string("DeviceFirmwareStatusV1")),
       bulkImuDataReadyToSend(false) {
         dataTopicString = dataStream.toTopicString().c_str();

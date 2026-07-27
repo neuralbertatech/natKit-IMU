@@ -815,7 +815,7 @@ public:
       bool was_successful;
       std::string error_maybe = bno08x_device.start(was_successful);
       if (!was_successful) {
-        Serial.printf("Failed to start the BNO08X chip because: %s\n", error_maybe);
+        Serial.printf("Failed to start the BNO08X chip because: %s\n", error_maybe.c_str());
         return;
       }
       Serial.println("BNO08X Device Started");
@@ -834,13 +834,13 @@ public:
           if (loopIteration % 1000 == 0) {
             Serial.printf("Late Counts");
             if (accelerometerRead)
-              DEBUG_SERIAL.printf(", Accel: %d/%d (%d us)", lateAcceleromerterCount, accelerometerReads, largestAccelGap);
+              DEBUG_SERIAL.printf(", Accel: %llu/%llu (%llu us)", (unsigned long long)lateAcceleromerterCount, (unsigned long long)accelerometerReads, (unsigned long long)largestAccelGap);
             if (gyroRead)
-              DEBUG_SERIAL.printf(", Gyro: %d/%d (%d us)", lateGyroCount, gyroReads, largestGyroGap);
+              DEBUG_SERIAL.printf(", Gyro: %llu/%llu (%llu us)", (unsigned long long)lateGyroCount, (unsigned long long)gyroReads, (unsigned long long)largestGyroGap);
             if (magnometerRead)
-              DEBUG_SERIAL.printf(", Magno: %d/%d (%d us)", lateMagnetometerCount, magnetometerReads, largestMagnoGap);
+              DEBUG_SERIAL.printf(", Magno: %llu/%llu (%llu us)", (unsigned long long)lateMagnetometerCount, (unsigned long long)magnetometerReads, (unsigned long long)largestMagnoGap);
             if (rotationRead)
-              DEBUG_SERIAL.printf(", Rotation: %d/%d (%d us)", lateRotationCount, rotationReads, largestRotationGap);
+              DEBUG_SERIAL.printf(", Rotation: %llu/%llu (%llu us)", (unsigned long long)lateRotationCount, (unsigned long long)rotationReads, (unsigned long long)largestRotationGap);
             DEBUG_SERIAL.printf("\n");
             lateAcceleromerterCount = 0;
             lateGyroCount = 0;

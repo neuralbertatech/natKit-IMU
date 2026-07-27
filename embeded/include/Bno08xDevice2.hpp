@@ -13,7 +13,7 @@
 #ifdef NAT_USE_FREE_RTOS_THREADS
 #else
 #include <thread>
-#endif // NAT_USE_FREE_RTOS_THREADS\
+#endif // NAT_USE_FREE_RTOS_THREADS
 
 #define NAT_BNO08X_BUFFER_SIZE 128
 
