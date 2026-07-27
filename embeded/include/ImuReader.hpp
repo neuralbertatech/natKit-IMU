@@ -397,6 +397,13 @@
 #define ONBOARD_NEOPIXEL_NUM_PIXELS 1
 #define ONBOARD_NEOPIXEL_BRIGHTNESS 24
 
+// Status NeoPixels DISABLED: Adafruit_NeoPixel::show() re-installs the ESP32 RMT
+// driver on every call and leaks channels, so after ~11 calls rmt_driver_install
+// asserts (xQueueGenericSend null queue) and the device reboots (~14 s loop). The
+// cosmetic calibration/source LEDs are not worth crashing the stream. Re-enable in
+// Phase 1 with a fixed RMT path (install the driver once, don't show() per poll).
+#define IMU_STATUS_LED_ENABLED 0
+
 // // For SPI mode, we need a CS pin
 // #define BNO08X_CS 14
 // #define BNO08X_INT 39
@@ -724,6 +731,9 @@ class ImuReader {
     }
 
     void updateCalibrationLed() {
+#if !IMU_STATUS_LED_ENABLED
+        return; // LEDs disabled — see IMU_STATUS_LED_ENABLED (RMT crash).
+#endif
         if (!statusPixelInitialized) {
             return;
         }
@@ -737,6 +747,7 @@ class ImuReader {
     }
 
     void initializeCalibrationLed() {
+#if IMU_STATUS_LED_ENABLED
         pinMode(ONBOARD_NEOPIXEL_POWER_PIN, OUTPUT);
         digitalWrite(ONBOARD_NEOPIXEL_POWER_PIN, HIGH);
 
@@ -750,6 +761,7 @@ class ImuReader {
 
         statusPixelInitialized = true;
         updateCalibrationLed();
+#endif
     }
 
 public:
