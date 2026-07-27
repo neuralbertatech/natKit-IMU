@@ -32,6 +32,7 @@
 #endif // ENABLE_CAPTIVE_PORTAL
 
 #include <esp_random.h>
+#include <esp_mac.h>       // esp_efuse_mac_get_default moved here in IDF 5.x
 #include <esp_task_wdt.h>
 #include <ImuData.hpp>
 #include <ImuReader.hpp>
@@ -554,24 +555,15 @@ void handleUpdateImuTask(void*) {
 
 void WiFiEvent(WiFiEvent_t event)
 {
-  log_i("[WiFi-event] event: %d\n", event);
+  log_i("[WiFi-event] event: %d", event);
   switch (event) {
-    case SYSTEM_EVENT_WIFI_READY:
-      log_i("WiFi interface ready");
+    case ARDUINO_EVENT_WIFI_STA_GOT_IP:
+      log_i("Obtained IP address");
+      wifiConnected = true;
+      wifiReconnectNeeded = false;
+      wifiReconnectAttempts = 0;
       break;
-    case SYSTEM_EVENT_SCAN_DONE:
-      log_i("Completed scan for access points");
-      break;
-    case SYSTEM_EVENT_STA_START:
-      log_i("WiFi client started");
-      break;
-    case SYSTEM_EVENT_STA_STOP:
-      log_i("WiFi clients stopped");
-      break;
-    case SYSTEM_EVENT_STA_CONNECTED:
-      log_i("Connected to access point");
-      break;
-    case SYSTEM_EVENT_STA_DISCONNECTED:
+    case ARDUINO_EVENT_WIFI_STA_DISCONNECTED:
       log_i("Disconnected from WiFi access point");
       wifiConnected = false;
       // Only trigger reconnect if we were previously in WriteData stage
@@ -580,57 +572,13 @@ void WiFiEvent(WiFiEvent_t event)
         DEBUG_SERIAL.println("WiFi disconnected - reconnection needed");
       }
       break;
-    case SYSTEM_EVENT_STA_AUTHMODE_CHANGE:
-      log_i("Authentication mode of access point has changed");
-      break;
-    case SYSTEM_EVENT_STA_GOT_IP:
-      log_i("Obtained IP address: %s", WiFi.localIP());
-      wifiConnected = true;
-      wifiReconnectNeeded = false;
-      wifiReconnectAttempts = 0;
-      break;
-    case SYSTEM_EVENT_STA_LOST_IP:
-      log_i("Lost IP address and IP address is reset to 0");
+    case ARDUINO_EVENT_WIFI_STA_LOST_IP:
+      log_i("Lost IP address");
       wifiConnected = false;
       break;
-    case SYSTEM_EVENT_STA_WPS_ER_SUCCESS:
-      log_i("WiFi Protected Setup (WPS): succeeded in enrollee mode");
-      break;
-    case SYSTEM_EVENT_STA_WPS_ER_FAILED:
-      log_i("WiFi Protected Setup (WPS): failed in enrollee mode");
-      break;
-    case SYSTEM_EVENT_STA_WPS_ER_TIMEOUT:
-      log_i("WiFi Protected Setup (WPS): timeout in enrollee mode");
-      break;
-    case SYSTEM_EVENT_STA_WPS_ER_PIN:
-      log_i("WiFi Protected Setup (WPS): pin code in enrollee mode");
-      break;
-    case SYSTEM_EVENT_AP_START:
-      log_i("WiFi access point started");
-      break;
-    case SYSTEM_EVENT_AP_STOP:
-      log_i("WiFi access point stopped");
-      break;
-    case SYSTEM_EVENT_AP_STACONNECTED:
-      log_i("Client connected");
-      break;
-    case SYSTEM_EVENT_AP_STADISCONNECTED:
-      log_i("WiFi client disconnected");
-      break;
-    case SYSTEM_EVENT_AP_STAIPASSIGNED:
-      log_i("Assigned IP address to client");
-      break;
-    case SYSTEM_EVENT_AP_PROBEREQRECVED:
-      log_i("Received probe request");
-      break;
-    case SYSTEM_EVENT_GOT_IP6:
-      log_i("IPv6 is preferred");
-      break;
-    case SYSTEM_EVENT_ETH_GOT_IP:
-      log_i("Obtained IP address");
-      break;
     default:
-      log_i("Unknown WiFi event: %d", event);
+      // arduino-esp32 3.x renamed the WiFi-event enum to ARDUINO_EVENT_*; we only
+      // act on the STA connectivity events above, so ignore the rest.
       break;
   }
 }
@@ -641,8 +589,14 @@ void setup(){ //the order of the code is important and it is critical the the an
   pinMode(13, OUTPUT);
   pinMode(27, OUTPUT);
 
-  // Initialize watchdog timer
-  esp_task_wdt_init(WATCHDOG_TIMEOUT_SEC, true); // true = panic on timeout (restart)
+  // Initialize watchdog timer. arduino-esp32 3.x already inits the Task WDT and
+  // IDF 5.x takes a config struct (not the old (timeout, panic) signature), so
+  // reconfigure it, then subscribe this task.
+  esp_task_wdt_config_t twdtConfig = {};
+  twdtConfig.timeout_ms = WATCHDOG_TIMEOUT_SEC * 1000;
+  twdtConfig.idle_core_mask = 0;
+  twdtConfig.trigger_panic = true;
+  esp_task_wdt_reconfigure(&twdtConfig);
   esp_task_wdt_add(NULL); // Add current task (loop task) to watchdog
   DEBUG_SERIAL.printf("Watchdog initialized with %d second timeout\n", WATCHDOG_TIMEOUT_SEC);
 
