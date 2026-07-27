@@ -17,7 +17,18 @@
 #include <mutex>
 #endif
 
-#define IMU_POLLING_HZ 100
+// Wire-frame packaging. Modelled on the natVR EMG firmware, which flushes a small
+// fixed-size frame the instant it fills (50 samples/frame → ~20 fps) and drains it
+// with a notify-driven publish, so the live stream is smooth rather than bursty.
+// The old 100-sample batch only produced ~2.6 frames/s (a ~5 KB burst every
+// ~380 ms), which read as choppy in the viewer. The BNO08x merged accel/gyro/
+// rotation stream runs ~250 Hz, so 10 samples/frame ≈ 25 fps of small (~0.5 KB)
+// frames. This is the frame batch size ONLY — decoupled from the declared rate.
+#define IMU_SAMPLES_PER_FRAME 10
+// Declared sample rate advertised in the frame header + heartbeat (informational;
+// each sample also carries its own timestamp, which is the source of truth for the
+// viewer's time axis).
+#define IMU_SAMPLE_RATE_HZ 100
 #define IMU_DELAY_BETWEEN_POLL_US 1000
 #define IMU_HEARTBEAT_INTERVAL_MS 1000
 
@@ -29,7 +40,7 @@ byte kafkaRecordDataBuffer[6200];
 //char mqttBuffer[16384];
 uint32_t indexes[10];
 uint32_t currentIndex = 0;
-nat::core::NatImuDataSchema imuDataList[IMU_POLLING_HZ];
+nat::core::NatImuDataSchema imuDataList[IMU_SAMPLES_PER_FRAME];
 uint32_t currentImuDataIndex = 0;
 
 class KafkaTopic {
@@ -274,7 +285,7 @@ void KafkaTopic::writeStatusRecord(const ConnectionConfig& connectionConfig, Pub
         name.c_str(),
         (unsigned long long)heartbeatSeqNo++,
         (unsigned long long)bulkSeqNo,
-        IMU_POLLING_HZ,
+        IMU_SAMPLE_RATE_HZ,
         (WiFi.status() == WL_CONNECTED) ? "true" : "false",
         mqttClient.connected() ? "true" : "false",
         (int)WiFi.RSSI(),
@@ -337,7 +348,7 @@ bool KafkaTopic::writeDataRecord(const ConnectionConfig& connectionConfig, const
 
         nat::core::NatImuDataSchema data{imuDatum.timestamp, imuDatum.accuracies, imuDatum.has_data, imuDatum.data, 10};
         imuDataList[currentImuDataIndex++] = data;
-        if (currentImuDataIndex == IMU_POLLING_HZ) {
+        if (currentImuDataIndex == IMU_SAMPLES_PER_FRAME) {
             DEBUG_SERIAL.println("Bulk Message Is Ready to Send");
             currentImuDataIndex = 0;
             // DEBUG_SERIAL.println("AA");
@@ -349,11 +360,11 @@ bool KafkaTopic::writeDataRecord(const ConnectionConfig& connectionConfig, const
                 std::lock_guard<std::mutex> guard(bulkImuDataLock);
                 #endif // USE_FREE_RTOS_LOCKS
                 // DEBUG_SERIAL.println("CC");
-                bulkImuData.setData(imuDataList, IMU_POLLING_HZ);
+                bulkImuData.setData(imuDataList, IMU_SAMPLES_PER_FRAME);
                 // Frame envelope: deviceTsUs is the first sample's timestamp in
                 // microseconds (per-sample time is carried in milliseconds).
                 const uint64_t deviceTsUs = static_cast<uint64_t>(imuDataList[0].getTime()) * 1000ULL;
-                bulkImuData.setFrameHeader(bulkSeqNo++, deviceTsUs, IMU_POLLING_HZ);
+                bulkImuData.setFrameHeader(bulkSeqNo++, deviceTsUs, IMU_SAMPLE_RATE_HZ);
                 // DEBUG_SERIAL.println("DD");
                 bulkImuDataReadyToSend = true;
                 #ifdef USE_FREE_RTOS_LOCKS
