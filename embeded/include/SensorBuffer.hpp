@@ -4,10 +4,32 @@
 #include <optional>
 #include <utility>
 
+// Minimal inline optional (no heap, no C++17). Drop-in for the .value()/
+// .has_value()/`= T{}` subset used by SensorDataPoint — replaces
+// nat::core::Optional<T>, which heap-allocated its value on every copy.
+template <typename T>
+struct InlineOptional {
+    T val{};
+    bool present = false;
+
+    InlineOptional() = default;
+    InlineOptional(const T& v) : val(v), present(true) {}
+    InlineOptional& operator=(const T& v) { val = v; present = true; return *this; }
+
+    bool has_value() const { return present; }
+    T& value() { return val; }
+    const T& value() const { return val; }
+};
+
 template <typename T>
 struct SensorDataPoint {
     uint64_t timestamp;
-    nat::core::Optional<T> dataMaybe;
+    // InlineOptional stores T INLINE (no heap). The previous nat::core::Optional<T>
+    // heap-allocated its value (new T) on every copy; with SensorDataPoints copied
+    // many times per sample through 3×512-slot circular buffers, that churned/grew
+    // the heap until encodeToBytes() hit std::bad_alloc and the device rebooted.
+    // (std::optional would need C++17; the Arduino build here is gnu++11.)
+    InlineOptional<T> dataMaybe;
     uint8_t calibration;
 
     SensorDataPoint()
@@ -20,7 +42,11 @@ struct SensorDataPoint {
 // @ThreadSafe iff there is only a single reader. Multiple readers on seperate threads will not work as expected
 template <typename T>
 class SensorBuffer {
-    CircularBuffer<SensorDataPoint<T>> buffer;
+    // 32 slots is ample: producer (update3) and consumer (getImuData) run in the
+    // same task each loop, so backlog stays ~1-2. The default 512 × 3 buffers ×
+    // inline SensorDataPoint would waste ~40 KB of .bss (and starved static-init
+    // heap → bad_alloc at boot).
+    CircularBuffer<SensorDataPoint<T>, 32> buffer;
     std::unique_ptr<std::pair<SensorDataPoint<T>, uint64_t>> previous_data_point_maybe;
     uint64_t expected_delay;
     uint64_t max_delay;
