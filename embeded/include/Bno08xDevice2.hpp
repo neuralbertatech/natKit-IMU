@@ -147,7 +147,10 @@ class Bno08xDevice {
 #else
     SPIClass spiClass{};
     Adafruit_BNO08x bno08x{BNO08X_RESET};
-    sh2_SensorValue_t sensorValue;
+    // Zeroed: getSensorEvent() decides "no new event" by checking timestamp == 0
+    // AND sensorId != SH2_GYRO_INTEGRATED_RV, so an uninitialised sensorId that
+    // happened to equal SH2_GYRO_INTEGRATED_RV would report a garbage first event.
+    sh2_SensorValue_t sensorValue{};
 #endif // NAT_SIMULATE_BNO08X
 
     std::string setup(bool& was_successful);
@@ -535,6 +538,26 @@ std::string Bno08xDevice::setup(bool& was_successful) {
 
     std::string error_msg = "";
 
+    // Adafruit_BNO08x keeps a single file-static sh2_SensorValue_t* that its SH2
+    // sensor callback writes through, and it is NULL until the first
+    // getSensorEvent() call assigns it. Every sh2 op (enableReport,
+    // sh2_setCalConfig, ...) pumps SHTP while waiting for its reply, so as soon as
+    // ONE report is enabled a queued sensor event can be delivered mid-op — the
+    // callback then writes through that NULL and the chip panics with
+    // StoreProhibited at address 0 inside sh2_decodeSensorEvent.
+    //
+    // Priming it here points that static at our long-lived member before anything
+    // can arrive, which closes the window for every op below. &sensorValue must
+    // outlive the library's use of it, hence a member and not a local.
+    // The call returns false (nothing is enabled yet); we only want the side effect.
+    (void)bno08x.getSensorEvent(&sensorValue);
+
+    // Configure calibration BEFORE enabling any report, so these ops pump SHTP
+    // while the chip is still silent. Ordering is belt-and-braces given the priming
+    // above, but it keeps the quiet window as small as possible.
+    (void)sh2_setCalConfig(SH2_CAL_ACCEL | SH2_CAL_GYRO | SH2_CAL_MAG);
+    (void)sh2_setDcdAutoSave(true);
+
     #ifdef NAT_BNO08X_ENABLE_ACCELEROMETER
     if (!bno08x.enableReport(SH2_ACCELEROMETER, NAT_BNO08X_DELAY_BETWEEN_SAMPLES_US)) {
         error_msg.append("Could not enable accelerometer\n");
@@ -591,9 +614,8 @@ std::string Bno08xDevice::setup(bool& was_successful) {
     }
     #endif // NAT_BNO08X_ENABLE_GEOMAGNETIC_ROTATION_VECTOR
 
-    // Best-effort dynamic calibration and persistence setup.
-    (void)sh2_setCalConfig(SH2_CAL_ACCEL | SH2_CAL_GYRO | SH2_CAL_MAG);
-    (void)sh2_setDcdAutoSave(true);
+    // (Calibration + DCD auto-save are configured at the top of setup(), before any
+    // report is enabled -- see the comment there.)
 
     return error_msg;
 }
