@@ -534,6 +534,54 @@ std::string Bno08xDevice::setup(bool& was_successful) {
 
     std::string error_msg = "";
 
+    // Calibration config must be the FIRST hub command after begin_SPI. Measured
+    // on hardware: asked at any later point -- after the priming getSensorEvent()
+    // below, or after the enableReport calls -- the hub rejects it with
+    // SH2_ERR_HUB (-5). It sat after the reports from Feb 2026 with its return
+    // value discarded, so it had been failing silently ever since.
+    //
+    // Note the hub still reports back 0x05 (accel|mag) rather than the 0x07 asked
+    // for: it drops SH2_CAL_GYRO. So a successful call and a failed one leave the
+    // same configuration, which is why fixing this did NOT by itself change
+    // reported accuracy.
+    //
+    // Dynamic calibration for accel/gyro/mag, plus periodic saving of the
+    // calibration data. These return codes are CHECKED and logged: discarding
+    // them meant a silent failure here looked exactly like a sensor that would
+    // not calibrate, with nothing on the console to say why.
+    const uint8_t desired_cal =
+        SH2_CAL_ACCEL | SH2_CAL_GYRO | SH2_CAL_MAG;
+    const int cal_config_status = sh2_setCalConfig(desired_cal);
+    if (cal_config_status != SH2_OK) {
+        Serial.printf(
+            "BNO08X: sh2_setCalConfig(0x%02x) FAILED with %d — dynamic "
+            "calibration is not enabled, so accuracy will stay Unreliable.\n",
+            desired_cal, cal_config_status);
+        error_msg.append("Failed to enable dynamic calibration\n");
+    }
+    const int dcd_status = sh2_setDcdAutoSave(true);
+    if (dcd_status != SH2_OK) {
+        Serial.printf(
+            "BNO08X: sh2_setDcdAutoSave(true) FAILED with %d — calibration "
+            "will not persist across power cycles.\n",
+            dcd_status);
+    }
+
+    // Read back what the chip actually has enabled, rather than trusting that the
+    // write took.
+    uint8_t actual_cal = 0;
+    const int read_back = sh2_getCalConfig(&actual_cal);
+    if (read_back == SH2_OK) {
+        Serial.printf(
+            "BNO08X: dynamic calibration enabled = 0x%02x (accel=%d gyro=%d "
+            "mag=%d)\n",
+            actual_cal, (actual_cal & SH2_CAL_ACCEL) ? 1 : 0,
+            (actual_cal & SH2_CAL_GYRO) ? 1 : 0,
+            (actual_cal & SH2_CAL_MAG) ? 1 : 0);
+    } else {
+        Serial.printf("BNO08X: sh2_getCalConfig failed with %d\n", read_back);
+    }
+
     // Adafruit_BNO08x keeps a single file-static sh2_SensorValue_t* that its SH2
     // sensor callback writes through, and it is NULL until the first
     // getSensorEvent() call assigns it. Every sh2 op (enableReport,
@@ -546,13 +594,14 @@ std::string Bno08xDevice::setup(bool& was_successful) {
     // can arrive, which closes the window for every op below. &sensorValue must
     // outlive the library's use of it, hence a member and not a local.
     // The call returns false (nothing is enabled yet); we only want the side effect.
+    //
+    // NOTE: this priming is what makes the ordering below safe. An earlier version
+    // of this fix ALSO moved the calibration setup ahead of the enableReport calls
+    // "for good measure" -- but the hub rejects sh2_setCalConfig that early with
+    // SH2_ERR_HUB (-5), which silently left gyro dynamic calibration disabled and
+    // pinned reported accuracy at Unreliable. Calibration is configured at the END
+    // of setup, where the hub accepts it.
     (void)bno08x.getSensorEvent(&sensorValue);
-
-    // Configure calibration BEFORE enabling any report, so these ops pump SHTP
-    // while the chip is still silent. Ordering is belt-and-braces given the priming
-    // above, but it keeps the quiet window as small as possible.
-    (void)sh2_setCalConfig(SH2_CAL_ACCEL | SH2_CAL_GYRO | SH2_CAL_MAG);
-    (void)sh2_setDcdAutoSave(true);
 
     #ifdef NAT_BNO08X_ENABLE_ACCELEROMETER
     if (!bno08x.enableReport(SH2_ACCELEROMETER, NAT_BNO08X_DELAY_BETWEEN_SAMPLES_US)) {
@@ -609,9 +658,6 @@ std::string Bno08xDevice::setup(bool& was_successful) {
         was_successful = false;
     }
     #endif // NAT_BNO08X_ENABLE_GEOMAGNETIC_ROTATION_VECTOR
-
-    // (Calibration + DCD auto-save are configured at the top of setup(), before any
-    // report is enabled -- see the comment there.)
 
     return error_msg;
 }
