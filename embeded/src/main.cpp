@@ -6,6 +6,7 @@
 #include <freertos/semphr.h>
 
 #include <ConnectionConfig.hpp>
+#include <BoardConfig.hpp>
 #include <macros.hpp>
 #include <kafkaTopic.hpp>
 #include <version.hpp>
@@ -342,12 +343,7 @@ void handleNtpTask(void*) {
   // NTP.settimeSyncThreshold (3000);
   NTP.begin (ntpServer);
 
-  // sntp_setoperatingmode(SNTP_OPMODE_POLL);
-  // sntp_setservername(0, ntpServer);
-  // sntp_set_sync_interval(10*1000); // 10s
-  // printf("sntp_get_sync_interval %u\n",sntp_get_sync_interval());
-  // sntp_set_time_sync_notification_cb(ntpSyncNotification);
-  // sntp_init();
+
   DEBUG_SERIAL.printf("NTP Was setup using %s\n", ntpServer);
 
   vTaskDelete( NULL );
@@ -379,7 +375,7 @@ void handleNetworkingStagesAndImuJoinedTask(void*) {
           IPAddress ipAddress{};
           ipAddress.fromString(connectionConfig.natKitServerAddress);
           mqttClient.setClient(wifiClient);
-          mqttClient.setServer(ipAddress, 1883);
+          mqttClient.setServer(ipAddress, NATKIT_MQTT_PORT);
           if (!mqttClient.setBufferSize(MQTT_CONNECT_BUFFER_SIZE)) {
             DEBUG_SERIAL.println("Failed to set MQTT buffer size");
             currentNetworkingStage = NetworkingStage::Disconnected;

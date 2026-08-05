@@ -1,365 +1,6 @@
 #pragma once
 
-// #include <array>
-
-// #include <Adafruit_SensorLab.h>
-// #include <Arduino.h>
-// #include <Adafruit_BNO08x.h>
-// #include <SPI.h>
-
-// #include <ImuData.hpp>
-// #include <macros.hpp>
-// #include <Time.hpp>
-
-// // For SPI mode, we need a CS pin
-// #define BNO08X_CS 15
-// #define BNO08X_INT 32
-
-// // For SPI mode, we also need a RESET
-// #define BNO08X_RESET 14
-
-// #define BNO08X_SCK 5
-// #define BNO08X_MISO 21
-// #define BNO08X_MOSI 19
-
-// struct euler_t {
-//   float yaw;
-//   float pitch;
-//   float roll;
-// } ypr;
-
-
-
-
-// //#define FAST_MODE
-
-// #ifdef FAST_MODE
-//   // Top frequency is reported to be 1000Hz (but freq is somewhat variable)
-//   sh2_SensorId_t reportType = SH2_ROTATION_VECTOR;
-// //   sh2_SensorId_t reportType = SH2_GYRO_INTEGRATED_RV;
-//   long reportIntervalUs = 2000;
-// #else
-//   // Top frequency is about 250Hz but this report is more accurate
-//   //sh2_SensorId_t reportType = SH2_ARVR_STABILIZED_RV;
-//   sh2_SensorId_t reportType = SH2_ROTATION_VECTOR;
-//   long reportIntervalUs = 10000;
-// //   long reportIntervalUs = 10000;
-// #endif
-
-
-// // #if defined(ADAFRUIT_SENSOR_CALIBRATION_USE_EEPROM)
-// //   using AdafruitSensorCalibration_t = Adafruit_Sensor_Calibration_EEPROM;
-// // #else
-// //   using AdafruitSensorCalibration_t = Adafruit_Sensor_Calibration_SDFat;
-// // #endif
-
-// template <typename T, uint32_t Size>
-// struct UnitVector {
-//     UnitVector() = default;
-//     std::array<T, Size> data;
-// };
-
-// template <typename T>
-// class UnitVector3D : protected UnitVector<T, 3> {
-//     using UnitVector<T, 3>::data;
-
-// public:
-//     UnitVector3D() = default;
-//     UnitVector3D(T x, T y, T z) { data = {x, y, z}; }
-
-//     T& x() { return data[0]; }
-//     T& y() { return data[1]; }
-//     T& z() { return data[2]; }
-// };
-
-// template <typename T>
-// class RotationVectorData {
-//     std::array<T, 4> data;
-
-// public:
-//     RotationVectorData() = default;
-//     RotationVectorData(T real, T i, T j, T k) { data = {real, i, j, k}; }
-
-//     T& real() { return data[0]; }
-//     T& i() { return data[1]; }
-//     T& j() { return data[2]; }
-//     T& k() { return data[3]; }
-// };
-
-// using AccelerometerData = UnitVector3D<float>;
-// using GyroData = UnitVector3D<float>;
-// using MagnetometerData = UnitVector3D<float>;
-
-// class RotationData : protected UnitVector<float, 3> {
-//     using UnitVector<float, 3>::data;
-
-// public:
-//     RotationData() = default;
-//     RotationData(float pitch, float roll, float heading) { data = {pitch, roll, heading}; }
-
-//     float& pitch() { return data[0]; }
-//     float& roll() { return data[1]; }
-//     float& heading() { return data[2]; }
-// };
-
-// // enum class ImuFilter {
-// //     NxpSensorFusion,  // Slowest
-// //     Madgwick,
-// //     Mahony            // Fastest
-// // };
-
-// class ImuReader {
-//     SPIClass spiClass{};
-
-//     Adafruit_BNO08x bno08x{BNO08X_RESET};
-
-//     sh2_SensorValue_t sensorValue;
-
-//     Adafruit_SensorLab sensorLab;
-
-//     // TODO Add filter
-//     //ImuFilter selectedFilter;
-//     AccelerometerData accelerometerData;
-//     GyroData gyroData;
-//     MagnetometerData magnetometerData;
-//     RotationVectorData<float> rotationVectorData;
-//     int accuracy;
-
-//     Adafruit_Sensor* accelerometer;
-//     Adafruit_Sensor* gyroscope;
-//     Adafruit_Sensor* magnetometer;
-
-// public:
-//     ImuReader() {
-//         spiClass.begin(BNO08X_SCK, BNO08X_MISO, BNO08X_MOSI);
-//     }
-
-//     // DEBUG_SERIAL.println("Could not enable stabilized remote vector");
-
-
-//     // void setReports(sh2_SensorId_t reportType, long report_interval) {
-//     //     DEBUG_SERIAL.println("Setting desired reports");
-//     //     if (! bno08x.enableReport(reportType, report_interval)) {
-//     //         DEBUG_SERIAL.println("Could not enable stabilized remote vector");
-//     //     }
-//     // }
-
-//     void setupReports(Adafruit_BNO08x& bno08x, long report_interval) {
-//         if (!bno08x.enableReport(SH2_ACCELEROMETER, report_interval)) {
-//             Serial.println("Could not enable accelerometer");
-//         }
-//         if (!bno08x.enableReport(SH2_GYROSCOPE_CALIBRATED, report_interval)) {
-//             Serial.println("Could not enable gyroscope");
-//         }
-//         if (!bno08x.enableReport(SH2_MAGNETIC_FIELD_CALIBRATED, report_interval)) {
-//             Serial.println("Could not enable magnetic field calibrated");
-//         }
-//         if (!bno08x.enableReport(SH2_ROTATION_VECTOR, report_interval)) {
-//             Serial.println("Could not enable rotation vector");
-//         }
-//     }
-
-//     void start() {
-//         // sensorLab.begin();
-
-//         // accelerometer = sensorLab.getAccelerometer();
-//         // if (accelerometer == nullptr) {
-//         //     DEBUG_SERIAL.println("Could not find accelerometer");
-//         // }
-
-//         // gyroscope = sensorLab.getAccelerometer();
-//         // if (gyroscope == nullptr) {
-//         //     DEBUG_SERIAL.println("Could not find gyroscope");
-//         // }
-
-//         // magnetometer = sensorLab.getAccelerometer();
-//         // if (magnetometer == nullptr) {
-//         //     DEBUG_SERIAL.println("Could not find magnetometer");
-//         // }
-
-//          if (!bno08x.begin_SPI(BNO08X_CS, BNO08X_INT, &spiClass)) {
-//             DEBUG_SERIAL.println("Failed to find BNO08x chip");
-//             while (1) { delay(10); }
-//         }
-//         DEBUG_SERIAL.println("BNO08x Found!");
-
-//         //setReports(reportType, reportIntervalUs);
-//         setupReports(bno08x, reportIntervalUs);
-
-//         DEBUG_SERIAL.println("Reading events");
-//     }
-
-//     void update() {
-//         if (bno08x.wasReset()) {
-//             DEBUG_SERIAL.print("sensor was reset ");
-//             setupReports(bno08x, reportIntervalUs);
-//         }
-
-//         bool accelerometer_updated = false;
-//         bool gyro_updated = false;
-//         bool magnometer_updated = false;
-//         bool rotation_updated = false;
-
-//         int accelerometer_count = 0;
-//         int gyro_count = 0;
-//         int magnometer_count = 0;
-//         int rotation_count = 0;
-//         int arvr_count = 0;
-//         int gyro_other_count = 0;
-//         int other_count = 0;
-//         digitalWrite(13, HIGH);
-//         while (bno08x.getSensorEvent(&sensorValue)) {
-//             // in this demo only one report type will be received depending on FAST_MODE define (above)
-//             switch (sensorValue.sensorId) {
-//                 case SH2_ACCELEROMETER:
-//                     accelerometerData.x() = sensorValue.un.accelerometer.x;
-//                     accelerometerData.y() = sensorValue.un.accelerometer.y;
-//                     accelerometerData.z() = sensorValue.un.accelerometer.z;
-//                     accelerometer_updated = true;
-//                     accelerometer_count += 1;
-//                     break;
-
-//                 case SH2_GYROSCOPE_CALIBRATED:
-//                     gyroData.x() = sensorValue.un.gyroscope.x;
-//                     gyroData.y() = sensorValue.un.gyroscope.y;
-//                     gyroData.z() = sensorValue.un.gyroscope.z;
-//                     gyro_updated = true;
-//                     gyro_count += 1;
-//                     break;
-
-//                 case SH2_MAGNETIC_FIELD_CALIBRATED:
-//                     magnetometerData.x() = sensorValue.un.magneticField.x;
-//                     magnetometerData.y() = sensorValue.un.magneticField.y;
-//                     magnetometerData.z() = sensorValue.un.magneticField.z;
-//                     magnometer_updated = true;
-//                     magnometer_count += 1;
-//                     break;
-
-//                 case SH2_ROTATION_VECTOR:
-//                     rotationVectorData.real() = sensorValue.un.rotationVector.real;
-//                     rotationVectorData.i() = sensorValue.un.rotationVector.i;
-//                     rotationVectorData.j() = sensorValue.un.rotationVector.j;
-//                     rotationVectorData.k() = sensorValue.un.rotationVector.k;
-//                     rotation_updated = true;
-//                     rotation_count += 1;
-//                     break;
-
-//                 case SH2_ARVR_STABILIZED_RV:
-//                     quaternionToEulerRV(&sensorValue.un.arvrStabilizedRV, &ypr, true);
-//                     arvr_count += 1;
-//                     accuracy = sensorValue.status & 3;
-//                     break;
-//                 case SH2_GYRO_INTEGRATED_RV:
-//                     // faster (more noise?)
-//                     quaternionToEulerGI(&sensorValue.un.gyroIntegratedRV, &ypr, true);
-//                     gyro_other_count += 1;
-//                     break;
-//                 default:
-//                     other_count += 1;
-//             }
-//             //static long last = 0;
-//             //long now = micros();
-//             // DEBUG_SERIAL.print(now - last);             DEBUG_SERIAL.print("\t");
-//             //last = now;
-//             // DEBUG_SERIAL.print(sensorValue.status);     DEBUG_SERIAL.print("\t");  // This is accuracy in the range of 0 to 3
-//             // DEBUG_SERIAL.print(ypr.yaw);                DEBUG_SERIAL.print("\t");
-//             // DEBUG_SERIAL.print(ypr.pitch);              DEBUG_SERIAL.print("\t");
-//             // DEBUG_SERIAL.println(ypr.roll);
-
-//             if (/*accelerometer_updated &&*/ gyro_updated && magnometer_updated && rotation_updated) {
-//                 break;
-//             }
-//             // else {
-//             //     DEBUG_SERIAL.printf("Accelerometer: %d, Gyro: %d, Magno: %d, Rotation: %d, Avr: %d, Other Gyro: %d, Other: %d\n", accelerometer_count, gyro_count, magnometer_count, rotation_count, arvr_count, gyro_other_count, other_count);
-//             // }
-//         }
-//         digitalWrite(13, LOW);
-//         // sensors_event_t accelerometerEvent;
-//         // sensors_event_t gyroscopeEvent;
-//         // sensors_event_t magnetometerEvent;
-
-//         // accelerometer->getEvent(&accelerometerEvent);
-//         // gyroscope->getEvent(&gyroscopeEvent);
-//         // magnetometer->getEvent(&magnetometerEvent);
-
-//         // accelerometerData.x() = accelerometerEvent.acceleration.x;
-//         // accelerometerData.y() = accelerometerEvent.acceleration.y;
-//         // accelerometerData.z() = accelerometerEvent.acceleration.z;
-
-//         // // Gyroscope needs to be converted from Rad/s to Degree/s
-//         // // the rest are not unit-important
-//         // gyroData.x() = gyroscopeEvent.gyro.x * SENSORS_RADS_TO_DPS;
-//         // gyroData.y() = gyroscopeEvent.gyro.y * SENSORS_RADS_TO_DPS;
-//         // gyroData.z() = gyroscopeEvent.gyro.z * SENSORS_RADS_TO_DPS;
-
-//         // magnetometerData.x() = magnetometerEvent.magnetic.x;
-//         // magnetometerData.y() = magnetometerEvent.magnetic.y;
-//         // magnetometerData.z() = magnetometerEvent.magnetic.z;
-//         //DEBUG_SERIAL.printf("Accelerometer: %d, Gyro: %d, Magno: %d, Rotation: %d, Avr: %d, Other Gyro: %d, Other: %d\n", accelerometer_count, gyro_count, magnometer_count, rotation_count, arvr_count, gyro_other_count, other_count);
-
-//     }
-
-//     void calibrate() {
-//         // DEBUG_SERIAL.print(sensorValue.status);     DEBUG_SERIAL.print("\t");  // This is accuracy in the range of 0 to 3
-//         ;
-//     }
-
-//     void quaternionToEuler(float qr, float qi, float qj, float qk, euler_t* ypr, bool degrees = false) {
-
-//         float sqr = sq(qr);
-//         float sqi = sq(qi);
-//         float sqj = sq(qj);
-//         float sqk = sq(qk);
-
-//         ypr->yaw = atan2(2.0 * (qi * qj + qk * qr), (sqi - sqj - sqk + sqr));
-//         ypr->pitch = asin(-2.0 * (qi * qk - qj * qr) / (sqi + sqj + sqk + sqr));
-//         ypr->roll = atan2(2.0 * (qj * qk + qi * qr), (-sqi - sqj + sqk + sqr));
-
-//         if (degrees) {
-//         ypr->yaw *= RAD_TO_DEG;
-//         ypr->pitch *= RAD_TO_DEG;
-//         ypr->roll *= RAD_TO_DEG;
-//         }
-//     }
-
-//     void quaternionToEulerRV(sh2_RotationVectorWAcc_t* rotational_vector, euler_t* ypr, bool degrees = false) {
-//         quaternionToEuler(rotational_vector->real, rotational_vector->i, rotational_vector->j, rotational_vector->k, ypr, degrees);
-//     }
-
-//     void quaternionToEulerGI(sh2_GyroIntegratedRV_t* rotational_vector, euler_t* ypr, bool degrees = false) {
-//         quaternionToEuler(rotational_vector->real, rotational_vector->i, rotational_vector->j, rotational_vector->k, ypr, degrees);
-//     }
-
-
-//     void getImuData(ImuData* data) {
-//         data->timestamp = getTime();
-
-//         // // TODO: Assigning a reference here, don't do that
-//         data->data[0] = accelerometerData.x();
-//         data->data[1] = accelerometerData.y();
-//         data->data[2] = accelerometerData.z();
-
-//         data->data[3] = gyroData.x();
-//         data->data[4] = gyroData.y();
-//         data->data[5] = gyroData.z();
-
-//         data->data[6] = magnetometerData.x();
-//         data->data[7] = magnetometerData.y();
-//         data->data[8] = magnetometerData.z();
-
-//         data->data[9] = rotationVectorData.real();
-//         data->data[10] = rotationVectorData.i();
-//         data->data[11] = rotationVectorData.j();
-//         data->data[12] = rotationVectorData.k();
-
-//         data->accuracy = accuracy;
-//         if (accuracy == 0) {
-//             digitalWrite(12, LOW);
-//         } else {
-//             digitalWrite(12, HIGH);
-//         }
-//     }
-// };
+#include <BoardConfig.hpp>
 
 
 #include <Arduino.h>
@@ -376,24 +17,7 @@
 #include <SensorBuffer.hpp>
 #include <Bno08xDevice2.hpp>
 
-#define DELAY_BETWEEN_SAMPLES 20000
-
-// For SPI mode, we need a CS pin
-#define BNO08X_CS 15
-#define BNO08X_INT 32
-
-// For SPI mode, we also need a RESET
-#define BNO08X_RESET 14
-
-#define BNO08X_SCK 5
-#define BNO08X_MISO 21
-#define BNO08X_MOSI 19
-#define STATUS_NEOPIXEL_PIN 4
-#define STATUS_NEOPIXEL_NUM_PIXELS 1
-#define STATUS_NEOPIXEL_BRIGHTNESS 24
-#define ONBOARD_NEOPIXEL_PIN 0
-#define ONBOARD_NEOPIXEL_POWER_PIN 2
-#define ONBOARD_NEOPIXEL_NUM_PIXELS 1
+// Pins and the sample interval live in BoardConfig.hpp.
 #define ONBOARD_NEOPIXEL_BRIGHTNESS 24
 
 // Status NeoPixels DISABLED: Adafruit_NeoPixel::show() re-installs the ESP32 RMT
@@ -403,16 +27,6 @@
 // Phase 1 with a fixed RMT path (install the driver once, don't show() per poll).
 #define IMU_STATUS_LED_ENABLED 0
 
-// // For SPI mode, we need a CS pin
-// #define BNO08X_CS 14
-// #define BNO08X_INT 39
-
-// // For SPI mode, we also need a RESET
-// #define BNO08X_RESET 4
-
-// #define BNO08X_SCK 5
-// #define BNO08X_MISO 21
-// #define BNO08X_MOSI 19
 
 struct euler_t {
   float yaw;
@@ -779,12 +393,7 @@ public:
         if (!bno08x.enableReport(SH2_GYROSCOPE_CALIBRATED, 20000)) {
             Serial.println("Could not enable gyroscope");
         }
-        // if (!bno08x.enableReport(SH2_GYROSCOPE_UNCALIBRATED, 9000)) {
-        //     Serial.println("Could not enable gyroscope");
-        // }
-        // if (!bno08x.enableReport(SH2_MAGNETIC_FIELD_CALIBRATED, 8000)) {
-        //     Serial.println("Could not enable magnetic field calibrated");
-        // }
+
         if (!bno08x.enableReport(SH2_ROTATION_VECTOR, 20000)) {
             Serial.println("Could not enable rotation vector");
         }
@@ -872,18 +481,7 @@ public:
             setupReports(bno08x, reportIntervalUs);
         }
 
-        // bool accelerometer_updated = false;
-        // bool gyro_updated = false;
-        // bool magnometer_updated = false;
-        // bool rotation_updated = false;
 
-        // int accelerometer_count = 0;
-        // int gyro_count = 0;
-        // int magnometer_count = 0;
-        // int rotation_count = 0;
-        // int arvr_count = 0;
-        // int gyro_other_count = 0;
-        // int other_count = 0;
         digitalWrite(13, HIGH);
         if (!bno08x.getSensorEvent(&sensorValue)) {
             DEBUG_SERIAL.printf("There was an error!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!\n");
@@ -1062,18 +660,7 @@ public:
                 // rotation_count += 1;
                 break;
 
-            // case SH2_ARVR_STABILIZED_RV:
-            //     quaternionToEulerRV(&sensorValue.un.arvrStabilizedRV, &ypr, true);
-            //     // arvr_count += 1;
-            //     // accuracy = sensorValue.status & 3;
-            //     break;
-            // case SH2_GYRO_INTEGRATED_RV:
-            //     // faster (more noise?)
-            //     quaternionToEulerGI(&sensorValue.un.gyroIntegratedRV, &ypr, true);
-            //     gyro_other_count += 1;
-            //     break;
-            // default:
-            //     other_count += 1;
+
         }
             // else {
             //     DEBUG_SERIAL.printf("Accelerometer: %d, Gyro: %d, Magno: %d, Rotation: %d, Avr: %d, Other Gyro: %d, Other: %d\n", accelerometer_count, gyro_count, magnometer_count, rotation_count, arvr_count, gyro_other_count, other_count);
@@ -1192,18 +779,7 @@ public:
             setupReports(bno08x, reportIntervalUs);
         }
 
-        // bool accelerometer_updated = false;
-        // bool gyro_updated = false;
-        // bool magnometer_updated = false;
-        // bool rotation_updated = false;
 
-        // int accelerometer_count = 0;
-        // int gyro_count = 0;
-        // int magnometer_count = 0;
-        // int rotation_count = 0;
-        // int arvr_count = 0;
-        // int gyro_other_count = 0;
-        // int other_count = 0;
         digitalWrite(13, HIGH);
         if (!bno08x.getSensorEvent(&sensorValue)) {
             DEBUG_SERIAL.printf("There was an error!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!\n");
@@ -1283,26 +859,6 @@ public:
                 break;
               }
 
-            // case SH2_MAGNETIC_FIELD_CALIBRATED:
-            //     magnetometerData.x() = sensorValue.un.magneticField.x;
-            //     magnetometerData.y() = sensorValue.un.magneticField.y;
-            //     magnetometerData.z() = sensorValue.un.magneticField.z;
-            //     magnetometerData.accuracy() = sensorValue.status;
-            //     magnetometerReads += 1;
-            //     currentTimestamp = esp_timer_get_time();
-            //     timeGap = currentTimestamp - lastMagnetometerTimestampUs;
-            //     if (timeGap > (13 * 1000) && lastMagnetometerTimestampUs != 0) {
-            //       ++lateMagnetometerCount;
-            //       digitalWrite(12, HIGH);
-            //     }
-            //     if (timeGap > largestMagnoGap) {
-            //       largestMagnoGap = timeGap;
-            //     }
-            //     lastMagnetometerTimestampUs = currentTimestamp;
-            //     magnometerRead = true;
-            //     // magnometer_updated = true;
-            //     // magnometer_count += 1;
-            //     break;
 
             case SH2_ROTATION_VECTOR: {
                 SensorDataPoint<Bno08xEvent::FourDimensional> data_point{};
@@ -1334,18 +890,7 @@ public:
                 break;
               }
 
-            // case SH2_ARVR_STABILIZED_RV:
-            //     quaternionToEulerRV(&sensorValue.un.arvrStabilizedRV, &ypr, true);
-            //     // arvr_count += 1;
-            //     // accuracy = sensorValue.status & 3;
-            //     break;
-            // case SH2_GYRO_INTEGRATED_RV:
-            //     // faster (more noise?)
-            //     quaternionToEulerGI(&sensorValue.un.gyroIntegratedRV, &ypr, true);
-            //     gyro_other_count += 1;
-            //     break;
-            // default:
-            //     other_count += 1;
+
         }
         //DEBUG_SERIAL.printf("Collected\n");
             // else {
@@ -1398,13 +943,7 @@ public:
           }
 
           case Bno08xEvent::EventType::MagneticFieldCalibrated: {
-            // SensorDataPoint<Bno08xEvent::ThreeDimensional> data_point{};
-            // currentTimestamp = esp_timer_get_time();
-            // data_point.timestamp = currentTimestamp;
-            // data_point.calibration = event.accuracy;
-            // data_point.dataMaybe = event.data.three_dimensional;
-            // magnetometerBuffer.push(data_point);
-            // DEBUG_SERIAL.printf("Magnetic Field\n");
+
             break;
           }
 
@@ -1463,34 +1002,6 @@ public:
     }
 
 
-    // void getImuData(ImuData* data) {
-    //     data->timestamp = getTime();
-
-    //     // // TODO: Assigning a reference here, don't do that
-    //     data->data[0] = accelerometerData.x();
-    //     data->data[1] = accelerometerData.y();
-    //     data->data[2] = accelerometerData.z();
-
-    //     data->data[3] = gyroData.x();
-    //     data->data[4] = gyroData.y();
-    //     data->data[5] = gyroData.z();
-
-    //     data->data[6] = magnetometerData.x();
-    //     data->data[7] = magnetometerData.y();
-    //     data->data[8] = magnetometerData.z();
-
-    //     data->data[9] = rotationVectorData.real();
-    //     data->data[10] = rotationVectorData.i();
-    //     data->data[11] = rotationVectorData.j();
-    //     data->data[12] = rotationVectorData.k();
-
-    //     data->accuracy = accuracy;
-    //     if (accuracy == 0) {
-    //         digitalWrite(12, LOW);
-    //     } else {
-    //         digitalWrite(12, HIGH);
-    //     }
-    // }
 
     bool getImuData(ImuData* data) {
         constexpr uint8_t accelerometer_bit = 0b100;

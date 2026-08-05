@@ -1,5 +1,7 @@
 #pragma once
 
+#include <BoardConfig.hpp>
+
 #include <macros.hpp>
 
 #define NAT_USE_FREE_RTOS_THREADS
@@ -20,13 +22,7 @@
 #else
 #include <Adafruit_BNO08x.h>
 
-// Set the pins needed for SPI mode on the BNO08x chip
-#define BNO08X_CS 15
-#define BNO08X_INT 32
-#define BNO08X_RESET 14
-#define BNO08X_SCK 5
-#define BNO08X_MISO 21
-#define BNO08X_MOSI 19
+// SPI pins for the BNO08x live in BoardConfig.hpp.
 
 #endif // NAT_SIMULATE_BNO08X
 
