@@ -198,6 +198,85 @@ bool IMU_DUMMY_DATA{false};
 TaskHandle_t sendMessageTaskHandle = NULL;
 TaskHandle_t networkingAndImuTaskHandle = NULL;
 
+// --- deferred dynamic-calibration enable ---------------------------------
+// The BNO08x will not accept sh2_setCalConfig during bring-up: every position in
+// setup() either returns SH2_ERR_HUB or makes the hub stop producing reports
+// (all three measured -- see the NOTE in Bno08xDevice2.hpp). Issued once the hub
+// has actually been streaming for a few seconds, the same call succeeds and gyro
+// accuracy reaches High within a second.
+//
+// Without this the hub runs on its default 0x05 (accel|mag, gyro OFF), which is
+// what made the rotation vector sit at Unreliable no matter how carefully the
+// board was calibrated by hand.
+constexpr uint32_t CALIBRATION_ENABLE_AFTER_STREAMING_MS = 5000;
+constexpr uint32_t CALIBRATION_ENABLE_RETRY_MS = 5000;
+constexpr uint8_t CALIBRATION_ENABLE_MAX_ATTEMPTS = 3;
+
+uint32_t firstSampleAtMs = 0;
+uint32_t samplesRead = 0;
+
+void noteSampleRead() {
+  ++samplesRead;
+  if (firstSampleAtMs == 0) {
+    firstSampleAtMs = millis();
+  }
+}
+
+void enableDynamicCalibrationOnce() {
+  static bool settled = false;
+  static uint8_t attempts = 0;
+  static uint32_t lastAttemptMs = 0;
+
+  if (settled || firstSampleAtMs == 0) {
+    return;
+  }
+  const uint32_t nowMs = millis();
+  if (nowMs - firstSampleAtMs < CALIBRATION_ENABLE_AFTER_STREAMING_MS) {
+    return;
+  }
+  if (attempts > 0 && nowMs - lastAttemptMs < CALIBRATION_ENABLE_RETRY_MS) {
+    return;
+  }
+
+  ++attempts;
+  lastAttemptMs = nowMs;
+  const uint8_t desired = 0x07;  // SH2_CAL_ACCEL | SH2_CAL_GYRO | SH2_CAL_MAG
+  const int status = imuReader.setCalibrationConfig(desired);
+  uint8_t readBack = 0;
+  imuReader.getCalibrationConfig(readBack);
+
+  if (status == 0) {
+    settled = true;
+    DEBUG_SERIAL.printf(
+        "BNO08X: dynamic calibration enabled after %lu samples "
+        "(setCalConfig(0x%02x) -> 0, read-back 0x%02x)\n",
+        (unsigned long)samplesRead, desired, readBack);
+    // Reported on the log channel too, so this is visible from the server
+    // without a serial cable. command_id is empty: nobody asked for it.
+    natkit_command::emitLog("", "calibrate.auto", "info", true, true,
+                            "dynamic calibration enabled: 0x%02x (read-back "
+                            "0x%02x) after %lu samples",
+                            desired, readBack, (unsigned long)samplesRead);
+    return;
+  }
+
+  DEBUG_SERIAL.printf(
+      "BNO08X: setCalConfig(0x%02x) attempt %u FAILED with %d\n", desired,
+      attempts, status);
+  if (attempts >= CALIBRATION_ENABLE_MAX_ATTEMPTS) {
+    settled = true;  // stop trying; say so once, loudly.
+    DEBUG_SERIAL.println(
+        "BNO08X: giving up on enabling dynamic calibration. Gyro calibration is "
+        "OFF, so rotation will stay Unreliable. Try calibrate.set_config over "
+        "the command channel.");
+    natkit_command::emitLog(
+        "", "calibrate.auto", "error", false, true,
+        "could not enable dynamic calibration after %u attempts (last error "
+        "%d); gyro calibration is OFF and rotation will stay Unreliable",
+        attempts, status);
+  }
+}
+
 // --- EXECUTION_COMMAND handlers ------------------------------------------
 // Runs on the networking/IMU task, because these touch the SH2 hub. Output goes
 // out on the log channel, correlated by command_id; nothing is published from
@@ -226,6 +305,27 @@ void executeCommand(const natkit_command::CommandRequest& request) {
       emitLog(id, command, "error", false, true,
               "sh2_saveDcdNow failed with %d", status);
     }
+    return;
+  }
+
+  if (strcmp(command, "calibrate.set_config") == 0) {
+    // args: {"mask": 7} or {"mask": "0x07"}. Default enables accel+gyro+mag,
+    // which is what setup() asks for and fails to get.
+    long requested = 0x07;
+    natkit_command::readNumberField(request.args, "mask", requested);
+    const uint8_t mask = static_cast<uint8_t>(requested & 0x0f);
+    const int status = imuReader.setCalibrationConfig(mask);
+    uint8_t read_back = 0;
+    const int read_status = imuReader.getCalibrationConfig(read_back);
+    // Both numbers are reported because they disagree on this hub: the read-back
+    // has been observed to stay 0x05 no matter what was written, so it cannot be
+    // used to confirm the write took. The RETURN CODE is the real signal.
+    emitLog(id, command, status == 0 ? "info" : "error", status == 0, true,
+            "setCalConfig(0x%02x) returned %d; read-back %s0x%02x (accel=%d "
+            "gyro=%d mag=%d)",
+            mask, status, read_status == 0 ? "" : "unavailable, ", read_back,
+            (read_back & 0x01) ? 1 : 0, (read_back & 0x02) ? 1 : 0,
+            (read_back & 0x04) ? 1 : 0);
     return;
   }
 
@@ -559,10 +659,15 @@ void handleNetworkingStagesAndImuJoinedTask(void*) {
           bool isBulkReady = false;
 
           if (imuReader.getImuData(&imuData)) {
+            noteSampleRead();
             isBulkReady = kafkaTopic->writeDataRecord(connectionConfig, imuData, mqttClient);
           } else {
             DEBUG_SERIAL.println("Nothing to read");
           }
+
+          // Once the hub has been streaming for a few seconds, turn on dynamic
+          // calibration -- the one moment it accepts the request.
+          enableDynamicCalibrationOnce();
 
           if (isBulkReady) {
             if (sendMessageTaskHandle != NULL) {

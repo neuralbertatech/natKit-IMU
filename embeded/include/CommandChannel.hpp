@@ -20,6 +20,7 @@
 // task can block the other.
 
 #include <Arduino.h>
+#include <stdlib.h>
 #include <string.h>
 
 #include "freertos/FreeRTOS.h"
@@ -123,6 +124,29 @@ inline bool readStringField(const char* json, const char* key, char* out,
     // An unterminated string means the payload was truncated; treat as absent
     // rather than acting on half a value.
     return *cursor == '"';
+}
+
+// Reads an integer field. Accepts decimal and 0x-prefixed hex, because the
+// fields this exists for are bit masks and a mask is far more legible as hex.
+// Returns false if the key is absent or is not a number we understand.
+inline bool readNumberField(const char* json, const char* key, long& out) {
+    if (json == nullptr || key == nullptr) return false;
+    char needle[COMMAND_NAME_MAX + 3];
+    const int needle_len = snprintf(needle, sizeof(needle), "\"%s\"", key);
+    if (needle_len <= 0 || needle_len >= (int)sizeof(needle)) return false;
+    const char* at = strstr(json, needle);
+    if (at == nullptr) return false;
+    const char* cursor = at + needle_len;
+    while (*cursor == ' ' || *cursor == '\t') ++cursor;
+    if (*cursor != ':') return false;
+    ++cursor;
+    while (*cursor == ' ' || *cursor == '\t' || *cursor == '"') ++cursor;
+    char* end = nullptr;
+    // Base 0 lets strtol pick up the 0x prefix itself.
+    const long value = strtol(cursor, &end, 0);
+    if (end == cursor) return false;
+    out = value;
+    return true;
 }
 
 // Captures the raw JSON of a nested object value (e.g. "args") verbatim, so a

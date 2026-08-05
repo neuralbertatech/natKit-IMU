@@ -175,6 +175,28 @@ public:
         #endif // NAT_SIMULATE_BNO08X
     }
 
+    // Enables dynamic calibration for the given sensors (SH2_CAL_ACCEL |
+    // SH2_CAL_GYRO | SH2_CAL_MAG | SH2_CAL_PLANAR).
+    //
+    // NOT callable from setup(). The same call there returns SH2_ERR_HUB, and
+    // every attempt to move it inside setup made the hub stop producing reports
+    // entirely — including simply DELETING it, because each sh2 op pumps SHTP
+    // while awaiting its reply and the failing call was providing load-bearing
+    // timing between the priming getSensorEvent and the enableReports.
+    //
+    // Issued once the hub has been streaming for a few seconds it succeeds, the
+    // read-back reports the mask, the stream keeps running, and gyro accuracy
+    // reaches 3 (High) within a second. See enableDynamicCalibrationOnce() in
+    // main.cpp, which is the only caller that matters.
+    int setCalibrationConfig(uint8_t mask) {
+        #ifdef NAT_SIMULATE_BNO08X
+        (void)mask;
+        return 0;
+        #else
+        return sh2_setCalConfig(mask);
+        #endif // NAT_SIMULATE_BNO08X
+    }
+
     // Reads the hub's dynamic-calibration mask. NOTE: on this hub the read-back
     // is not faithful (see the note in setup()) — it reports 0x05 regardless of
     // what was written — so treat this as diagnostic only.
