@@ -1053,12 +1053,19 @@ public:
             return false;
         }
 
+        // Two bits per sensor, so each value MUST be masked to 0..3 on the way in
+        // -- an out-of-range accuracy would spill into the neighbouring sensor's
+        // field and misreport both. The source is masked too (see
+        // SH2_STATUS_ACCURACY_MASK); this is the belt to that braces.
+        const auto packAccuracy = [](auto calibration) -> uint8_t {
+            return static_cast<uint8_t>(calibration) & 0x03;
+        };
         data->accuracies = 0;
         data->has_data = 0;
 
         uint64_t max_timestamp = 0;
         if (hasLatestAccelerometerSample) {
-            data->accuracies |= static_cast<uint8_t>(latestAccelerometerSample.calibration) << 4;
+            data->accuracies |= packAccuracy(latestAccelerometerSample.calibration) << 4;
             data->has_data |= accelerometer_bit;
             data->data[0] = latestAccelerometerSample.dataMaybe.value().x;
             data->data[1] = latestAccelerometerSample.dataMaybe.value().y;
@@ -1068,7 +1075,7 @@ public:
             }
         }
         if (hasLatestGyroscopeSample) {
-            data->accuracies |= static_cast<uint8_t>(latestGyroscopeSample.calibration) << 2;
+            data->accuracies |= packAccuracy(latestGyroscopeSample.calibration) << 2;
             data->has_data |= gyroscopt_bit;
             data->data[3] = latestGyroscopeSample.dataMaybe.value().x;
             data->data[4] = latestGyroscopeSample.dataMaybe.value().y;
@@ -1078,7 +1085,7 @@ public:
             }
         }
         if (hasLatestRotationSample) {
-            data->accuracies |= static_cast<uint8_t>(latestRotationSample.calibration);
+            data->accuracies |= packAccuracy(latestRotationSample.calibration);
             data->has_data |= rotation_bit;
             data->data[6] = latestRotationSample.dataMaybe.value().real;
             data->data[7] = latestRotationSample.dataMaybe.value().i;

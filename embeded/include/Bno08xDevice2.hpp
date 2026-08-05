@@ -136,6 +136,13 @@ struct Bno08xEvent {
     EventType event_type;
 };
 
+// The SH2 status byte is NOT an accuracy value: bits 1:0 are the accuracy
+// (0 = Unreliable .. 3 = High) and bits 7:2 carry the report delay. Using it
+// unmasked leaks the delay into the accuracy, and since accuracies are later
+// packed two bits per sensor, a nonzero delay corrupts the OTHER sensors'
+// fields as well.
+#define SH2_STATUS_ACCURACY_MASK 0x03
+
 class Bno08xDevice {
 
 #ifdef NAT_SIMULATE_BNO08X
@@ -749,7 +756,7 @@ Bno08xEvent Bno08xDevice::get_event(bool& was_successful) {
     switch (sensorValue.sensorId) {
         case SH2_ACCELEROMETER: {
             event.event_type = Bno08xEvent::EventType::Accelerometer;
-            event.accuracy = sensorValue.status;
+            event.accuracy = sensorValue.status & SH2_STATUS_ACCURACY_MASK;
 
             Bno08xEvent::ThreeDimensional data{};
             data.x = sensorValue.un.accelerometer.x;
@@ -762,7 +769,7 @@ Bno08xEvent Bno08xDevice::get_event(bool& was_successful) {
 
         case SH2_RAW_ACCELEROMETER: {
             event.event_type = Bno08xEvent::EventType::RawAccelerometer;
-            event.accuracy = sensorValue.status;
+            event.accuracy = sensorValue.status & SH2_STATUS_ACCURACY_MASK;
 
             Bno08xEvent::ThreeDimensional data{};
             data.x = sensorValue.un.rawAccelerometer.x;
@@ -775,7 +782,7 @@ Bno08xEvent Bno08xDevice::get_event(bool& was_successful) {
 
         case SH2_LINEAR_ACCELERATION: {
             event.event_type = Bno08xEvent::EventType::LinearAcceleration;
-            event.accuracy = sensorValue.status;
+            event.accuracy = sensorValue.status & SH2_STATUS_ACCURACY_MASK;
 
             Bno08xEvent::ThreeDimensional data{};
             data.x = sensorValue.un.linearAcceleration.x;
@@ -788,7 +795,7 @@ Bno08xEvent Bno08xDevice::get_event(bool& was_successful) {
 
         case SH2_GYROSCOPE_CALIBRATED: {
             event.event_type = Bno08xEvent::EventType::GyroscopeCalibrated;
-            event.accuracy = sensorValue.status;
+            event.accuracy = sensorValue.status & SH2_STATUS_ACCURACY_MASK;
 
             Bno08xEvent::ThreeDimensional data{};
             data.x = sensorValue.un.gyroscope.x;
@@ -801,7 +808,7 @@ Bno08xEvent Bno08xDevice::get_event(bool& was_successful) {
 
         case SH2_GYROSCOPE_UNCALIBRATED: {
             event.event_type = Bno08xEvent::EventType::GyroscopeUncalibrated;
-            event.accuracy = sensorValue.status;
+            event.accuracy = sensorValue.status & SH2_STATUS_ACCURACY_MASK;
 
             Bno08xEvent::ThreeDimensional data{};
             data.x = sensorValue.un.gyroscopeUncal.x;
@@ -814,7 +821,7 @@ Bno08xEvent Bno08xDevice::get_event(bool& was_successful) {
 
         case SH2_MAGNETIC_FIELD_CALIBRATED: {
             event.event_type = Bno08xEvent::EventType::MagneticFieldCalibrated;
-            event.accuracy = sensorValue.status;
+            event.accuracy = sensorValue.status & SH2_STATUS_ACCURACY_MASK;
 
             Bno08xEvent::ThreeDimensional data{};
             data.x = sensorValue.un.magneticField.x;
@@ -827,7 +834,7 @@ Bno08xEvent Bno08xDevice::get_event(bool& was_successful) {
 
         case SH2_ROTATION_VECTOR: {
             event.event_type = Bno08xEvent::EventType::RotationVector;
-            event.accuracy = sensorValue.status;
+            event.accuracy = sensorValue.status & SH2_STATUS_ACCURACY_MASK;
 
             Bno08xEvent::FourDimensional data{};
             data.real = sensorValue.un.rotationVector.real;
@@ -841,7 +848,7 @@ Bno08xEvent Bno08xDevice::get_event(bool& was_successful) {
 
         case SH2_GEOMAGNETIC_ROTATION_VECTOR: {
             event.event_type = Bno08xEvent::EventType::GeomagneticRotationVector;
-            event.accuracy = sensorValue.status;
+            event.accuracy = sensorValue.status & SH2_STATUS_ACCURACY_MASK;
 
             Bno08xEvent::FourDimensional data{};
             data.real = sensorValue.un.geoMagRotationVector.real;
