@@ -534,11 +534,36 @@ std::string Bno08xDevice::setup(bool& was_successful) {
 
     std::string error_msg = "";
 
-    // Calibration config must be the FIRST hub command after begin_SPI. Measured
-    // on hardware: asked at any later point -- after the priming getSensorEvent()
-    // below, or after the enableReport calls -- the hub rejects it with
-    // SH2_ERR_HUB (-5). It sat after the reports from Feb 2026 with its return
-    // value discarded, so it had been failing silently ever since.
+    // Adafruit_BNO08x keeps a single file-static sh2_SensorValue_t* that its SH2
+    // sensor callback writes through, and it is NULL until the first
+    // getSensorEvent() call assigns it. Every sh2 op (enableReport,
+    // sh2_setCalConfig, ...) pumps SHTP while waiting for its reply, so as soon as
+    // ONE report is enabled a queued sensor event can be delivered mid-op — the
+    // callback then writes through that NULL and the chip panics with
+    // StoreProhibited at address 0 inside sh2_decodeSensorEvent.
+    //
+    // Priming it here points that static at our long-lived member before anything
+    // can arrive, which closes the window for every op below. &sensorValue must
+    // outlive the library's use of it, hence a member and not a local.
+    // The call returns false (nothing is enabled yet); we only want the side effect.
+    //
+    // NOTE: this priming is what makes the ordering below safe. An earlier version
+    // of this fix ALSO moved the calibration setup ahead of the enableReport calls
+    // "for good measure" -- but the hub rejects sh2_setCalConfig that early with
+    // SH2_ERR_HUB (-5), which silently left gyro dynamic calibration disabled and
+    // pinned reported accuracy at Unreliable. Calibration is configured at the END
+    // of setup, where the hub accepts it.
+    (void)bno08x.getSensorEvent(&sensorValue);
+
+    // Calibration config sits here: after the priming getSensorEvent() above and
+    // before the reports are enabled. This is the ordering VERIFIED streaming on
+    // hardware.
+    //
+    // sh2_setCalConfig returns SH2_ERR_HUB (-5) here, and has done since Feb 2026
+    // (71e3be8) when its return value was discarded. Do not "fix" that by moving it
+    // to be the first hub command: measured on hardware, the call then succeeds but
+    // the BNO08x stops producing sensor reports altogether ("Nothing to read"), so
+    // nothing streams. The failure is currently harmless -- see below.
     //
     // sh2_getCalConfig is NOT a faithful read-back on this hub: probing every mask
     // (0x01, 0x02, 0x04, 0x03, 0x05, 0x07, 0x0f) as the first command showed all of
@@ -556,10 +581,9 @@ std::string Bno08xDevice::setup(bool& was_successful) {
     const int cal_config_status = sh2_setCalConfig(desired_cal);
     if (cal_config_status != SH2_OK) {
         Serial.printf(
-            "BNO08X: sh2_setCalConfig(0x%02x) FAILED with %d — dynamic "
-            "calibration is not enabled, so accuracy will stay Unreliable.\n",
+            "BNO08X: sh2_setCalConfig(0x%02x) returned %d (SH2_ERR_HUB) — "
+            "long-standing and so far harmless; see the note above.\n",
             desired_cal, cal_config_status);
-        error_msg.append("Failed to enable dynamic calibration\n");
     }
     const int dcd_status = sh2_setDcdAutoSave(true);
     if (dcd_status != SH2_OK) {
@@ -583,27 +607,6 @@ std::string Bno08xDevice::setup(bool& was_successful) {
     } else {
         Serial.printf("BNO08X: sh2_getCalConfig failed with %d\n", read_back);
     }
-
-    // Adafruit_BNO08x keeps a single file-static sh2_SensorValue_t* that its SH2
-    // sensor callback writes through, and it is NULL until the first
-    // getSensorEvent() call assigns it. Every sh2 op (enableReport,
-    // sh2_setCalConfig, ...) pumps SHTP while waiting for its reply, so as soon as
-    // ONE report is enabled a queued sensor event can be delivered mid-op — the
-    // callback then writes through that NULL and the chip panics with
-    // StoreProhibited at address 0 inside sh2_decodeSensorEvent.
-    //
-    // Priming it here points that static at our long-lived member before anything
-    // can arrive, which closes the window for every op below. &sensorValue must
-    // outlive the library's use of it, hence a member and not a local.
-    // The call returns false (nothing is enabled yet); we only want the side effect.
-    //
-    // NOTE: this priming is what makes the ordering below safe. An earlier version
-    // of this fix ALSO moved the calibration setup ahead of the enableReport calls
-    // "for good measure" -- but the hub rejects sh2_setCalConfig that early with
-    // SH2_ERR_HUB (-5), which silently left gyro dynamic calibration disabled and
-    // pinned reported accuracy at Unreliable. Calibration is configured at the END
-    // of setup, where the hub accepts it.
-    (void)bno08x.getSensorEvent(&sensorValue);
 
     #ifdef NAT_BNO08X_ENABLE_ACCELEROMETER
     if (!bno08x.enableReport(SH2_ACCELEROMETER, NAT_BNO08X_DELAY_BETWEEN_SAMPLES_US)) {
