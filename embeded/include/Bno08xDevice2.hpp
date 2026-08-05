@@ -540,10 +540,12 @@ std::string Bno08xDevice::setup(bool& was_successful) {
     // SH2_ERR_HUB (-5). It sat after the reports from Feb 2026 with its return
     // value discarded, so it had been failing silently ever since.
     //
-    // Note the hub still reports back 0x05 (accel|mag) rather than the 0x07 asked
-    // for: it drops SH2_CAL_GYRO. So a successful call and a failed one leave the
-    // same configuration, which is why fixing this did NOT by itself change
-    // reported accuracy.
+    // sh2_getCalConfig is NOT a faithful read-back on this hub: probing every mask
+    // (0x01, 0x02, 0x04, 0x03, 0x05, 0x07, 0x0f) as the first command showed all of
+    // them accepted (return 0) while the read-back stayed 0x05 in every case --
+    // including when only SH2_CAL_ACCEL was set. So the logged value below says
+    // what the hub reports, not what is actually in effect, and it cannot be used
+    // to confirm gyro dynamic calibration is on.
     //
     // Dynamic calibration for accel/gyro/mag, plus periodic saving of the
     // calibration data. These return codes are CHECKED and logged: discarding
