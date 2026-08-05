@@ -198,6 +198,74 @@ bool IMU_DUMMY_DATA{false};
 TaskHandle_t sendMessageTaskHandle = NULL;
 TaskHandle_t networkingAndImuTaskHandle = NULL;
 
+// --- EXECUTION_COMMAND handlers ------------------------------------------
+// Runs on the networking/IMU task, because these touch the SH2 hub. Output goes
+// out on the log channel, correlated by command_id; nothing is published from
+// here directly (that would race the MQTT-owning task).
+void executeCommand(const natkit_command::CommandRequest& request) {
+  using natkit_command::emitLog;
+  const char* id = request.command_id;
+  const char* command = request.command;
+
+  if (strcmp(command, "ping") == 0) {
+    emitLog(id, command, "info", true, true, "pong from %s, up %lu ms",
+            kafkaTopic != nullptr ? kafkaTopic->getName().c_str() : "device",
+            (unsigned long)millis());
+    return;
+  }
+
+  if (strcmp(command, "calibrate.save_dcd") == 0) {
+    // Datasheet §3.4: the hub only writes dynamic calibration to FRS on a
+    // non-power-up reset, so a device that is just switched off loses what it
+    // learned since boot. This is the explicit save for that case.
+    const int status = imuReader.saveCalibrationNow();
+    if (status == 0) {
+      emitLog(id, command, "info", true, true,
+              "saved dynamic calibration to flash");
+    } else {
+      emitLog(id, command, "error", false, true,
+              "sh2_saveDcdNow failed with %d", status);
+    }
+    return;
+  }
+
+  if (strcmp(command, "calibrate.status") == 0) {
+    uint8_t mask = 0;
+    const int status = imuReader.getCalibrationConfig(mask);
+    // Accuracy bits, as packed by NatImuDataSchema: 5-4 accel, 3-2 gyro,
+    // 1-0 rotation. 0 = Unreliable ... 3 = High.
+    const uint8_t accuracies = imuData.accuracies;
+    if (status == 0) {
+      emitLog(id, command, "info", true, true,
+              "cal_config=0x%02x (accel=%d gyro=%d mag=%d) accuracy accel=%d "
+              "gyro=%d rotation=%d has_data=0x%02x",
+              mask, (mask & 0x01) ? 1 : 0, (mask & 0x02) ? 1 : 0,
+              (mask & 0x04) ? 1 : 0, (accuracies >> 4) & 0x03,
+              (accuracies >> 2) & 0x03, accuracies & 0x03, imuData.has_data);
+    } else {
+      emitLog(id, command, "error", false, true,
+              "sh2_getCalConfig failed with %d", status);
+    }
+    return;
+  }
+
+  emitLog(id, command, "error", false, true, "unknown command \"%s\"", command);
+}
+
+// Drains whatever the server has queued for us. Bounded per pass so a burst
+// cannot stall the sample loop.
+void dispatchPendingCommands() {
+  constexpr uint8_t MAX_COMMANDS_PER_PASS = 2;
+  natkit_command::CommandRequest request{};
+  for (uint8_t handled = 0; handled < MAX_COMMANDS_PER_PASS; ++handled) {
+    if (!natkit_command::tryTakeRequest(request)) {
+      return;
+    }
+    DEBUG_SERIAL.printf("COMMAND: executing %s\n", request.command);
+    executeCommand(request);
+  }
+}
+
 // FreeRTOS task stack size for networking/IMU task
 constexpr uint32_t NETWORKING_IMU_TASK_STACK_SIZE = 16384;
 
@@ -226,6 +294,12 @@ void sendMessageTask(void*) {
     if (kafkaTopic != nullptr && currentNetworkingStage == NetworkingStage::WriteData) {
       kafkaTopic->serviceConnection(connectionConfig, mqttClient);
       kafkaTopic->writeBulkDataRecord(connectionConfig, mqttClient);
+      // Command output, produced on the IMU task, is published from here so
+      // PubSubClient keeps a single writer.
+      natkit_command::CommandLog logRecord{};
+      while (natkit_command::tryTakeLog(logRecord)) {
+        kafkaTopic->writeLogRecord(logRecord, mqttClient);
+      }
     }
   }
 }
@@ -418,6 +492,15 @@ void handleNetworkingStagesAndImuJoinedTask(void*) {
           kafkaTopic = KafkaTopic::create(UNIQUE_ID, boardId);
           DEBUG_SERIAL.println("Kafka topic created");
 
+          // Command channel: queues first (the subscribe callback fires as soon
+          // as we subscribe, and it enqueues), then the callback, then subscribe.
+          if (!natkit_command::init(kafkaTopic->getName().c_str())) {
+            DEBUG_SERIAL.println("Error: failed to create command channel queues");
+          } else {
+            mqttClient.setCallback(natkit_command::onMqttMessage);
+            kafkaTopic->subscribeToCommands(mqttClient);
+          }
+
           vTaskDelay(500);
           DEBUG_SERIAL.println("Writing meta record...");
           kafkaTopic->writeMetaRecord(connectionConfig, mqttClient);
@@ -469,6 +552,9 @@ void handleNetworkingStagesAndImuJoinedTask(void*) {
 
       case NetworkingStage::WriteData:
         if (connectionConfig.networkSsid != nullptr && connectionConfig.networkPassword != nullptr) {
+          // Server-issued commands run here rather than in the MQTT callback:
+          // they talk to the SH2 hub, which belongs to this task.
+          dispatchPendingCommands();
           imuReader.update3();
           bool isBulkReady = false;
 

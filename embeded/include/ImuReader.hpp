@@ -1003,6 +1003,13 @@ public:
 
 
 
+    // Calibration operations, forwarded to the sensor. Call only from the task
+    // that drives update3() — these issue SH2 hub commands over the same bus.
+    int saveCalibrationNow() { return bno08x_device.saveCalibrationNow(); }
+    int getCalibrationConfig(uint8_t& mask) {
+        return bno08x_device.getCalibrationConfig(mask);
+    }
+
     bool getImuData(ImuData* data) {
         constexpr uint8_t accelerometer_bit = 0b100;
         constexpr uint8_t gyroscopt_bit = 0b010;

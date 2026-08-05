@@ -5,6 +5,7 @@
 #include <macros.hpp>
 //#include <ArduinoJson.h>
 #include <HTTPClient.h>
+#include <CommandChannel.hpp>
 #include <ImuData.hpp>
 #include <libnatkit-core.hpp>
 #include <PubSubClient.h>
@@ -50,11 +51,17 @@ class KafkaTopic {
     String bulkDataTopicString;
     String metaTopicString;
     String statusTopicString;
+    String commandTopicString;
+    String logTopicString;
     // String clusterId;
     nat::core::Stream dataStream;
     nat::core::Stream metaStream;
     nat::core::Stream bulkDataStream;
     nat::core::Stream statusStream;
+    nat::core::Stream commandStream;
+    nat::core::Stream logStream;
+    // Subscriptions do not survive a reconnect, so serviceConnection() re-subscribes.
+    bool subscribedToCommands = false;
 
     nat::core::NatImuBulkDataSchema bulkImuData{};
     bool bulkImuDataReadyToSend;
@@ -81,11 +88,15 @@ public:
       metaStream(std::string(name.c_str()), nat::core::StreamType::META, id, nat::core::toString(nat::core::SerializationType::Json), nat::core::BasicMetaInfoSchema::name),
       bulkDataStream(std::string(name.c_str()), nat::core::StreamType::DATA, id, nat::core::toString(nat::core::SerializationType::Binary), nat::core::NatImuBulkDataSchema::name),
       statusStream(std::string(name.c_str()), nat::core::StreamType::LOGGING_HEARTBEAT, id, nat::core::toString(nat::core::SerializationType::Json), std::string("DeviceFirmwareStatusV1")),
+      commandStream(std::string(name.c_str()), nat::core::StreamType::EXECUTION_COMMAND, id, nat::core::toString(nat::core::SerializationType::Json), std::string("NatExecutionCommandV1")),
+      logStream(std::string(name.c_str()), nat::core::StreamType::LOGGING_LOG, id, nat::core::toString(nat::core::SerializationType::Json), std::string("NatLogV1")),
       bulkImuDataReadyToSend(false) {
         dataTopicString = dataStream.toTopicString().c_str();
         bulkDataTopicString = bulkDataStream.toTopicString().c_str();
         metaTopicString = metaStream.toTopicString().c_str();
         statusTopicString = statusStream.toTopicString().c_str();
+        commandTopicString = commandStream.toTopicString().c_str();
+        logTopicString = logStream.toTopicString().c_str();
 
         #ifdef USE_FREE_RTOS_LOCKS
         bulkImuDataLock = xSemaphoreCreateMutex();
@@ -121,9 +132,33 @@ public:
     // flowing (a total capture stall stops the heartbeat too).
     void writeStatusRecord(const ConnectionConfig& connectionConfig, PubSubClient& mqttClient);
 
+    // Subscribes to this device's command topic. The bridge republishes Kafka
+    // records under natKit/receiving/<topic>, which is the direction opposite to
+    // everything else here. Idempotent, and re-run by serviceConnection() after a
+    // reconnect (MQTT subscriptions are per-session).
+    bool subscribeToCommands(PubSubClient& mqttClient);
+
+    // Publishes one NatLogV1 record on this device's log topic. MQTT-owning task
+    // only, like every other publisher here.
+    void writeLogRecord(const natkit_command::CommandLog& record, PubSubClient& mqttClient);
+
+    const String& getName() const { return name; }
+    const String& getCommandTopic() const { return commandTopicString; }
+    const String& getLogTopic() const { return logTopicString; }
+
+    // boardId is deliberately unused: callers build it as String{UNIQUE_ID} from a
+    // uint64_t, and Arduino String has no uint64_t constructor, so the value gets
+    // narrowed to a single byte -- the device name came out as "ESP32-<one garbage
+    // char>". It only ever reached log/meta payloads (the topic identifier comes
+    // from topicId, which was always correct), so nothing was keyed off it, but the
+    // command channel matches a command's "target" against this name, so it has to
+    // be the real id. Formatted from topicId here instead.
     static KafkaTopic* create(uint64_t topicId, const String& boardId) {
-        const String name = "ESP32-" + boardId;
-        return new KafkaTopic(topicId, name);
+        (void)boardId;
+        char nameBuffer[32];
+        snprintf(nameBuffer, sizeof(nameBuffer), "ESP32-%llu",
+                 (unsigned long long)topicId);
+        return new KafkaTopic(topicId, String(nameBuffer));
     }
 
     // static String getKafkaCluster(const ConnectionConfig& config, uint8_t& size);
@@ -131,6 +166,72 @@ public:
 
 
 String KafkaTopic::mqttUrlTemplate = "natKit/sending/%s";
+// Server -> device. The bridge publishes every Kafka record it forwards under
+// this prefix; it subscribes to natKit/sending/# for the other direction, so the
+// two never feed each other.
+static const char* MQTT_RECEIVING_URL_TEMPLATE = "natKit/receiving/%s";
+
+bool KafkaTopic::subscribeToCommands(PubSubClient& mqttClient) {
+    if (!mqttClient.connected()) {
+        return false;
+    }
+    char topicBuffer[256];
+    snprintf(topicBuffer, sizeof(topicBuffer), MQTT_RECEIVING_URL_TEMPLATE,
+             commandTopicString.c_str());
+    if (mqttClient.subscribe(topicBuffer)) {
+        subscribedToCommands = true;
+        DEBUG_SERIAL.printf("Subscribed to command topic %s\n", topicBuffer);
+        return true;
+    }
+    subscribedToCommands = false;
+    DEBUG_SERIAL.printf("Failed to subscribe to command topic %s\n", topicBuffer);
+    return false;
+}
+
+void KafkaTopic::writeLogRecord(const natkit_command::CommandLog& record,
+                                PubSubClient& mqttClient) {
+    if (WiFi.status() != WL_CONNECTED || !mqttClient.connected()) {
+        return;
+    }
+
+    // Escape the message: it is the one field built from a handler's printf, so
+    // it can contain a quote or a backslash and must not break the record.
+    char escaped[natkit_command::LOG_MESSAGE_MAX * 2];
+    size_t written = 0;
+    for (const char* c = record.message; *c != '\0' && written + 2 < sizeof(escaped); ++c) {
+        if (*c == '"' || *c == '\\') {
+            escaped[written++] = '\\';
+            escaped[written++] = *c;
+        } else if (*c == '\n') {
+            escaped[written++] = '\\';
+            escaped[written++] = 'n';
+        } else if ((unsigned char)*c < 0x20) {
+            escaped[written++] = ' ';
+        } else {
+            escaped[written++] = *c;
+        }
+    }
+    escaped[written] = '\0';
+
+    char logBuffer[768];
+    const int size = snprintf(
+        logBuffer, sizeof(logBuffer),
+        "{\"schema_version\":\"nat.log.v1\",\"source\":\"%s\","
+        "\"command_id\":\"%s\",\"command\":\"%s\",\"level\":\"%s\","
+        "\"ok\":%s,\"terminal\":%s,\"message\":\"%s\",\"emitted_at_us\":%lld}",
+        name.c_str(), record.command_id, record.command, record.level,
+        record.ok ? "true" : "false", record.terminal ? "true" : "false",
+        escaped, (long long)getAdjustedLocalTimeUs());
+    if (size <= 0 || size >= (int)sizeof(logBuffer)) {
+        DEBUG_SERIAL.println("Error: log record did not fit in buffer");
+        return;
+    }
+
+    sprintf(kafkaUrlBuffer, mqttUrlTemplate.c_str(), logTopicString.c_str());
+    if (!mqttClient.publish(kafkaUrlBuffer, (const uint8_t*)logBuffer, size)) {
+        DEBUG_SERIAL.printf("Error: failed to publish log record to %s\n", kafkaUrlBuffer);
+    }
+}
 
 void KafkaTopic::writeMetaRecord(const ConnectionConfig& connectionConfig, PubSubClient& mqttClient) {
     
@@ -229,13 +330,19 @@ void KafkaTopic::serviceConnection(const ConnectionConfig& connectionConfig, Pub
         // reconnect per tick; if it fails we retry on the next service call.
         if (mqttClient.connect("natKit-IMU")) {
             DEBUG_SERIAL.println("MQTT (re)connected");
+            // The old session's subscriptions died with it.
+            subscribedToCommands = false;
         } else {
             DEBUG_SERIAL.println("MQTT reconnect pending...");
             return;
         }
     }
+    if (!subscribedToCommands) {
+        subscribeToCommands(mqttClient);
+    }
     // Pump the client so keepalive PINGREQs go out and a dead link is detected
-    // even when the sensor is producing no data.
+    // even when the sensor is producing no data. Inbound command messages are
+    // also delivered from here, via the subscribe callback.
     mqttClient.loop();
 }
 

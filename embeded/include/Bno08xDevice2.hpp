@@ -156,6 +156,36 @@ public:
 
     std::string start(bool& was_successful);
     Bno08xEvent get_event(bool& was_successful);
+
+    // --- calibration operations, driven by the EXECUTION_COMMAND channel -----
+    // These talk to the SH2 hub, so they MUST be called from the task that owns
+    // the sensor (the networking/IMU task). Each returns an SH2 status code:
+    // SH2_OK (0) on success, negative on failure.
+
+    // Persists the current dynamic calibration (DCD) to flash immediately.
+    // Per the BNO080/085 datasheet §3.4 the hub only writes DCD to FRS on a
+    // non-power-up reset, so a device that is simply powered off loses whatever
+    // it learned since boot. This is the explicit "save it now" the datasheet
+    // provides for exactly that case.
+    int saveCalibrationNow() {
+        #ifdef NAT_SIMULATE_BNO08X
+        return 0;
+        #else
+        return sh2_saveDcdNow();
+        #endif // NAT_SIMULATE_BNO08X
+    }
+
+    // Reads the hub's dynamic-calibration mask. NOTE: on this hub the read-back
+    // is not faithful (see the note in setup()) — it reports 0x05 regardless of
+    // what was written — so treat this as diagnostic only.
+    int getCalibrationConfig(uint8_t& mask) {
+        #ifdef NAT_SIMULATE_BNO08X
+        mask = 0x07;
+        return 0;
+        #else
+        return sh2_getCalConfig(&mask);
+        #endif // NAT_SIMULATE_BNO08X
+    }
 };
 
 
