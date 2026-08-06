@@ -1012,6 +1012,9 @@ public:
     int setCalibrationConfig(uint8_t mask) {
         return bno08x_device.setCalibrationConfig(mask);
     }
+    const Bno08xDevice::Diagnostics& getSensorDiagnostics() const {
+        return bno08x_device.getDiagnostics();
+    }
 
     bool getImuData(ImuData* data) {
         constexpr uint8_t accelerometer_bit = 0b100;

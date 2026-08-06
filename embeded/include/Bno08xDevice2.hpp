@@ -33,7 +33,10 @@
 // #define NAT_BNO08X_ENABLE_LINEAR_ACCELERATION
 // #define NAT_BNO08X_ENABLE_GYROSCOPE_UNCALIBRATED
 #define NAT_BNO08X_ENABLE_GYROSCOPE_CALIBRATED
-// #define NAT_BNO08X_ENABLE_MAGNETIC_FIELD_CALIBRATED
+// Enabled so magnetometer accuracy is OBSERVABLE: the rotation vector is the
+// 9-axis fusion and its accuracy depends on mag convergence, but with this
+// report off there was no way to see whether the mag was calibrating at all.
+#define NAT_BNO08X_ENABLE_MAGNETIC_FIELD_CALIBRATED
 #define NAT_BNO08X_ENABLE_ROTATION_VECTOR
 // #define NAT_BNO08X_ENABLE_GEOMAGNETIC_ROTATION_VECTOR
 
@@ -159,6 +162,26 @@ class Bno08xDevice {
     std::string setup(bool& was_successful);
 
 public:
+    // Raw, unmassaged view of what the hub last said per report. Exists because
+    // the packed accuracies byte cannot distinguish "the hub says Unreliable"
+    // from "no report of that kind has arrived", and the rotation vector carries
+    // its own error estimate (radians) that the status bits do not expose at all.
+    struct Diagnostics {
+        uint8_t last_status_accel = 0xff;      // 0xff = never seen
+        uint8_t last_status_gyro = 0xff;
+        uint8_t last_status_rotation = 0xff;
+        uint8_t last_status_magnetometer = 0xff;
+        float last_rotation_accuracy_rad = -1.0f;  // <0 = never seen
+        uint32_t count_accel = 0;
+        uint32_t count_gyro = 0;
+        uint32_t count_rotation = 0;
+        uint32_t count_magnetometer = 0;
+    };
+
+    Diagnostics diagnostics{};
+
+    const Diagnostics& getDiagnostics() const { return diagnostics; }
+
     Bno08xDevice() {}
 
     std::string start(bool& was_successful);
@@ -757,6 +780,8 @@ Bno08xEvent Bno08xDevice::get_event(bool& was_successful) {
         case SH2_ACCELEROMETER: {
             event.event_type = Bno08xEvent::EventType::Accelerometer;
             event.accuracy = sensorValue.status & SH2_STATUS_ACCURACY_MASK;
+            diagnostics.last_status_accel = sensorValue.status;
+            ++diagnostics.count_accel;
 
             Bno08xEvent::ThreeDimensional data{};
             data.x = sensorValue.un.accelerometer.x;
@@ -796,6 +821,8 @@ Bno08xEvent Bno08xDevice::get_event(bool& was_successful) {
         case SH2_GYROSCOPE_CALIBRATED: {
             event.event_type = Bno08xEvent::EventType::GyroscopeCalibrated;
             event.accuracy = sensorValue.status & SH2_STATUS_ACCURACY_MASK;
+            diagnostics.last_status_gyro = sensorValue.status;
+            ++diagnostics.count_gyro;
 
             Bno08xEvent::ThreeDimensional data{};
             data.x = sensorValue.un.gyroscope.x;
@@ -822,6 +849,8 @@ Bno08xEvent Bno08xDevice::get_event(bool& was_successful) {
         case SH2_MAGNETIC_FIELD_CALIBRATED: {
             event.event_type = Bno08xEvent::EventType::MagneticFieldCalibrated;
             event.accuracy = sensorValue.status & SH2_STATUS_ACCURACY_MASK;
+            diagnostics.last_status_magnetometer = sensorValue.status;
+            ++diagnostics.count_magnetometer;
 
             Bno08xEvent::ThreeDimensional data{};
             data.x = sensorValue.un.magneticField.x;
@@ -835,6 +864,13 @@ Bno08xEvent Bno08xDevice::get_event(bool& was_successful) {
         case SH2_ROTATION_VECTOR: {
             event.event_type = Bno08xEvent::EventType::RotationVector;
             event.accuracy = sensorValue.status & SH2_STATUS_ACCURACY_MASK;
+            diagnostics.last_status_rotation = sensorValue.status;
+            // The rotation vector's own error estimate, which the status bits do
+            // not carry. This is the only way to tell a fusion that is actually
+            // converging from one that is not.
+            diagnostics.last_rotation_accuracy_rad =
+                sensorValue.un.rotationVector.accuracy;
+            ++diagnostics.count_rotation;
 
             Bno08xEvent::FourDimensional data{};
             data.real = sensorValue.un.rotationVector.real;

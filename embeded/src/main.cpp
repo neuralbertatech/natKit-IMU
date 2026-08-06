@@ -308,6 +308,28 @@ void executeCommand(const natkit_command::CommandRequest& request) {
     return;
   }
 
+  if (strcmp(command, "imu.diag") == 0) {
+    // Raw per-report view. The packed accuracies byte cannot tell "the hub says
+    // Unreliable" from "no such report has ever arrived", and the rotation
+    // vector's own error estimate (radians) is not in the status bits at all --
+    // which is exactly the distinction needed when rotation will not leave 0.
+    const auto& d = imuReader.getSensorDiagnostics();
+    const auto describe = [](uint8_t status) -> int {
+      return status == 0xff ? -1 : (status & 0x03);
+    };
+    emitLog(id, command, "info", true, true,
+            "accel[n=%lu st=0x%02x acc=%d] gyro[n=%lu st=0x%02x acc=%d] "
+            "mag[n=%lu st=0x%02x acc=%d] rot[n=%lu st=0x%02x acc=%d err=%.4frad]",
+            (unsigned long)d.count_accel, d.last_status_accel,
+            describe(d.last_status_accel), (unsigned long)d.count_gyro,
+            d.last_status_gyro, describe(d.last_status_gyro),
+            (unsigned long)d.count_magnetometer, d.last_status_magnetometer,
+            describe(d.last_status_magnetometer),
+            (unsigned long)d.count_rotation, d.last_status_rotation,
+            describe(d.last_status_rotation), d.last_rotation_accuracy_rad);
+    return;
+  }
+
   if (strcmp(command, "calibrate.set_config") == 0) {
     // args: {"mask": 7} or {"mask": "0x07"}. Default enables accel+gyro+mag,
     // which is what setup() asks for and fails to get.
