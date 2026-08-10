@@ -67,6 +67,21 @@ build_dir="build/${target}-${role}"
 # (flash size, PSRAM) would be silently dropped.
 defaults="sdkconfig.defaults;sdkconfig.defaults.${target};roles/${role}.defaults"
 
+# ESP-IDF reads sdkconfig.defaults* ONLY when the generated sdkconfig does not
+# exist yet. After that, editing a defaults file silently does nothing: the
+# build succeeds and the setting is simply absent from the image. Measured the
+# hard way -- a flash-driver option was "applied" for two builds before anyone
+# looked at the generated sdkconfig.
+sdkconfig_path="${build_dir}/sdkconfig"
+if [[ -f "${sdkconfig_path}" ]]; then
+  for f in "sdkconfig.defaults" "sdkconfig.defaults.${target}" "roles/${role}.defaults"; do
+    if [[ -f "${f}" && "${f}" -nt "${sdkconfig_path}" ]]; then
+      echo "$0: WARNING: ${f} is newer than ${sdkconfig_path} -- ESP-IDF will IGNORE it." >&2
+      echo "$0:          run 'rm ${sdkconfig_path}' and rebuild to pick the change up." >&2
+    fi
+  done
+fi
+
 set -x
 exec idf.py \
   -B "${build_dir}" \

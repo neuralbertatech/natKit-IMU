@@ -82,6 +82,12 @@ change someone made to the defaults. The committed source of truth is:
 Only deliberate deviations from the IDF defaults live in those files, each with
 the reason it is there.
 
+> **ESP-IDF reads `sdkconfig.defaults*` only when the generated `sdkconfig` does
+> not exist yet.** After the first build, editing a defaults file silently does
+> nothing — the build succeeds and the setting is just absent from the image.
+> `build-role.sh` warns when a defaults file is newer than the generated
+> `sdkconfig`; the fix is `rm build/<target>-<role>/sdkconfig` and rebuild.
+
 ## Layout
 
 ```

@@ -1,15 +1,34 @@
-# Classic ESP32 target: the natKit-IMU board's ESP32-PICO-D4 / PICO-V3-02.
+# Classic ESP32 target: the natKit-IMU board's ESP32-PICO-V3-02.
 # ESP-IDF appends sdkconfig.defaults.<target> to sdkconfig.defaults on
-# `idf.py set-target`.
+# `idf.py set-target`; ./build-role.sh passes it explicitly (an explicit
+# SDKCONFIG_DEFAULTS suppresses the automatic append).
 
-# The PICO-D4 has 4 MB of embedded flash. The IDF default is 2 MB, which builds
-# and flashes fine but silently caps the partition table -- and the Arduino
-# image already needs a 3 MB app partition (huge_app.csv), so under-declaring
-# here would put a ceiling on this fork before the sensor even lands.
+# Declared 4 MB deliberately, even though the board we have measures larger.
+#
+# Measured on the actual node (esptool + boot log, 2026-08-10): the chip is an
+# ESP32-PICO-V3-02 with 8 MB of embedded flash, and the app therefore logs
+#   W spi_flash: Detected size(8192k) larger than the size in the binary image
+#   header(4096k). Using the size in the binary image header.
+# on every boot. That warning is the SAFE direction: under-declaring wastes
+# flash, whereas an image header claiming 8 MB on a 4 MB part is the one that
+# breaks. The older PICO-D4 in the epic's hardware notes is a 4 MB part, so
+# until the fleet is known to be V3-02 across the board this stays at 4 MB --
+# there is no pressure either way while the app is ~180 KB in a 1 MB partition.
+# Raise to CONFIG_ESPTOOLPY_FLASHSIZE_8MB=y once that is settled, or move it
+# into a board-specific fragment if the fleet turns out to be mixed.
 CONFIG_ESPTOOLPY_FLASHSIZE_4MB=y
 
-# No PSRAM on the PICO-D4. Off is the IDF default; stated because the Arduino
-# build had to fight the opposite assumption -- the prebuilt arduino-esp32 libs
+# The V3-02 has 2 MB of embedded PSRAM (esptool reports "Embedded PSRAM"), and
+# it is left OFF on purpose rather than by ignorance: nothing here needs it, and
+# the Arduino image had to force it off too -- the prebuilt arduino-esp32 libs
 # assume CONFIG_SPIRAM=y and starved the internal heap until platformio.ini
-# forced it off (esp_timer failed to create its task at boot).
+# disabled it (esp_timer failed to create its task at boot). If a later slice
+# wants PSRAM for frame buffering, turning it on is a deliberate change with a
+# heap measurement attached, not a default.
 CONFIG_SPIRAM=n
+
+# Measured: the flash on this board is a Boya part, and without this the driver
+# falls back to generic and says so on every boot
+#   W spi_flash: Detected boya flash chip but using generic driver.
+# Enabling it only adds that chip's driver; other parts still use generic.
+CONFIG_SPI_FLASH_SUPPORT_BOYA_CHIP=y
