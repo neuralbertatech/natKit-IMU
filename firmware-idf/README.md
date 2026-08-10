@@ -137,19 +137,31 @@ What has been checked, as of the scaffold slice:
 - Each build's generated `sdkconfig` carries the expected
   `CONFIG_NATKIT_ROLE_*` and a 4 MB flash size — a role fragment that failed to
   apply would still have built, so this is checked rather than assumed.
-- `../embeded` still builds unchanged at `pio run -e release`.
+- **Boots on the real node** (ESP32-PICO-V3-02 rev v3.0, MAC
+  `0c:8b:95:96:b9:f4`): the leaf image logs `natKit-IMU-idf v0.1.0`,
+  `role: leaf`, `target: esp32 rev 3.0, 2 core(s), ESP-IDF v5.5.3`,
+  `device id: 13793649670644 (mac 0c:8b:95:96:b9:f4)`, `last reset: power-on`,
+  then the idle loop with **heap flat at 297112 B** across 40 s. The board's
+  real MAC also confirms the `static_assert`'s device id independently.
+- **The rollback command works end to end.** After a full clean rebuild
+  (`pio run -e release -t fullclean` then build, 25m07s),
+  `pio run -e release -t upload` restored the Arduino firmware, which came back
+  up as `natKit-IMU v0.5.0` / `Unique ID: 13793649670644`, synced NTP and
+  resumed publishing to
+  `natKit/sending/Data-13793649670644-Binary-NatImuBulkDataSchema`.
 
-**Not yet verified: booting on hardware.** No board was attached when this slice
-landed (`/dev/ttyUSB*` and `/dev/ttyACM*` both absent), so the boot banner and
-role dispatch are unproven on silicon. Two ways to close it:
+Console captures are in `~/natkit-verification/598a800/` with a `MANIFEST.md`.
 
-1. Attach the IMU board and `./build-role.sh leaf esp32 -p <PORT> flash monitor`
-   — expect the banner (firmware/version, role, target/revision/cores/IDF,
-   device id + MAC, reset reason, heap) then a status line every 10 s.
-2. Boot it in QEMU with no hardware at all: `idf.py qemu monitor`. Espressif's
-   QEMU **fails to install on this box** — the binary needs `libslirp.so.0`,
-   which is not present (`sudo dnf install libslirp` should fix it; the 15 MB
-   tarball is already cached in `~/.espressif/dist`, so a retry is quick).
+Two notes for the next person on a console:
+
+- **Read the serial port from exactly one process.** Two readers split the byte
+  stream and produce plausible-looking interleaved garbage — half of one line
+  spliced into another — which reads like a firmware bug and is not one. Reset
+  and read in a single process.
+- `idf.py qemu` would let all of this happen with no board attached, but
+  Espressif's QEMU **does not install on this box**: the binary needs
+  `libslirp.so.0`, which is absent (`sudo dnf install libslirp`, then retry — the
+  15 MB tarball is already cached in `~/.espressif/dist`).
 
 ## Traps
 

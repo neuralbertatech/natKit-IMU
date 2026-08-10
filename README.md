@@ -12,7 +12,7 @@ the same topic names, so knowing which one is on a board is not optional.
 | What | the firmware in use — every node is a full WiFi/MQTT/NTP client | a **fork** (EPIC TEC-NATKIT-20): primary/secondary nodes over ESP-NOW, serial uplink to one networked gateway |
 | Framework | Arduino via pioarduino (arduino-esp32 3.3.11 / ESP-IDF 5.5.5) | native ESP-IDF (`idf.py`), v5.5.3 |
 | Build | `cd embeded && pio run -e release` | `cd firmware-idf && ./build-role.sh leaf esp32` |
-| Status | **known good on hardware** | scaffold: builds for esp32 + esp32c3, roles stubbed, **not yet booted on a board** |
+| Status | **known good on hardware** | scaffold: builds for esp32 + esp32c3, **boots on the real node**, roles stubbed |
 
 The fork is **additive and reversible**. No slice of the epic edits `embeded/`,
 which stays buildable and flashable throughout, and the epic ends in an explicit
@@ -26,8 +26,14 @@ that it is a record rather than a measurement (nothing is read back off a board)
 
 | Board | Firmware | Recorded |
 |---|---|---|
-| natKit-IMU node (ESP32-PICO-V3-02, BNO08x) | `embeded/` @ `trunk` — the verified-good calibration state | 2026-08-10 |
-| — | no board has been flashed with `firmware-idf/` yet | 2026-08-10 |
+| natKit-IMU node — ESP32-PICO-V3-02 rev v3.0, MAC `0c:8b:95:96:b9:f4`, BNO08x | **`embeded/`**, rebuilt and re-uploaded from `firmware-idf-fork` (identical source to `trunk`; the fork adds no files to `embeded/`). Verified streaming. | 2026-08-10 |
+
+That board briefly ran `firmware-idf/`'s leaf image on 2026-08-10 to prove the
+fork boots, and was restored with the rollback command below. A pre-flash 4 MB
+dump of the working firmware is kept at
+`~/natkit-verification/598a800/embeded-preflash-backup.bin` (sha256 in
+`backup.sha256`) if a byte-exact restore is ever wanted:
+`esptool write_flash 0 embeded-preflash-backup.bin`.
 
 ### Putting the current firmware back
 
