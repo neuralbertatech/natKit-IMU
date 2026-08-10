@@ -66,8 +66,32 @@ other's config:
 ./build-role.sh primary esp32 menuconfig    # edits only that role's sdkconfig
 ```
 
-Targets: **esp32** (the IMU board's ESP32-PICO-D4 / PICO-V3-02) and **esp32c3**
-(natVR's EMG node). Both build all three roles.
+Targets: **esp32** (the IMU board's ESP32-PICO-V3-02) and **esp32c3** (natVR's
+EMG node). Both build all three roles.
+
+## Boot it with no board attached
+
+```sh
+./build-role.sh gateway esp32 qemu      # builds, then boots in QEMU on stdout
+./build-role.sh leaf esp32c3 qemu       # the C3 image, via qemu-riscv32
+```
+
+Espressif's QEMU emulates both targets, which is how a role that is not on any
+bench board still gets a boot check. Three things to know:
+
+- **Use the plain `qemu` action, not `qemu monitor`.** The monitor refuses to run
+  without a TTY ("Monitor requires standard input to be attached to TTY"),
+  whereas `qemu` alone runs in the foreground with `-serial mon:stdio`, so
+  `timeout 40 ./build-role.sh … qemu </dev/null` captures the console cleanly.
+- **QEMU's efuse is blank**, so the MAC reads `00:00:00:00:00:00` and the device
+  id reads **0**. That is an emulator artifact, not a bug — do not "fix" it. The
+  device-id invariant can only be checked on real silicon.
+- It emulates neither the BNO08x, nor ESP-NOW peers, nor a real UART peer, so the
+  sensor and radio slices still need the bench. What it does prove is boot, role
+  dispatch, the banner and heap behaviour.
+
+If `qemu-system-xtensa` is missing, `idf_tools.py install qemu-xtensa
+qemu-riscv32` installs both; it needs the system `libslirp` present.
 
 ## Configuration
 
@@ -150,18 +174,18 @@ What has been checked, as of the scaffold slice:
   resumed publishing to
   `natKit/sending/Data-13793649670644-Binary-NatImuBulkDataSchema`.
 
+- **Every one of the six images has now been booted, not just built.**
+  leaf/esp32 on the real node; primary/esp32, gateway/esp32 and leaf/esp32c3 in
+  QEMU (the C3 correctly reports `rev 0.3, 1 core(s)`, so the packed-revision
+  handling holds on both targets). Each dispatched to its own role and settled
+  into a flat-heap idle loop.
+
 Console captures are in `~/natkit-verification/598a800/` with a `MANIFEST.md`.
 
-Two notes for the next person on a console:
-
-- **Read the serial port from exactly one process.** Two readers split the byte
-  stream and produce plausible-looking interleaved garbage — half of one line
-  spliced into another — which reads like a firmware bug and is not one. Reset
-  and read in a single process.
-- `idf.py qemu` would let all of this happen with no board attached, but
-  Espressif's QEMU **does not install on this box**: the binary needs
-  `libslirp.so.0`, which is absent (`sudo dnf install libslirp`, then retry — the
-  15 MB tarball is already cached in `~/.espressif/dist`).
+One note for the next person on a console: **read the serial port from exactly
+one process.** Two readers split the byte stream and produce plausible-looking
+interleaved garbage — half of one line spliced into another — which reads like a
+firmware bug and is not one. Reset and read in a single process.
 
 ## Traps
 
