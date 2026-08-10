@@ -1,0 +1,3 @@
+# Role fragment: leaf (secondary) node -- sensor + ESP-NOW only.
+# Applied on top of sdkconfig.defaults by ./build-role.sh leaf <target>.
+CONFIG_NATKIT_ROLE_LEAF=y

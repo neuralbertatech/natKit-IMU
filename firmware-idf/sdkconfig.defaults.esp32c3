@@ -1,0 +1,14 @@
+# ESP32-C3 target: natVR's EMG node, and the cheap single-core option for a
+# leaf. ESP-IDF appends sdkconfig.defaults.<target> to sdkconfig.defaults on
+# `idf.py set-target`; ./build-role.sh passes it explicitly (an explicit
+# SDKCONFIG_DEFAULTS suppresses the automatic append).
+
+# 4 MB is the usual C3 devkit / EXG-Pill node part. Same reason as the PICO-D4:
+# the IDF default of 2 MB silently caps the partition table.
+CONFIG_ESPTOOLPY_FLASHSIZE_4MB=y
+
+# The C3 has no USB-to-UART bridge on some boards and logs over the built-in
+# USB Serial/JTAG instead. Left at the IDF default (UART0) rather than forced:
+# natVR flashes C3 boards over /dev/ttyUSB0 through a bridge, so changing the
+# console here would break the console on the board we actually have. Revisit
+# only if a leaf ends up on a bridge-less C3.

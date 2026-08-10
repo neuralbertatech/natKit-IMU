@@ -1,0 +1,3 @@
+# Role fragment: primary -- ESP-NOW hub, timing master, serial uplink.
+# Applied on top of sdkconfig.defaults by ./build-role.sh primary <target>.
+CONFIG_NATKIT_ROLE_PRIMARY=y

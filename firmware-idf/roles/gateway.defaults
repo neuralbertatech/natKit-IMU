@@ -1,0 +1,3 @@
+# Role fragment: gateway -- serial in, WiFi/Ethernet + MQTT out.
+# Applied on top of sdkconfig.defaults by ./build-role.sh gateway <target>.
+CONFIG_NATKIT_ROLE_GATEWAY=y

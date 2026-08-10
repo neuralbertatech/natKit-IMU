@@ -1,0 +1,11 @@
+# Shared defaults for every role and every target.
+#
+# Only deliberate deviations from the ESP-IDF defaults belong here -- nothing
+# copied across "just in case". `sdkconfig` itself is generated per target and
+# is gitignored, so this file (plus sdkconfig.defaults.<target>) is the only
+# committed source of truth for the build config.
+
+# The IMU frame path is stack-hungry (the Arduino image gave its send task
+# 18 KB) and the default 3584 B main task stack is not enough headroom for the
+# sh2 driver's callbacks landing on it. Matches natVR/firmware.
+CONFIG_ESP_MAIN_TASK_STACK_SIZE=8192

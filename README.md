@@ -2,6 +2,53 @@
 
 ESP32-based IMU sensor device for the natKit BCI toolkit. This device collects inertial measurement data and streams it to the natKit backend via MQTT.
 
+## There are two firmwares — read this first
+
+This repository holds **two** node firmwares. They speak to the same broker and
+the same topic names, so knowing which one is on a board is not optional.
+
+| | [`embeded/`](embeded) | [`firmware-idf/`](firmware-idf) |
+|---|---|---|
+| What | the firmware in use — every node is a full WiFi/MQTT/NTP client | a **fork** (EPIC TEC-NATKIT-20): primary/secondary nodes over ESP-NOW, serial uplink to one networked gateway |
+| Framework | Arduino via pioarduino (arduino-esp32 3.3.11 / ESP-IDF 5.5.5) | native ESP-IDF (`idf.py`), v5.5.3 |
+| Build | `cd embeded && pio run -e release` | `cd firmware-idf && ./build-role.sh leaf esp32` |
+| Status | **known good on hardware** | scaffold: builds for esp32 + esp32c3, roles stubbed, **not yet booted on a board** |
+
+The fork is **additive and reversible**. No slice of the epic edits `embeded/`,
+which stays buildable and flashable throughout, and the epic ends in an explicit
+adopt-or-discard decision (TEC-NATKIT-27). If the fork is discarded, deleting
+`firmware-idf/` is the whole cleanup.
+
+### Which firmware is on which board
+
+Last recorded state — **update this table when you flash something**, and note
+that it is a record rather than a measurement (nothing is read back off a board):
+
+| Board | Firmware | Recorded |
+|---|---|---|
+| natKit-IMU node (ESP32-PICO-V3-02, BNO08x) | `embeded/` @ `trunk` — the verified-good calibration state | 2026-08-10 |
+| — | no board has been flashed with `firmware-idf/` yet | 2026-08-10 |
+
+### Putting the current firmware back
+
+One command, from a checkout of this repo:
+
+```bash
+cd embeded && pio run -e release -t upload
+```
+
+That is the rollback. It rebuilds and flashes the Arduino firmware from whatever
+commit is checked out, so `git -C . checkout trunk` first if the working tree has
+moved on; add `--upload-port /dev/ttyUSB0` if more than one board is attached.
+Nothing needs to be uninstalled or undone on the ESP-IDF side, because the two
+trees share no toolchain, no build directory and no configuration.
+
+> **Trap:** `espressif32` and `pioarduino` share
+> `~/.platformio/packages/framework-arduinoespressif32` and cannot coexist. If
+> the official platform has been installed since, remove that directory before
+> the rollback build. (The IDF fork sidesteps this entirely — it never touches
+> `~/.platformio` — but `embeded/` still lives under PlatformIO.)
+
 ## Hardware Requirements
 
 - ESP32 development board (tested with Pico32)
@@ -27,8 +74,11 @@ natKit-IMU/
 │   ├── src/
 │   │   └── main.cpp      # Main application code
 │   └── platformio.ini    # PlatformIO configuration
+├── firmware-idf/         # the native ESP-IDF fork (see its own README)
 └── board/                # Hardware design files
 ```
+
+Everything below this line describes `embeded/`, the PlatformIO firmware.
 
 ## Setup
 

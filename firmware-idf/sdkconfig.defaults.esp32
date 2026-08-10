@@ -1,0 +1,15 @@
+# Classic ESP32 target: the natKit-IMU board's ESP32-PICO-D4 / PICO-V3-02.
+# ESP-IDF appends sdkconfig.defaults.<target> to sdkconfig.defaults on
+# `idf.py set-target`.
+
+# The PICO-D4 has 4 MB of embedded flash. The IDF default is 2 MB, which builds
+# and flashes fine but silently caps the partition table -- and the Arduino
+# image already needs a 3 MB app partition (huge_app.csv), so under-declaring
+# here would put a ceiling on this fork before the sensor even lands.
+CONFIG_ESPTOOLPY_FLASHSIZE_4MB=y
+
+# No PSRAM on the PICO-D4. Off is the IDF default; stated because the Arduino
+# build had to fight the opposite assumption -- the prebuilt arduino-esp32 libs
+# assume CONFIG_SPIRAM=y and starved the internal heap until platformio.ini
+# forced it off (esp_timer failed to create its task at boot).
+CONFIG_SPIRAM=n

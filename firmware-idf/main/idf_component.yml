@@ -1,0 +1,14 @@
+## IDF Component Manager manifest for the fork's main component.
+dependencies:
+  idf:
+    # ESP-IDF v5.5.3 is what is installed on the bench box (~/esp/esp-idf).
+    version: '>=5.5'
+  # Nothing managed yet -- the scaffold uses only core components. Expected
+  # additions, so the next slice knows where they go rather than reaching for a
+  # REQUIRES that no longer exists in IDF v6:
+  #   espressif/cjson  and  espressif/mqtt  for the gateway (TEC-NATKIT-26).
+  #     Both were removed from IDF core in v6.0 and now live in the registry;
+  #     natVR/firmware already declares them this way.
+  #   the CEVA sh2 driver for the BNO08x (TEC-NATKIT-22) -- vendored rather than
+  #     managed if no registry component matches the version the Adafruit stack
+  #     was built against.

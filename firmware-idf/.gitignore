@@ -1,0 +1,28 @@
+# Build output.
+build/
+
+# `sdkconfig` is GENERATED from sdkconfig.defaults + sdkconfig.defaults.<target>
+# and it bakes in the target. Committing it is how a checkout ends up quietly
+# building for the wrong chip, or ignoring a change someone made to the
+# defaults, so it stays out of the tree: change config in sdkconfig.defaults*,
+# or with `idf.py menuconfig` for a local experiment.
+sdkconfig
+sdkconfig.old
+
+# Fetched by the component manager from main/idf_component.yml.
+managed_components/
+
+# `dependencies.lock` records the target it was generated for, so building the
+# other chip rewrites it -- committing it means a spurious diff on every
+# alternate-target build, and there is nothing to pin yet (the manifest declares
+# only an IDF floor). Worth reconsidering when the gateway slice adds real
+# managed components: the version pinning becomes valuable then, and the churn
+# is the price.
+dependencies.lock
+
+# clangd index (also written when the editor opens this tree).
+.cache/
+
+# Local credentials, once the gateway slice needs them (same shape as
+# natVR/firmware and ../embeded/include/DevConfig.hpp).
+main/DevConfig.hpp

@@ -1,0 +1,51 @@
+menu "natKit node"
+
+choice NATKIT_NODE_ROLE
+    prompt "Node role"
+    default NATKIT_ROLE_LEAF
+    help
+        Which of the three roles in the primary/secondary architecture this
+        image is (EPIC TEC-NATKIT-20). One tree, three images.
+
+        The role is a build-time choice rather than a runtime one on purpose:
+        the whole point of the split is that a leaf never brings up WiFi, MQTT
+        or NTP, so a leaf image should not even contain them. Switching role is
+        a rebuild and a reflash.
+
+config NATKIT_ROLE_LEAF
+    bool "Leaf (secondary): sensor + ESP-NOW only"
+    help
+        A sensor node. Reads the IMU and sends frames to the primary over
+        ESP-NOW. No WiFi association, no MQTT, no NTP -- it takes its time from
+        the primary's timing broadcast.
+
+config NATKIT_ROLE_PRIMARY
+    bool "Primary: ESP-NOW hub, timing master, serial uplink"
+    help
+        The ESP-NOW hub. Holds the registry of which leaves it will listen to,
+        reassembles their frames, is the timing master for the 1-second
+        broadcast, and forwards everything over serial to the gateway.
+
+config NATKIT_ROLE_GATEWAY
+    bool "Gateway: serial in, WiFi/Ethernet + MQTT out"
+    help
+        The only internet-facing device. Reads the primary's serial stream and
+        publishes it on the existing natKit MQTT topic contract
+        (natKit/receiving/<Topic>-<id>-Json-<Schema>), so nothing server-side
+        changes. Also the NTP client.
+
+endchoice
+
+config NATKIT_STATUS_LOG_INTERVAL_S
+    int "Status log interval (seconds, 0 = off)"
+    default 10
+    range 0 3600
+    help
+        How often the idle status line (uptime, free heap, minimum free heap)
+        is written to the console. It exists so a boot check or an overnight
+        soak has something to watch, and so heap drift is visible without
+        attaching a debugger -- the old firmware's std::bad_alloc came from the
+        frame path allocating per copy, which a flat free-heap line would have
+        made obvious.
+
+endmenu
