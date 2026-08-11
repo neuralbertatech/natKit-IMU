@@ -26,7 +26,7 @@ that it is a record rather than a measurement (nothing is read back off a board)
 
 | Board | Firmware | Recorded |
 |---|---|---|
-| natKit-IMU node — ESP32-PICO-V3-02 rev v3.0, MAC `0c:8b:95:96:b9:f4`, BNO08x | **`embeded/`**, rebuilt and re-uploaded from `firmware-idf-fork` (identical source to `trunk`; the fork adds no files to `embeded/`). Verified streaming. | 2026-08-10 |
+| natKit-IMU node — ESP32-PICO-V3-02 rev v3.0, MAC `0c:8b:95:96:b9:f4`, BNO08x | **`embeded/`** @ `trunk`, rebuilt and re-uploaded. Verified streaming. | 2026-08-10 |
 
 That board briefly ran `firmware-idf/`'s leaf image on 2026-08-10 to prove the
 fork boots, and was restored with the rollback command below. A pre-flash 4 MB
