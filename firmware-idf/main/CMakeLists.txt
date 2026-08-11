@@ -3,6 +3,7 @@ idf_component_register(
         "main.cpp"
         "device_id.cpp"
         "node_role.cpp"
+        "bno08x.cpp"
         "leaf.cpp"
         "primary.cpp"
         "gateway.cpp"
@@ -10,9 +11,12 @@ idf_component_register(
         "."
     REQUIRES
         esp_app_format
+        esp_driver_gpio
+        esp_driver_spi
         esp_hw_support
         esp_timer
         nvs_flash
+        sh2
 )
 
 # ALL THREE role sources are compiled into every image, even though only the

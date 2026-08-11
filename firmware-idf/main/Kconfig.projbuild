@@ -36,6 +36,27 @@ config NATKIT_ROLE_GATEWAY
 
 endchoice
 
+config NATKIT_IMU_REPORT_INTERVAL_US
+    int "BNO08x report interval (microseconds)"
+    default 18000
+    range 2500 1000000
+    help
+        How often the hub is asked to produce each enabled report. 18000 us is
+        what ../embeded uses (nominally ~55 Hz per report), and matching it is
+        what makes a recording from this fork comparable with one from the
+        current firmware -- so treat this as a compatibility setting rather than
+        a tuning knob. The BNO08x will not honour arbitrarily small values.
+
+config NATKIT_IMU_LOG_INTERVAL_MS
+    int "IMU sample log interval (milliseconds, 0 = off)"
+    default 1000
+    range 0 60000
+    help
+        How often the leaf prints the latest reading of each sensor, the report
+        rate, the hub reset count and the heap. This is the whole output of the
+        sensor slice until frames go over ESP-NOW (TEC-NATKIT-23 / -24), and it
+        is what a soak watches.
+
 config NATKIT_STATUS_LOG_INTERVAL_S
     int "Status log interval (seconds, 0 = off)"
     default 10

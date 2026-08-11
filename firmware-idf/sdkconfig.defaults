@@ -9,3 +9,13 @@
 # 18 KB) and the default 3584 B main task stack is not enough headroom for the
 # sh2 driver's callbacks landing on it. Matches natVR/firmware.
 CONFIG_ESP_MAIN_TASK_STACK_SIZE=8192
+
+# A 1 ms FreeRTOS tick, matching arduino-esp32's default and therefore the timing
+# the BNO08x has actually been streaming under.
+#
+# This is NOT a preference. The sh2 HAL waits for the hub's INT line by polling
+# with a 1 ms delay, up to 500 times, before giving up and resetting the hub. At
+# the IDF default of 100 Hz the shortest possible delay is 10 ms, which turns
+# that 500 ms budget into 5 s and coarsens every single SHTP exchange tenfold --
+# on a hub that has already proven fragile about timing.
+CONFIG_FREERTOS_HZ=1000
