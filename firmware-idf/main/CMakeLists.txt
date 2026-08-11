@@ -4,6 +4,7 @@ idf_component_register(
         "device_id.cpp"
         "node_role.cpp"
         "bno08x.cpp"
+        "espnow_probe.cpp"
         "leaf.cpp"
         "primary.cpp"
         "gateway.cpp"
@@ -13,6 +14,9 @@ idf_component_register(
         esp_app_format
         esp_driver_gpio
         esp_driver_spi
+        esp_event
+        esp_netif
+        esp_wifi
         esp_hw_support
         esp_timer
         nvs_flash

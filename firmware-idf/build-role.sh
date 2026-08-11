@@ -22,12 +22,15 @@
 set -euo pipefail
 
 usage() {
-  echo "usage: $0 <leaf|primary|gateway> [esp32|esp32c3] [idf.py args...]" >&2
+  echo "usage: $0 <leaf|primary|gateway|espnow-probe> [esp32|esp32c3] [idf.py args...]" >&2
 }
 
+# espnow-probe is not a node role -- it is the TEC-NATKIT-23 bench instrument,
+# which builds instead of a role (see roles/espnow-probe.defaults). It lives here
+# so it gets the same isolated build dir and sdkconfig as everything else.
 role="${1:-}"
 case "${role}" in
-  leaf | primary | gateway) ;;
+  leaf | primary | gateway | espnow-probe) ;;
   *)
     usage
     exit 2

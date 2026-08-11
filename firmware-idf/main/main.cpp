@@ -1,6 +1,7 @@
 #include <cinttypes>
 
 #include "device_id.hpp"
+#include "espnow_probe.hpp"
 #include "esp_chip_info.h"
 #include "esp_err.h"
 #include "esp_idf_version.h"
@@ -103,6 +104,14 @@ void initNvs() {
 extern "C" void app_main(void) {
   logBootBanner();
   initNvs();
+
+#if CONFIG_NATKIT_ESPNOW_PROBE
+  // The bench instrument replaces the role entirely (TEC-NATKIT-23). Kept as an
+  // early return rather than woven into the role switch, so no role's code path
+  // changes shape because a measurement tool exists.
+  ESP_LOGW(kTag, "ESP-NOW PROBE build -- this is a bench tool, not a node");
+  natkit::runEspNowProbe();
+#endif
 
   switch (natkit::kRole) {
     case natkit::NodeRole::kLeaf:

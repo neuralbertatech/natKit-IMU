@@ -69,6 +69,28 @@ other's config:
 Targets: **esp32** (the IMU board's ESP32-PICO-V3-02) and **esp32c3** (natVR's
 EMG node). Both build all three roles.
 
+## The ESP-NOW bench probe
+
+```sh
+./build-role.sh espnow-probe esp32 -p /dev/ttyACM0 flash
+```
+
+Not a fourth role -- the instrument used to decide part of the architecture
+(TEC-NATKIT-23), selected by `CONFIG_NATKIT_ESPNOW_PROBE` instead of a node role.
+It reports the chip's ESP-NOW version, sweeps payload sizes to find the real
+ceiling, and measures send rate with the actual 524-byte IMU frame.
+
+Measured on the PICO-D4 (2026-08-11): **ESP-NOW v2, ceiling exactly 1470 bytes**
+(1470 accepted, 1471 rejected with `ESP_ERR_ESPNOW_ARG`), so the 524-byte frame
+fits in **one packet** and there is no fragmentation to design. 50/50 frames
+confirmed at the IMU's real rate; 177 frames/s (91 KB/s) flat out, with the
+excess refused at the API rather than lost silently.
+
+For loss measurement, flash a second board with
+`CONFIG_NATKIT_ESPNOW_PROBE_RECEIVER=y` on the same channel: each packet carries
+a 4-byte sequence number, so the receiver reports **sequence gaps** rather than
+just a lower count.
+
 ## Boot it with no board attached
 
 ```sh
