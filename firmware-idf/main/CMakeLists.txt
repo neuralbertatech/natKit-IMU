@@ -7,6 +7,7 @@ idf_component_register(
         "espnow_link.cpp"
         "espnow_probe.cpp"
         "imu_frame.cpp"
+        "time_sync.cpp"
         "leaf.cpp"
         "primary.cpp"
         "gateway.cpp"

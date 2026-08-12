@@ -19,20 +19,66 @@ an optimisation.
 > **[`../README.md`](../README.md) is the one place** that records which image is
 > on which board and the single command that puts the current firmware back.
 
-## Status: scaffold (TEC-NATKIT-21)
+## Status: a leaf streams to a primary on a shared clock
 
-Every role is a stub that logs what it is and then reports uptime and heap on a
-timer. What is **not** here yet, and where it lands:
-
-| Missing | Slice |
+| Slice | State |
 |---|---|
-| BNO08x over `spi_master` + the CEVA `sh2` driver | TEC-NATKIT-22 |
-| the on-air frame format (fragment a ~5 KB frame, or shrink it) | TEC-NATKIT-23 |
-| leaf: sampling + `esp_now_send` + following the timing broadcast | TEC-NATKIT-24 |
-| primary: node registry, reassembly, serial mux, backpressure | TEC-NATKIT-25 |
-| gateway: WiFi/Ethernet, `esp-mqtt`, `esp_netif_sntp` | TEC-NATKIT-26 |
-| the 1-second ESP-NOW timing broadcast | #340 |
-| bench against the current firmware, adopt or discard | TEC-NATKIT-27 |
+| TEC-NATKIT-21 scaffold, roles, build-role.sh | done |
+| TEC-NATKIT-22 BNO08x over `spi_master` + the CEVA `sh2` driver | done, ~357 Hz |
+| TEC-NATKIT-23 on-air frame format | done: 524 B, one frame = one packet |
+| TEC-NATKIT-24 leaf: sampling + `esp_now_send` | done |
+| **#340 the 1-second ESP-NOW timing broadcast** | **done, see Timing below** |
+| TEC-NATKIT-25 primary: node registry, reassembly, serial mux, backpressure | not started |
+| TEC-NATKIT-26 gateway: WiFi/Ethernet, `esp-mqtt`, `esp_netif_sntp` | not started |
+| TEC-NATKIT-27 bench against the current firmware, adopt or discard | not started |
+
+`gateway.cpp` is still a stub that logs its role and idles. `primary.cpp` is a
+working receiver and timing master but explicitly **not** TEC-NATKIT-25: no
+persistence, no MAC-to-stream-id mapping, no serial mux, no backpressure.
+
+## Timing (#340)
+
+Leaves have no NTP and no wall clock by design, so their sample timestamps are
+monotonic since their own boot and two nodes' timestamps are not comparable.
+The primary is the clock master and closes that gap.
+
+**Two packets per second, and the split is the mechanism.** The primary
+broadcasts `TimeBeacon(seq, epoch)`, reads its own clock *inside the ESP-NOW
+send callback* for that packet, and then broadcasts `TimeFollowUp(seq, tx_us)`
+carrying it. Timing the beacon by reading the clock before `esp_now_send` would
+measure the transmit queue instead: **that queue was measured at 1.4–13.8 ms and
+varies packet to packet**, which is two to three orders of magnitude worse than
+what is being estimated. The beacon also replaces the old `kPrimaryHere`
+discovery packet, so there is one 1 Hz broadcast rather than two.
+
+The leaf fits a **rolling least-squares line** over the last 32 pairs, giving
+offset and skew, and reports it as a `SyncState`. It does **not** rewrite its
+own timestamps: frames stay in raw device-monotonic time and the consumer
+applies the shift, so the correction stays undoable and improvable, sample times
+stay monotonic, and the sync quality travels alongside the stream (which is what
+#318 needs).
+
+**Measured, two PICO-V3-02, 5.5-minute soak** (`~/natkit-verification/…`):
+327 beacons, 0 missed, 0 orphaned, 0 outliers; fit residual **25 µs rms**; locked
+**10 s** after boot; heap flat. The primary scores the leaf's fit against probes
+of its own, so the accuracy figure is not self-reported: **bias −168 µs, sd 32 µs,
+5th–95th percentile spanning 98 µs**, with 3 excursions of ~2 ms in 300 probes.
+Against "sync once at startup" the error grew to −745 µs over the same window.
+
+Three findings worth not rediscovering:
+
+- **`esp_wifi_get_tsf_time()` returns 0 here, confirmed on hardware.** The IDF
+  documents TSF as reading 0 on a station that is not associated, and no node in
+  this architecture ever associates. Any design that reaches for the TSF needs
+  the primary to be a SoftAP first.
+- **The MAC receive stamp is real but unusable.** `rx_ctrl->timestamp` exists and
+  is a hardware stamp, but measured against `esp_timer` it scatters by **20–57 ms**,
+  versus 25 µs for simply reading `esp_timer` in the receive callback. It is kept
+  as a logged diagnostic, not as the estimator's input.
+- **The primary's console blocks its own task for ~87 ms every second** (111 ms
+  worst). It does *not* explain the probe excursions — only ~1% of probes excurse,
+  so the higher-priority WiFi task is largely protecting the receive callback from
+  it — but it is a real constraint on TEC-NATKIT-25's serial mux.
 
 ## Prerequisites
 
@@ -147,6 +193,10 @@ firmware-idf/
     ├── main.cpp                boot banner, NVS, role dispatch
     ├── node_role.hpp/.cpp      role enum, names, the idle status loop
     ├── device_id.hpp/.cpp      the topic-name device id (see below)
+    ├── espnow_link.hpp/.cpp    the whole radio surface + the wire packet types
+    ├── imu_frame.hpp/.cpp      the canonical 524-byte frame, built on the node
+    ├── time_sync.hpp/.cpp      the rolling clock fit against the primary (#340)
+    ├── bno08x.hpp/.cpp         the sensor over spi_master + CEVA sh2
     ├── leaf.cpp                \
     ├── primary.cpp              > one per role; each carries the notes for
     └── gateway.cpp             /  the slice that fills it in

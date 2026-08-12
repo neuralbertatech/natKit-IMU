@@ -31,13 +31,24 @@ namespace natkit {
 
 constexpr uint8_t kEspNowMagic0 = 'N';
 constexpr uint8_t kEspNowMagic1 = 'K';
-constexpr uint8_t kEspNowProtocolVersion = 1;
+// 2 since #340: kPrimaryHere was replaced by the timing broadcast, so a v1 and a
+// v2 build in the same room disagree about what a hub announcement even is. Both
+// boards are reflashed together, and the version byte is what turns a half-flashed
+// pair into one warning line instead of a silence that reads like a dead radio.
+constexpr uint8_t kEspNowProtocolVersion = 2;
 
 enum class PacketType : uint8_t {
   kData = 1,       // payload is a canonical NatImuBulkDataSchema Binary frame
   kHeartbeat = 2,  // payload is a Heartbeat
   kAnnounce = 3,   // leaf -> broadcast: "here I am"; payload is an Announce
-  kPrimaryHere = 4,  // primary -> broadcast/unicast: "I am the hub"; no payload
+  // 4 was kPrimaryHere. RETIRED rather than reused: the timing broadcast below
+  // carries discovery as well, so there is one 1 Hz broadcast instead of two. The
+  // number is left burnt so a stray v1 packet cannot be mistaken for a new type.
+  kTimeBeacon = 5,    // primary -> broadcast: payload is a TimeBeacon
+  kTimeFollowUp = 6,  // primary -> broadcast: payload is a TimeFollowUp
+  kSyncState = 7,     // leaf -> primary: payload is a SyncState
+  kTimeProbe = 8,          // leaf -> primary: payload is a TimeProbe
+  kTimeProbeFollowUp = 9,  // leaf -> primary: payload is a TimeProbeFollowUp
 };
 
 struct EspNowEnvelope {
@@ -81,6 +92,137 @@ struct Heartbeat {
   uint8_t accuracy_mag;
   uint8_t accuracy_rotation;
 };
+
+// --- Timing broadcast (#340 / TEC-NATKIT-17) --------------------------------
+//
+// Two packets per second, one second apart, and the split between them is the
+// whole mechanism rather than an optimisation.
+//
+// The beacon goes out first and says only "this is beacon N of epoch E". The
+// primary then reads its own clock INSIDE the ESP-NOW send callback for that
+// beacon -- the closest to on-air the API gets -- and sends that reading in a
+// follow-up. Timing the beacon by reading the clock before esp_now_send would
+// measure the transmit queue instead: CSMA backoff and driver queueing are
+// milliseconds and vary packet to packet, which is three orders of magnitude
+// worse than what is being estimated. Two-step is what PTP does, for this reason.
+//
+// The beacon also replaces the old kPrimaryHere announcement, so a leaf still
+// discovers its hub from it -- one broadcast doing both jobs, which is what
+// primary.cpp asked for when this slice was still ahead of it.
+
+struct TimeBeacon {
+  uint32_t seq;    // pairs a beacon with its follow-up; gaps count missed beacons
+  // Identifies this primary BOOT, not this primary. A reboot restarts esp_timer
+  // at zero, so a leaf holding a fit against the old origin is wrong by the
+  // primary's entire previous uptime -- and a step change like that is invisible
+  // to a slope. Changing this is what tells a leaf to throw its window away.
+  uint32_t epoch;
+  // The primary's clock at ENQUEUE. Not the sync source -- the follow-up is --
+  // and present so a leaf that has lost follow-ups still holds a millisecond-grade
+  // fix rather than nothing at all.
+  uint64_t enqueue_us;
+  // The primary's wall clock, or 0 for "there isn't one". It is 0 today and that
+  // is the design: the primary has no NTP, and the gateway (#349) is the only
+  // device that will. The field is the seam that chain of custody plugs into --
+  // leaf device time, to primary time (this slice), to wall clock (#349) -- and 0
+  // reads as unknown rather than as 1970.
+  uint64_t wall_us;
+};
+
+struct TimeFollowUp {
+  uint32_t seq;    // the beacon this describes
+  uint32_t epoch;
+  // esp_timer read inside the send callback for beacon `seq`. 0 means the
+  // callback never fired, which a leaf must treat as "no sample" rather than as
+  // "time zero".
+  uint64_t tx_us;
+  // esp_wifi_get_tsf_time() at the same instant. EXPECTED TO BE 0 on every node
+  // in this architecture: the IDF documents TSF as reading 0 on a station that is
+  // not associated, and no node here ever associates. It is sent anyway so the
+  // claim is measured on hardware instead of merely cited, and so that a future
+  // SoftAP-based primary would light it up without a protocol change.
+  uint64_t tx_tsf_us;
+};
+
+// A leaf's fit, as the primary and later the gateway need it.
+//
+// The leaf sends its FIT rather than pre-corrected timestamps, and the frames
+// stay in raw device-monotonic time. Three reasons, all of which cost something
+// to learn the other way round: a correction already baked into stored samples
+// cannot be undone or improved later; a leaf that steps its own clock emits
+// non-monotonic sample times mid-frame; and #318 wants the sync quality to travel
+// ALONGSIDE the stream, which means it has to be a value, not an adjustment that
+// has silently already happened. Applying it is the "proxy" of #340's title.
+struct SyncState {
+  uint64_t device_id;
+  uint32_t epoch;
+  uint64_t ref_local_us;   // anchor, in the leaf's own clock
+  int64_t ref_offset_us;   // primary_us - local_us at the anchor
+  int32_t skew_ppb;        // relative crystal rate, parts per billion
+  uint32_t residual_rms_ns;
+  uint32_t peak_residual_ns;
+  uint64_t last_beacon_local_us;
+  uint32_t beacons_seen;
+  uint32_t beacons_missed;
+  uint32_t pairs_used;
+  uint32_t pairs_orphaned;
+  uint32_t outliers_rejected;
+  uint32_t epoch_changes;
+  uint32_t mac_spread_us;  // receive-callback jitter, measured (see time_sync.hpp)
+  uint16_t samples_used;
+  uint8_t quality;         // SyncQuality
+  uint8_t reserved;
+};
+
+// --- The probe: the primary measuring what the leaf claims -------------------
+//
+// A clock correction that reports only its own residual is grading its own
+// homework -- the fit can be beautifully self-consistent and still be wrong, and
+// nothing in the leaf can tell. So the leaf runs the SAME two-step trick back at
+// the primary, once a second, and the primary compares what it MEASURES against
+// what the leaf's fit PREDICTS. The difference is the sync error, measured
+// independently of the thing being tested.
+//
+// This exists rather than using the data frame's own timestamp because that field
+// is quantised to milliseconds (`sample.time_ms = newest_us / 1000`), which is a
+// noise floor three orders of magnitude above what is being estimated. The frame
+// delta is still tracked, for the slow drift picture; this is what gives the
+// number.
+//
+// What is left in the residual, stated rather than hidden: the leaf's
+// send-callback latency and the primary's receive-callback latency, each tens of
+// microseconds. Propagation is nanoseconds and ignored.
+
+struct TimeProbe {
+  uint64_t device_id;
+  uint32_t seq;
+  uint32_t epoch;  // the primary epoch the leaf's fit is against
+};
+
+struct TimeProbeFollowUp {
+  uint64_t device_id;
+  uint32_t seq;
+  uint32_t epoch;
+  // The leaf's clock, read inside its own ESP-NOW send callback for probe `seq`.
+  // Same reasoning as the primary's follow-up: reading it before the send would
+  // measure the transmit queue.
+  uint64_t tx_us;
+};
+
+// These five structs go on the wire by memcpy, so their layout is a contract
+// between two images rather than an internal detail -- and #349's gateway will
+// have to parse them from the other side of a serial link. Pinned here so a field
+// added in the middle is a build failure instead of a silently misread packet.
+// (The canonical IMU frame is byte-serialised for the stronger version of this
+// reason; see imu_frame.hpp. These are ours end to end, so the size assert is the
+// proportionate guard.)
+static_assert(sizeof(TimeBeacon) == 24, "TimeBeacon layout is a wire contract");
+static_assert(sizeof(TimeFollowUp) == 24,
+              "TimeFollowUp layout is a wire contract");
+static_assert(sizeof(TimeProbe) == 16, "TimeProbe layout is a wire contract");
+static_assert(sizeof(TimeProbeFollowUp) == 24,
+              "TimeProbeFollowUp layout is a wire contract");
+static_assert(sizeof(SyncState) == 88, "SyncState layout is a wire contract");
 
 // --- Link ------------------------------------------------------------------
 
@@ -155,6 +297,76 @@ struct NodeState {
   uint32_t last_declared_rate = 0;
   Heartbeat last_heartbeat{};
   bool heartbeat_seen = false;
+
+  // --- Time-shift proxy, and its own instrument (#340) ----------------------
+  //
+  // The primary holds the leaf's fit and applies it to that leaf's frames. It
+  // also keeps the evidence that doing so works, because a clock correction that
+  // reports its own quality and nothing else is grading its own homework.
+  //
+  // The instrument is the delta between when a frame ARRIVED (our clock) and when
+  // the leaf says it was SAMPLED (its clock). Uncorrected, that delta must walk
+  // steadily as the two crystals diverge -- tens of ppm is tens of milliseconds
+  // over a five-minute soak. Corrected, it must sit still, because the only thing
+  // left in it is the leaf's build-and-send latency. Watching the two side by
+  // side is a direct end-to-end demonstration rather than a self-report, and the
+  // rate at which the raw one walks is a SECOND, independent estimate of the skew
+  // the regression reports.
+  SyncState last_sync{};
+  bool sync_seen = false;
+
+  bool delta_seen = false;
+  bool shifted_delta_seen = false;
+  bool shift_valid = false;
+  int64_t raw_delta_us = 0;
+  int64_t shifted_delta_us = 0;
+  int64_t first_raw_delta_us = 0;
+  int64_t first_shifted_delta_us = 0;
+  int64_t raw_delta_min = 0;
+  int64_t raw_delta_max = 0;
+  int64_t shifted_delta_min = 0;
+  int64_t shifted_delta_max = 0;
+  uint32_t shift_failures = 0;  // frames that arrived while the leaf was unsynced
+
+  // The probe instrument: measured minus predicted, in microseconds. This is the
+  // headline accuracy figure for #340 and the raw material for #315's confidence
+  // metric, because it is the only number here that the leaf's own fit did not
+  // produce.
+  bool probe_pending = false;
+  uint32_t probe_pending_seq = 0;
+  uint64_t probe_arrival_us = 0;
+  uint32_t probes_seen = 0;
+  uint32_t probes_paired = 0;
+  uint32_t probes_orphaned = 0;
+  uint32_t probes_unpredictable = 0;  // arrived while the leaf had no fit
+  bool probe_error_seen = false;
+  int64_t probe_error_us = 0;
+  int64_t probe_error_min_us = 0;
+  int64_t probe_error_max_us = 0;
+  // Sum and sum-of-squares rather than a stored history: an RMS over the whole
+  // run is what a soak wants, and keeping the samples would be a buffer sized by
+  // how long someone leaves it running.
+  // Sums over TYPICAL samples only. A handful of millisecond excursions -- 2 in
+  // 301 on the first soak -- pulled the reported RMS from ~50 us to 240 us, which
+  // reads as five times worse than every percentile of the same data says it is.
+  // An accuracy figure a 0.7% tail can set is not an accuracy figure, so the tail
+  // is counted separately and loudly rather than averaged in silently.
+  int64_t probe_error_sum_us = 0;
+  uint64_t probe_error_sum_sq = 0;
+  uint32_t probe_error_count = 0;
+  int64_t probe_error_mean_us = 0;  // running, over typical samples
+  uint32_t probe_excursions = 0;    // beyond kExcursionUs of the running mean
+  int64_t probe_excursion_worst_us = 0;
+
+  // The same probe scored against a NAIVE clock model: the first offset we ever
+  // saw, held forever, with no skew term. That is what "sync once at startup"
+  // would have given, so the gap between this and probe_error_us is what the
+  // rolling fit is actually buying -- and it grows with the recording, which a
+  // single instantaneous comparison would never show.
+  bool naive_seen = false;
+  int64_t naive_offset_us = 0;
+  int64_t naive_error_us = 0;
+  int64_t naive_error_worst_us = 0;
 };
 
 esp_err_t espNowPrimaryStart();
@@ -163,5 +375,17 @@ esp_err_t espNowPrimaryStart();
 // by value because the caller is a logging loop, not a consumer of history.
 const NodeState *espNowPrimaryNodes();
 uint32_t espNowPrimaryUnknownPackets();
+
+// Timing-master state (#340), for the console and for whatever forwards it.
+uint32_t espNowPrimaryEpoch();
+uint32_t espNowPrimaryBeaconSeq();
+// Beacons whose send callback never fired, so no follow-up could carry a real
+// transmit stamp. Counted because it is the one failure mode that would quietly
+// starve every leaf's fit while the beacons themselves kept arriving.
+uint32_t espNowPrimaryBeaconsWithoutTxStamp();
+// esp_wifi_get_tsf_time() as read in the last beacon's send callback. Expected to
+// be 0 -- see TimeFollowUp::tx_tsf_us -- and exposed so that expectation is a
+// measurement on the console rather than an assumption in a comment.
+uint64_t espNowPrimaryLastTxTsf();
 
 }  // namespace natkit

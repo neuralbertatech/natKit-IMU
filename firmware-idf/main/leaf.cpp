@@ -11,6 +11,7 @@
 #include "imu_frame.hpp"
 #include "node_role.hpp"
 #include "sdkconfig.h"
+#include "time_sync.hpp"
 
 // Leaf (secondary) node: IMU + ESP-NOW, and that is the whole device.
 //
@@ -46,6 +47,19 @@ const char *accuracyName(uint8_t accuracy) {
       return "medium";
     case 3:
       return "high";
+    default:
+      return "?";
+  }
+}
+
+const char *syncQualityName(SyncQuality quality) {
+  switch (quality) {
+    case SyncQuality::kUnsynced:
+      return "UNSYNCED";
+    case SyncQuality::kCoarse:
+      return "coarse";
+    case SyncQuality::kLocked:
+      return "locked";
     default:
       return "?";
   }
@@ -217,6 +231,50 @@ void runLeaf() {
                static_cast<unsigned long>(link.send_failures),
                static_cast<unsigned long>(link.send_retries),
                static_cast<unsigned long>(link.announces));
+
+      // The clock fit (#340). Printed next to the link line because the two fail
+      // together: a leaf that has lost its primary stops being able to say when
+      // anything happened as well as where it went.
+      const TimeSyncStatus &sync = timeSyncStatus();
+      const uint64_t beacon_age_ms =
+          sync.last_beacon_local_us == 0
+              ? 0
+              : (now - sync.last_beacon_local_us) / 1000;
+      ESP_LOGI(kTag,
+               "clock: %s vs primary epoch %08lx | offset %+lld us, skew %+ld "
+               "ppb | fit %u pts, residual %lu ns rms (peak %lu ns) | beacons "
+               "%lu seen, %lu missed, pairs %lu used, %lu orphaned, %lu "
+               "outliers | last beacon %llu ms ago | rx callback jitter %lu us",
+               syncQualityName(sync.quality),
+               static_cast<unsigned long>(sync.epoch),
+               static_cast<long long>(sync.ref_offset_us),
+               static_cast<long>(sync.skew_ppb),
+               static_cast<unsigned>(sync.samples_used),
+               static_cast<unsigned long>(sync.residual_rms_ns),
+               static_cast<unsigned long>(sync.peak_residual_ns),
+               static_cast<unsigned long>(sync.beacons_seen),
+               static_cast<unsigned long>(sync.beacons_missed),
+               static_cast<unsigned long>(sync.pairs_used),
+               static_cast<unsigned long>(sync.pairs_orphaned),
+               static_cast<unsigned long>(sync.outliers_rejected),
+               static_cast<unsigned long long>(beacon_age_ms),
+               static_cast<unsigned long>(sync.mac_spread_us));
+      // The number that justifies the two-step protocol: how long the primary's
+      // beacon sat between being handed to esp_now_send and actually going out.
+      // That delay is what a one-step beacon would have folded straight into the
+      // offset estimate, so if it were small the follow-up packet would be buying
+      // nothing -- and that should be visible rather than asserted.
+      if (sync.queue_delay_seen) {
+        ESP_LOGI(kTag,
+                 "clock: primary tx queue delay %lu us now, %lu..%lu us seen -- "
+                 "this is what the beacon/follow-up split keeps out of the fit "
+                 "| MAC rx stamp - esp_timer = %+lld us (spread %lu us)",
+                 static_cast<unsigned long>(sync.queue_delay_us),
+                 static_cast<unsigned long>(sync.queue_delay_min_us),
+                 static_cast<unsigned long>(sync.queue_delay_max_us),
+                 static_cast<long long>(sync.mac_minus_timer_us),
+                 static_cast<unsigned long>(sync.mac_spread_us));
+      }
 
       reports_at_last_log = total;
       frames_at_last_log = frames_built;

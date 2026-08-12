@@ -157,6 +157,37 @@ config NATKIT_ESPNOW_HEARTBEAT_MS
         queue are its own back-pressure, not the primary's loss, and from the
         receiving side alone the two are indistinguishable.
 
+config NATKIT_TIME_BEACON_MS
+    int "Primary timing broadcast interval (milliseconds)"
+    default 1000
+    range 100 60000
+    help
+        How often the primary broadcasts its timing beacon (#340 /
+        TEC-NATKIT-17). One second is the #319 whiteboard's figure, and it is
+        also what the old hub-discovery beacon ran at -- which this REPLACES
+        rather than joins, so there is one 1 Hz broadcast from the primary
+        instead of two that could drift apart.
+
+        Each beacon is followed immediately by a follow-up packet carrying the
+        beacon's actual transmit time, so this interval costs two small packets
+        per second, not one. Shortening it fills a leaf's 32-sample fit window
+        faster and costs airtime; lengthening it makes the window span more real
+        temperature drift, which the linear fit is less able to follow.
+
+config NATKIT_TIME_SYNC_PROBE_MS
+    int "Leaf sync report and probe interval (milliseconds)"
+    default 1000
+    range 100 60000
+    help
+        How often a leaf tells the primary what its clock fit is, and then probes
+        so the primary can check it.
+
+        The probe is what makes the accuracy figure independent: without it the
+        only evidence about the fit comes from the fit's own residual, which is
+        self-consistency rather than correctness. The primary compares the
+        probe's measured arrival against what the leaf's reported fit predicted,
+        and the difference is the sync error.
+
 config NATKIT_IMU_LOG_INTERVAL_MS
     int "IMU sample log interval (milliseconds, 0 = off)"
     default 1000

@@ -1,4 +1,5 @@
 #include <cinttypes>
+#include <cmath>
 
 #include "device_id.hpp"
 #include "esp_log.h"
@@ -8,6 +9,7 @@
 #include "freertos/task.h"
 #include "node_role.hpp"
 #include "sdkconfig.h"
+#include "time_sync.hpp"
 
 // Primary: the ESP-NOW hub, the timing master, and the serial uplink.
 //
@@ -55,6 +57,19 @@ const char *accuracyName(uint8_t accuracy) {
   }
 }
 
+const char *syncQualityName(uint8_t quality) {
+  switch (static_cast<SyncQuality>(quality)) {
+    case SyncQuality::kUnsynced:
+      return "UNSYNCED";
+    case SyncQuality::kCoarse:
+      return "coarse";
+    case SyncQuality::kLocked:
+      return "locked";
+    default:
+      return "?";
+  }
+}
+
 }  // namespace
 
 void runPrimary() {
@@ -74,10 +89,24 @@ void runPrimary() {
   (void)interval_s;
 
   uint32_t previous_frames[kMaxTrackedNodes] = {};
+  uint32_t ticks = 0;
+
+  // How long this loop's own console output blocks, and the worst seen.
+  //
+  // Not idle curiosity: the probe's sync error shows occasional millisecond
+  // excursions, and the leading hypothesis is that they are the ESP-NOW receive
+  // callback being late because ESP_LOGI is blocking on a full UART FIFO -- the
+  // same mechanism that made a leaf's report rate appear to collapse in the
+  // TEC-NATKIT-22 soak. Measuring it turns that from a plausible story into an
+  // arithmetic check: at one probe per second, a console that blocks for X ms per
+  // second should collide with roughly X/1000 of them.
+  uint32_t console_us = 0;
+  uint32_t console_worst_us = 0;
 
   while (true) {
     vTaskDelay(pdMS_TO_TICKS(1000));
 
+    const uint64_t console_started = static_cast<uint64_t>(esp_timer_get_time());
     const NodeState *nodes = espNowPrimaryNodes();
     bool any = false;
 
@@ -110,6 +139,96 @@ void runPrimary() {
                static_cast<unsigned long long>(silent_ms), node.last_sample_count,
                static_cast<unsigned long>(node.last_declared_rate));
 
+      // --- the time-shift proxy, and its two instruments (#340) -------------
+      if (node.sync_seen) {
+        const SyncState &sync = node.last_sync;
+        ESP_LOGI(kTag,
+                 "  clock: leaf reports %s, epoch %08lx%s | offset %+lld us, "
+                 "skew %+ld ppb | fit %u pts, residual %lu ns rms | beacons %lu "
+                 "seen / %lu missed, %lu outliers",
+                 syncQualityName(sync.quality),
+                 static_cast<unsigned long>(sync.epoch),
+                 sync.epoch == espNowPrimaryEpoch() ? "" : " (NOT OURS)",
+                 static_cast<long long>(sync.ref_offset_us),
+                 static_cast<long>(sync.skew_ppb),
+                 static_cast<unsigned>(sync.samples_used),
+                 static_cast<unsigned long>(sync.residual_rms_ns),
+                 static_cast<unsigned long>(sync.beacons_seen),
+                 static_cast<unsigned long>(sync.beacons_missed),
+                 static_cast<unsigned long>(sync.outliers_rejected));
+      }
+
+      if (node.probe_error_count > 0) {
+        // THE number for this slice: measured minus predicted, and the leaf's own
+        // fit did not produce it. RMS in integer microseconds via the running
+        // sum of squares -- no history buffer, so a soak's length does not size
+        // anything.
+        const int64_t mean =
+            node.probe_error_sum_us / static_cast<int64_t>(node.probe_error_count);
+        // Standard deviation, not RMS about zero. The error has a real constant
+        // BIAS -- the two directions' callback latencies do not cancel -- and an
+        // RMS about zero folds that bias into what is supposed to describe the
+        // scatter, reporting ~170 us of "noise" for data whose 5th-to-95th
+        // percentile spans 101 us. The bias is the mean, printed beside it, and
+        // it is common-mode: it shifts every node the same way, so it very
+        // largely cancels between two leaves, which is the comparison that
+        // actually matters.
+        const double mean_sq =
+            static_cast<double>(node.probe_error_sum_sq) /
+            static_cast<double>(node.probe_error_count);
+        const double variance =
+            mean_sq - static_cast<double>(mean) * static_cast<double>(mean);
+        const uint32_t rms = static_cast<uint32_t>(
+            variance > 0.0 ? std::sqrt(variance) : 0.0);
+        ESP_LOGI(kTag,
+                 "  sync error (measured - predicted): now %+lld us | mean "
+                 "%+lld us (bias), sd %lu us over %lu typical probes | range "
+                 "%+lld .. %+lld us | %lu excursions (worst %lld us off mean), "
+                 "%lu unpredictable, %lu orphaned",
+                 static_cast<long long>(node.probe_error_us),
+                 static_cast<long long>(mean), static_cast<unsigned long>(rms),
+                 static_cast<unsigned long>(node.probe_error_count),
+                 static_cast<long long>(node.probe_error_min_us),
+                 static_cast<long long>(node.probe_error_max_us),
+                 static_cast<unsigned long>(node.probe_excursions),
+                 static_cast<long long>(node.probe_excursion_worst_us),
+                 static_cast<unsigned long>(node.probes_unpredictable),
+                 static_cast<unsigned long>(node.probes_orphaned));
+
+        // What the rolling fit buys over syncing once at startup. This is the
+        // number that grows with the length of a recording, which is exactly the
+        // failure a single snapshot comparison cannot show.
+        ESP_LOGI(kTag,
+                 "  vs sync-once-at-startup: naive error now %+lld us, worst "
+                 "%lld us | rolling fit worst %lld us",
+                 static_cast<long long>(node.naive_error_us),
+                 static_cast<long long>(node.naive_error_worst_us),
+                 static_cast<long long>(
+                     node.probe_error_max_us - node.probe_error_min_us));
+      }
+
+      if (node.delta_seen) {
+        // ⚠️ THIS IS NOT THE ACCURACY FIGURE, and it was measured before it was
+        // labelled. It shows that the shift is being APPLIED to real frames --
+        // the ~21 ms between the raw and shifted columns is the correction doing
+        // its job -- but its spread says nothing about how good the clock fit is.
+        //
+        // Two reasons, both measured: the frame's timestamp is the FIRST of ten
+        // samples spanning 200 ms and the batch's span jitters with the sensor's
+        // own report timing, which put a ~74 ms range on both columns; and that
+        // timestamp is quantised to milliseconds by the encoder
+        // (`sample.time_ms = newest_us / 1000`), three orders of magnitude above
+        // what is being estimated. The probe line above is the measurement.
+        ESP_LOGI(kTag,
+                 "  frame shift applied (arrival - sampled, NOT an accuracy "
+                 "figure -- leaf batching dominates it): raw %+lld us -> shifted "
+                 "%s%+lld us | %lu frames arrived before the leaf had a fit",
+                 static_cast<long long>(node.raw_delta_us),
+                 node.shift_valid ? "" : "(stale) ",
+                 static_cast<long long>(node.shifted_delta_us),
+                 static_cast<unsigned long>(node.shift_failures));
+      }
+
       if (node.heartbeat_seen) {
         const Heartbeat &beat = node.last_heartbeat;
         // The leaf's own view, which is what makes a drop attributable: frames it
@@ -135,8 +254,41 @@ void runPrimary() {
     }
 
     if (!any) {
-      ESP_LOGI(kTag, "no nodes yet (beaconing; %lu foreign/unhandled packets)",
+      ESP_LOGI(kTag,
+               "no nodes yet (timing broadcast at beacon %lu of epoch %08lx; "
+               "%lu foreign/unhandled packets)",
+               static_cast<unsigned long>(espNowPrimaryBeaconSeq()),
+               static_cast<unsigned long>(espNowPrimaryEpoch()),
                static_cast<unsigned long>(espNowPrimaryUnknownPackets()));
+    }
+
+    // The timing master's own health, every tenth pass. The TSF reading is here
+    // because #340's first recommended approach rests on it: the IDF documents
+    // esp_wifi_get_tsf_time as returning 0 on an unassociated station, and no
+    // node in this architecture ever associates, so this line is where that stops
+    // being a citation and becomes a measurement.
+    //
+    // Counted here rather than off the beacon sequence: this loop and the beacon
+    // both run at 1 Hz but are not the same task, so a modulo of the beacon
+    // number would print twice in one second and then not at all in the next.
+    if (++ticks % 10 == 0) {
+      ESP_LOGI(kTag,
+               "timing master: beacon %lu, epoch %08lx, %lu beacons with no tx "
+               "stamp | esp_wifi_get_tsf_time = %llu (0 is expected and is the "
+               "finding: TSF needs an association we deliberately never make) | "
+               "this console blocked %lu us last pass, %lu us worst",
+               static_cast<unsigned long>(espNowPrimaryBeaconSeq()),
+               static_cast<unsigned long>(espNowPrimaryEpoch()),
+               static_cast<unsigned long>(espNowPrimaryBeaconsWithoutTxStamp()),
+               static_cast<unsigned long long>(espNowPrimaryLastTxTsf()),
+               static_cast<unsigned long>(console_us),
+               static_cast<unsigned long>(console_worst_us));
+    }
+
+    console_us = static_cast<uint32_t>(
+        static_cast<uint64_t>(esp_timer_get_time()) - console_started);
+    if (console_us > console_worst_us) {
+      console_worst_us = console_us;
     }
   }
 }

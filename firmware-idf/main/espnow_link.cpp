@@ -13,8 +13,10 @@
 #include "freertos/queue.h"
 #include "freertos/semphr.h"
 #include "freertos/task.h"
+#include "esp_random.h"
 #include "imu_frame.hpp"
 #include "sdkconfig.h"
+#include "time_sync.hpp"
 
 namespace natkit {
 namespace {
@@ -49,7 +51,13 @@ volatile esp_now_send_status_t sLastSendStatus = ESP_NOW_SEND_SUCCESS;
 uint8_t sPrimaryMac[6] = {};
 volatile bool sPrimaryKnown = false;
 
+// The leaf's clock as read inside its own send callback, which is the closest to
+// on-air this API gets. Written here and read by txTask after it takes sSendDone,
+// so the probe's follow-up can carry a transmit stamp rather than an enqueue one.
+volatile uint64_t sLastTxUs = 0;
+
 void sendCallback(const wifi_tx_info_t *, esp_now_send_status_t status) {
+  sLastTxUs = static_cast<uint64_t>(esp_timer_get_time());
   sLastSendStatus = status;
   if (sSendDone != nullptr) {
     xSemaphoreGive(sSendDone);
@@ -103,8 +111,40 @@ void leafRecvCallback(const esp_now_recv_info_t *info, const uint8_t *data,
              kEspNowProtocolVersion);
     return;
   }
-  if (data[3] == static_cast<uint8_t>(PacketType::kPrimaryHere)) {
-    learnPrimary(info->src_addr);
+
+  // The receive time is taken FIRST, before any of the work below, because every
+  // line of it is latency folded straight into the offset estimate.
+  const uint64_t rx_local_us = static_cast<uint64_t>(esp_timer_get_time());
+  const uint32_t rx_mac_us =
+      info->rx_ctrl != nullptr ? static_cast<uint32_t>(info->rx_ctrl->timestamp)
+                               : 0;
+
+  const uint8_t *payload = data + kEnvelopeSize;
+  const size_t payload_size = static_cast<size_t>(len) - kEnvelopeSize;
+
+  switch (static_cast<PacketType>(data[3])) {
+    case PacketType::kTimeBeacon: {
+      // Discovery rides on the timing broadcast rather than on a packet of its
+      // own: it is the same 1 Hz broadcast from the same device, and two of them
+      // would be two things to keep in step.
+      learnPrimary(info->src_addr);
+      if (payload_size >= sizeof(TimeBeacon)) {
+        TimeBeacon beacon{};
+        std::memcpy(&beacon, payload, sizeof(beacon));
+        timeSyncOnBeacon(beacon, rx_local_us, rx_mac_us);
+      }
+      break;
+    }
+    case PacketType::kTimeFollowUp: {
+      if (payload_size >= sizeof(TimeFollowUp)) {
+        TimeFollowUp follow_up{};
+        std::memcpy(&follow_up, payload, sizeof(follow_up));
+        timeSyncOnFollowUp(follow_up);
+      }
+      break;
+    }
+    default:
+      break;
   }
 }
 
@@ -183,6 +223,36 @@ void txTask(void *) {
         sStats.primary_absent = false;
         ESP_LOGI(kTag, "primary is answering again; back to full retries");
       }
+      // A probe that made it out is immediately followed by the stamp of when it
+      // did. Sent from here, inline, rather than queued: everything ahead of it in
+      // a queue would be latency between the probe and the description of it, and
+      // the pair only means anything while the primary is still holding the probe.
+      // transmit() is only ever called from this task, so calling it again here is
+      // not a second owner of the radio.
+      if (item.length >= kEnvelopeSize &&
+          item.bytes[3] == static_cast<uint8_t>(PacketType::kTimeProbe)) {
+        TimeProbe probe{};
+        std::memcpy(&probe, item.bytes + kEnvelopeSize, sizeof(probe));
+
+        TimeProbeFollowUp follow_up{};
+        follow_up.device_id = probe.device_id;
+        follow_up.seq = probe.seq;
+        follow_up.epoch = probe.epoch;
+        follow_up.tx_us = sLastTxUs;
+
+        TxItem reply{};
+        reply.bytes[0] = kEspNowMagic0;
+        reply.bytes[1] = kEspNowMagic1;
+        reply.bytes[2] = kEspNowProtocolVersion;
+        reply.bytes[3] = static_cast<uint8_t>(PacketType::kTimeProbeFollowUp);
+        std::memcpy(reply.bytes + kEnvelopeSize, &follow_up, sizeof(follow_up));
+        reply.length = kEnvelopeSize + sizeof(follow_up);
+        if (transmit(reply)) {
+          ++sStats.packets_sent;
+        } else {
+          ++sStats.send_failures;
+        }
+      }
     } else {
       ++sStats.send_failures;
       ++sStats.consecutive_failures;
@@ -223,6 +293,34 @@ void announceTask(void *) {
   }
 }
 
+// The leaf's half of the timing conversation: says where its clock thinks it is,
+// then asks the primary to check.
+//
+// Both go out on the same cadence and in this order on purpose. The primary can
+// only score a probe against a fit it already holds, so a probe that overtook its
+// SyncState would be scored against a stale one -- which would show up as sync
+// error that is really just a late report of a good fit.
+void syncTask(void *) {
+  uint32_t seq = 0;
+  while (true) {
+    vTaskDelay(pdMS_TO_TICKS(CONFIG_NATKIT_TIME_SYNC_PROBE_MS));
+    if (!sPrimaryKnown) {
+      continue;  // nothing to talk to, and probes are unicast
+    }
+
+    SyncState state{};
+    timeSyncFillWire(state);
+    state.device_id = deviceId();
+    espNowLinkSend(PacketType::kSyncState, &state, sizeof(state));
+
+    TimeProbe probe{};
+    probe.device_id = deviceId();
+    probe.seq = ++seq;
+    probe.epoch = state.epoch;
+    espNowLinkSend(PacketType::kTimeProbe, &probe, sizeof(probe));
+  }
+}
+
 esp_err_t startRadio() {
   // No esp_netif_init() and no netif at all: ESP-NOW does not go through lwIP, so
   // a leaf never brings up a network interface. The event loop IS required --
@@ -237,6 +335,13 @@ esp_err_t startRadio() {
   ESP_ERROR_CHECK(esp_wifi_set_storage(WIFI_STORAGE_RAM));
   ESP_ERROR_CHECK(esp_wifi_set_mode(WIFI_MODE_STA));
   ESP_ERROR_CHECK(esp_wifi_start());
+  // Power save off, and this is a timing requirement rather than a performance
+  // one (#340). The IDF documents the MAC receive timestamp as "precise only if
+  // modem sleep or light sleep is not enabled", and a radio that is asleep when a
+  // beacon arrives adds its wake latency to the offset estimate. The default for
+  // a station is WIFI_PS_MIN_MODEM, so leaving this unsaid would have meant
+  // measuring the power-save state machine.
+  ESP_ERROR_CHECK(esp_wifi_set_ps(WIFI_PS_NONE));
   // Fixed channel on both ends, and never esp_wifi_connect. A channel mismatch
   // presents as every packet sending successfully while nothing is received, which
   // reads as total loss rather than as a misconfiguration.
@@ -275,6 +380,7 @@ esp_err_t espNowLinkStart() {
 
   xTaskCreate(txTask, "natkit-tx", 4096, nullptr, 5, nullptr);
   xTaskCreate(announceTask, "natkit-announce", 3072, nullptr, 4, nullptr);
+  xTaskCreate(syncTask, "natkit-sync", 3072, nullptr, 4, nullptr);
 
   ESP_LOGI(kTag,
            "ESP-NOW up on channel %d, no association, no netif. Queue depth %d "
@@ -356,6 +462,177 @@ NodeState *nodeFor(const uint8_t *mac) {
   return nullptr;  // more leaves than this scaffold tracks; counted by the caller
 }
 
+// Shifts one frame's device timestamp into our clock, and keeps the evidence.
+//
+// The deltas either side of the shift are the slow instrument: uncorrected, the
+// gap between when a frame was sampled and when it arrived must WALK as the two
+// crystals diverge; corrected, it must sit still. Both are kept because the
+// walk-rate of the raw one is a second, independent estimate of the skew the
+// leaf's regression reports, and this epic has now been bitten three times by a
+// single counter that turned out to be measuring something else.
+//
+// Resolution caveat, stated because it bounds what these two numbers can show:
+// the frame's timestamp is quantised to MILLISECONDS by the encoder
+// (`sample.time_ms = newest_us / 1000`), so per-frame these carry about a
+// millisecond of quantisation noise. That is fine for a drift of tens of
+// milliseconds and useless for judging a correction good to microseconds -- which
+// is what the probe exists to measure instead.
+void applyTimeShift(NodeState &node, uint64_t device_ts_us, uint64_t arrival_us) {
+  if (device_ts_us == 0) {
+    return;
+  }
+
+  const int64_t raw_delta =
+      static_cast<int64_t>(arrival_us) - static_cast<int64_t>(device_ts_us);
+
+  uint64_t shifted = 0;
+  const bool shifted_ok =
+      node.sync_seen && syncStateToPrimary(node.last_sync, device_ts_us, shifted);
+  if (!shifted_ok) {
+    ++node.shift_failures;
+  }
+  const int64_t shifted_delta =
+      shifted_ok ? static_cast<int64_t>(arrival_us) - static_cast<int64_t>(shifted)
+                 : 0;
+
+  node.raw_delta_us = raw_delta;
+  node.shift_valid = shifted_ok;
+  node.shifted_delta_us = shifted_delta;
+
+  if (!node.delta_seen) {
+    node.delta_seen = true;
+    node.first_raw_delta_us = raw_delta;
+    node.raw_delta_min = raw_delta;
+    node.raw_delta_max = raw_delta;
+  }
+  if (raw_delta < node.raw_delta_min) {
+    node.raw_delta_min = raw_delta;
+  }
+  if (raw_delta > node.raw_delta_max) {
+    node.raw_delta_max = raw_delta;
+  }
+
+  if (shifted_ok) {
+    // The corrected series starts at the first frame we could actually correct,
+    // not at the first frame: seeding it from an uncorrected value would put a
+    // whole boot's worth of offset into its range and make a flat line look like
+    // a wild one. Tracked with its own flag rather than by testing the values
+    // against 0 -- a genuine first delta of exactly zero would re-seed the range
+    // on every frame and the spread would read 0 forever.
+    if (!node.shifted_delta_seen) {
+      node.shifted_delta_seen = true;
+      node.first_shifted_delta_us = shifted_delta;
+      node.shifted_delta_min = shifted_delta;
+      node.shifted_delta_max = shifted_delta;
+    }
+    if (shifted_delta < node.shifted_delta_min) {
+      node.shifted_delta_min = shifted_delta;
+    }
+    if (shifted_delta > node.shifted_delta_max) {
+      node.shifted_delta_max = shifted_delta;
+    }
+  }
+}
+
+// Scores a probe pair: what we measured against what the leaf's fit predicted.
+void scoreProbe(NodeState &node, const TimeProbeFollowUp &follow_up) {
+  if (!node.probe_pending || node.probe_pending_seq != follow_up.seq) {
+    ++node.probes_orphaned;
+    node.probe_pending = false;
+    return;
+  }
+  node.probe_pending = false;
+  ++node.probes_paired;
+
+  if (!node.sync_seen || follow_up.tx_us == 0) {
+    ++node.probes_unpredictable;
+    return;
+  }
+  // A fit against a different epoch is a fit against a clock origin we no longer
+  // have. Scoring against it would report our own reboot as sync error.
+  if (node.last_sync.epoch != espNowPrimaryEpoch()) {
+    ++node.probes_unpredictable;
+    return;
+  }
+
+  uint64_t predicted = 0;
+  if (!syncStateToPrimary(node.last_sync, follow_up.tx_us, predicted)) {
+    ++node.probes_unpredictable;
+    return;
+  }
+
+  // Measured minus predicted. The probe left the leaf at tx_us on ITS clock and
+  // arrived here at probe_arrival_us on OURS; if the fit were perfect and the
+  // radio instantaneous these would be the same instant.
+  const int64_t error = static_cast<int64_t>(node.probe_arrival_us) -
+                        static_cast<int64_t>(predicted);
+
+  // An error of more than ten seconds is not a clock estimate that drifted, it is
+  // a fit against the wrong epoch or a torn read. Kept out of the running sums
+  // rather than clamped: one such value would dominate a sum of squares
+  // permanently, and an accuracy figure that a single bad sample can set is not
+  // an accuracy figure. Counted where it will be seen.
+  constexpr int64_t kAbsurdErrorUs = 10'000'000;
+  if (error > kAbsurdErrorUs || error < -kAbsurdErrorUs) {
+    ++node.probes_unpredictable;
+    return;
+  }
+
+  // Score the same probe against "sync once and never again". The offset is
+  // latched from the first usable probe -- measured here rather than taken from
+  // the leaf's fit, so the naive model gets a fair starting point rather than a
+  // handicapped one.
+  const int64_t measured_offset = static_cast<int64_t>(node.probe_arrival_us) -
+                                  static_cast<int64_t>(follow_up.tx_us);
+  if (!node.naive_seen) {
+    node.naive_seen = true;
+    node.naive_offset_us = measured_offset;
+  }
+  node.naive_error_us = measured_offset - node.naive_offset_us;
+  const int64_t naive_magnitude =
+      node.naive_error_us < 0 ? -node.naive_error_us : node.naive_error_us;
+  if (naive_magnitude > node.naive_error_worst_us) {
+    node.naive_error_worst_us = naive_magnitude;
+  }
+
+  node.probe_error_us = error;
+  if (!node.probe_error_seen) {
+    node.probe_error_seen = true;
+    node.probe_error_min_us = error;
+    node.probe_error_max_us = error;
+    node.probe_error_mean_us = error;
+  }
+  // min/max span EVERYTHING, including excursions: the point of a range is that
+  // nothing is hidden from it.
+  if (error < node.probe_error_min_us) {
+    node.probe_error_min_us = error;
+  }
+  if (error > node.probe_error_max_us) {
+    node.probe_error_max_us = error;
+  }
+
+  // An excursion is a scheduling artefact, not a clock estimate: measured on the
+  // bench at 20x the ordinary jitter and roughly one per 150 probes, which is
+  // about what a console that blocks the callback for a few milliseconds a second
+  // would produce. Counted, worst-case kept, and left out of the RMS.
+  constexpr int64_t kExcursionUs = 1000;
+  const int64_t deviation = error - node.probe_error_mean_us;
+  const int64_t deviation_magnitude = deviation < 0 ? -deviation : deviation;
+  if (node.probe_error_count > 0 && deviation_magnitude > kExcursionUs) {
+    ++node.probe_excursions;
+    if (deviation_magnitude > node.probe_excursion_worst_us) {
+      node.probe_excursion_worst_us = deviation_magnitude;
+    }
+    return;
+  }
+
+  node.probe_error_sum_us += error;
+  node.probe_error_sum_sq += static_cast<uint64_t>(error * error);
+  ++node.probe_error_count;
+  node.probe_error_mean_us =
+      node.probe_error_sum_us / static_cast<int64_t>(node.probe_error_count);
+}
+
 // Kept short on purpose: this runs on the WiFi task, so it updates counters and
 // gets out. All logging happens in the primary's own loop.
 void primaryRecvCallback(const esp_now_recv_info_t *info, const uint8_t *data,
@@ -375,9 +652,14 @@ void primaryRecvCallback(const esp_now_recv_info_t *info, const uint8_t *data,
     return;
   }
 
+  // Taken before anything else in this callback, for the same reason the leaf
+  // takes its own first: this is the arrival time the time-shift instrument
+  // compares against, so any work done ahead of it is error added to it.
+  const uint64_t arrival_us = static_cast<uint64_t>(esp_timer_get_time());
+
   const uint8_t *payload = data + kEnvelopeSize;
   const size_t payload_size = static_cast<size_t>(len) - kEnvelopeSize;
-  node->last_seen_us = static_cast<uint64_t>(esp_timer_get_time());
+  node->last_seen_us = arrival_us;
   node->bytes += static_cast<uint32_t>(len);
 
   switch (static_cast<PacketType>(data[3])) {
@@ -393,11 +675,21 @@ void primaryRecvCallback(const esp_now_recv_info_t *info, const uint8_t *data,
       uint16_t sample_count = 0;
       uint32_t declared_rate = 0;
       uint64_t seq = 0;
+      uint64_t device_ts_us = 0;
       std::memcpy(&sample_count, payload + 2, sizeof(sample_count));
       std::memcpy(&declared_rate, payload + 4, sizeof(declared_rate));
       std::memcpy(&seq, payload + 8, sizeof(seq));
+      std::memcpy(&device_ts_us, payload + 16, sizeof(device_ts_us));
       node->last_sample_count = sample_count;
       node->last_declared_rate = declared_rate;
+
+      // --- the time shift, and the instrument that says whether it worked ----
+      //
+      // The frame's own timestamp is in the LEAF's clock. Shifting it into ours
+      // is what makes two nodes' samples comparable, and it is done here rather
+      // than on the leaf so that the raw device time survives on the wire and the
+      // correction stays undoable.
+      applyTimeShift(*node, device_ts_us, arrival_us);
 
       if (node->seq_seen) {
         // The expected case is spelled out FIRST and does nothing, rather than
@@ -441,10 +733,43 @@ void primaryRecvCallback(const esp_now_recv_info_t *info, const uint8_t *data,
     case PacketType::kAnnounce:
       ++node->announces;
       break;
-    case PacketType::kPrimaryHere:
-      // Another primary on our channel. Not handled here beyond being counted --
-      // deciding what two hubs do about each other is a registry question, so it
-      // belongs to TEC-NATKIT-25.
+    case PacketType::kSyncState:
+      if (payload_size >= sizeof(SyncState)) {
+        std::memcpy(&node->last_sync, payload, sizeof(SyncState));
+        node->sync_seen = true;
+      }
+      break;
+    case PacketType::kTimeProbe: {
+      ++node->probes_seen;
+      if (node->probe_pending) {
+        // The previous probe's follow-up never arrived, so it can never be
+        // scored. Counted rather than quietly overwritten.
+        ++node->probes_orphaned;
+      }
+      if (payload_size >= sizeof(TimeProbe)) {
+        TimeProbe probe{};
+        std::memcpy(&probe, payload, sizeof(probe));
+        node->probe_pending = true;
+        node->probe_pending_seq = probe.seq;
+        // The arrival stamp taken at the top of this callback, NOT one read here
+        // after the switch and the memcpys above it.
+        node->probe_arrival_us = arrival_us;
+      }
+      break;
+    }
+    case PacketType::kTimeProbeFollowUp: {
+      if (payload_size >= sizeof(TimeProbeFollowUp)) {
+        TimeProbeFollowUp follow_up{};
+        std::memcpy(&follow_up, payload, sizeof(follow_up));
+        scoreProbe(*node, follow_up);
+      }
+      break;
+    }
+    case PacketType::kTimeBeacon:
+    case PacketType::kTimeFollowUp:
+      // Another primary's timing broadcast on our channel. Counted, not acted on:
+      // two timing masters in one room is a registry question, and the registry
+      // is TEC-NATKIT-25.
       ++sUnknownPackets;
       break;
     default:
@@ -453,18 +778,99 @@ void primaryRecvCallback(const esp_now_recv_info_t *info, const uint8_t *data,
   }
 }
 
-// Broadcasts "I am the hub" so leaves can discover us.
+// --- The timing broadcast (#340) --------------------------------------------
 //
-// One second because that is also the timing broadcast's cadence in #340, and when
-// that slice lands this beacon is the obvious thing for it to replace rather than
-// sit alongside.
+// This REPLACES the old kPrimaryHere beacon rather than running beside it. That
+// beacon existed so leaves could discover the hub, it already ran at exactly this
+// cadence, and the beacon below still does that job -- so there is one 1 Hz
+// broadcast from the primary, not two that could drift apart.
+
+// Captured by the primary's send callback and read by the beacon task. volatile
+// because the callback runs on the WiFi task.
+volatile uint64_t sBeaconTxUs = 0;
+volatile uint64_t sBeaconTxTsfUs = 0;
+SemaphoreHandle_t sBeaconSent = nullptr;
+
+// Set while a beacon is in flight, so the follow-up's own send callback -- which
+// fires a moment later on the same path -- cannot be mistaken for the beacon's.
+volatile bool sAwaitingBeaconTx = false;
+
+uint32_t sEpoch = 0;
+uint32_t sBeaconSeq = 0;
+uint32_t sBeaconsWithoutTxStamp = 0;
+
+void primarySendCallback(const wifi_tx_info_t *, esp_now_send_status_t) {
+  if (!sAwaitingBeaconTx) {
+    return;
+  }
+  // The whole point of the two-step protocol is this line and where it sits: the
+  // clock is read here, after the frame has actually gone out, rather than before
+  // esp_now_send -- which would time the transmit queue (CSMA backoff and driver
+  // queueing, milliseconds and variable) instead of the clock.
+  sBeaconTxUs = static_cast<uint64_t>(esp_timer_get_time());
+  // Expected to be 0 throughout this architecture: the IDF returns 0 from
+  // esp_wifi_get_tsf_time on a station that is not associated, and no node here
+  // ever associates. Read anyway so the claim is a hardware measurement rather
+  // than a citation -- #340's first recommended approach turns on it.
+  sBeaconTxTsfUs = static_cast<uint64_t>(esp_wifi_get_tsf_time(WIFI_IF_STA));
+  sAwaitingBeaconTx = false;
+  if (sBeaconSent != nullptr) {
+    xSemaphoreGive(sBeaconSent);
+  }
+}
+
+bool broadcastPacket(PacketType type, const void *payload, size_t payload_size) {
+  uint8_t packet[kEnvelopeSize + 64];
+  if (payload_size > sizeof(packet) - kEnvelopeSize) {
+    return false;
+  }
+  packet[0] = kEspNowMagic0;
+  packet[1] = kEspNowMagic1;
+  packet[2] = kEspNowProtocolVersion;
+  packet[3] = static_cast<uint8_t>(type);
+  if (payload != nullptr && payload_size > 0) {
+    std::memcpy(packet + kEnvelopeSize, payload, payload_size);
+  }
+  return esp_now_send(kBroadcast, packet, kEnvelopeSize + payload_size) == ESP_OK;
+}
+
 void beaconTask(void *) {
-  uint8_t packet[kEnvelopeSize] = {kEspNowMagic0, kEspNowMagic1,
-                                   kEspNowProtocolVersion,
-                                   static_cast<uint8_t>(PacketType::kPrimaryHere)};
   while (true) {
-    esp_now_send(kBroadcast, packet, sizeof(packet));
-    vTaskDelay(pdMS_TO_TICKS(1000));
+    TimeBeacon beacon{};
+    beacon.seq = ++sBeaconSeq;
+    beacon.epoch = sEpoch;
+    beacon.enqueue_us = static_cast<uint64_t>(esp_timer_get_time());
+    // 0 for "no wall clock", which is the truth: the primary has no NTP by
+    // design. #349's gateway is what fills this in.
+    beacon.wall_us = 0;
+
+    sBeaconTxUs = 0;
+    sBeaconTxTsfUs = 0;
+    xSemaphoreTake(sBeaconSent, 0);  // clear any stale completion
+    sAwaitingBeaconTx = true;
+
+    if (!broadcastPacket(PacketType::kTimeBeacon, &beacon, sizeof(beacon))) {
+      sAwaitingBeaconTx = false;
+      vTaskDelay(pdMS_TO_TICKS(CONFIG_NATKIT_TIME_BEACON_MS));
+      continue;
+    }
+
+    // Wait for the transmit callback, then say what it saw. A follow-up is only
+    // worth sending if there is a real stamp in it -- tx_us of 0 tells a leaf to
+    // discard the pair rather than anchor a sample to a time nothing measured.
+    TimeFollowUp follow_up{};
+    follow_up.seq = beacon.seq;
+    follow_up.epoch = beacon.epoch;
+    if (xSemaphoreTake(sBeaconSent, pdMS_TO_TICKS(50)) == pdTRUE) {
+      follow_up.tx_us = sBeaconTxUs;
+      follow_up.tx_tsf_us = sBeaconTxTsfUs;
+    } else {
+      sAwaitingBeaconTx = false;
+      ++sBeaconsWithoutTxStamp;
+    }
+    broadcastPacket(PacketType::kTimeFollowUp, &follow_up, sizeof(follow_up));
+
+    vTaskDelay(pdMS_TO_TICKS(CONFIG_NATKIT_TIME_BEACON_MS));
   }
 }
 
@@ -472,22 +878,48 @@ void beaconTask(void *) {
 
 esp_err_t espNowPrimaryStart() {
   ESP_ERROR_CHECK(startRadio());
+
+  // A boot identifier, not a device identifier: what a leaf needs to detect is
+  // that this primary's esp_timer restarted at zero, and only a value that
+  // changes per boot says that. Forced non-zero because 0 is the leaf's "no epoch
+  // yet", and an epoch that collides with it would look like a primary that never
+  // rebooted.
+  sEpoch = esp_random();
+  if (sEpoch == 0) {
+    sEpoch = 1;
+  }
+
+  sBeaconSent = xSemaphoreCreateBinary();
+  if (sBeaconSent == nullptr) {
+    return ESP_ERR_NO_MEM;
+  }
+
   ESP_ERROR_CHECK(esp_now_register_recv_cb(primaryRecvCallback));
+  ESP_ERROR_CHECK(esp_now_register_send_cb(primarySendCallback));
   ESP_ERROR_CHECK(addBroadcastPeer());
   xTaskCreate(beaconTask, "natkit-beacon", 3072, nullptr, 4, nullptr);
 
   uint8_t mac[6] = {};
   esp_wifi_get_mac(WIFI_IF_STA, mac);
   ESP_LOGI(kTag,
-           "primary up on channel %d as %02x:%02x:%02x:%02x:%02x:%02x, "
-           "beaconing every 1s, tracking up to %u nodes",
+           "primary up on channel %d as %02x:%02x:%02x:%02x:%02x:%02x, timing "
+           "master for epoch %08lx, beacon + follow-up every 1s, tracking up to "
+           "%u nodes",
            CONFIG_NATKIT_ESPNOW_CHANNEL, mac[0], mac[1], mac[2], mac[3], mac[4],
-           mac[5], (unsigned)kMaxTrackedNodes);
+           mac[5], static_cast<unsigned long>(sEpoch), (unsigned)kMaxTrackedNodes);
   return ESP_OK;
 }
 
 const NodeState *espNowPrimaryNodes() { return sNodes; }
 
 uint32_t espNowPrimaryUnknownPackets() { return sUnknownPackets; }
+
+uint32_t espNowPrimaryEpoch() { return sEpoch; }
+
+uint32_t espNowPrimaryBeaconSeq() { return sBeaconSeq; }
+
+uint32_t espNowPrimaryBeaconsWithoutTxStamp() { return sBeaconsWithoutTxStamp; }
+
+uint64_t espNowPrimaryLastTxTsf() { return sBeaconTxTsfUs; }
 
 }  // namespace natkit
