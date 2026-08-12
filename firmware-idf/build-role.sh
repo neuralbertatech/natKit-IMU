@@ -22,15 +22,21 @@
 set -euo pipefail
 
 usage() {
-  echo "usage: $0 <leaf|primary|gateway|espnow-probe> [esp32|esp32c3] [idf.py args...]" >&2
+  echo "usage: $0 <leaf|primary|gateway|espnow-probe|espnow-probe-receiver> [esp32|esp32c3] [idf.py args...]" >&2
 }
 
 # espnow-probe is not a node role -- it is the TEC-NATKIT-23 bench instrument,
 # which builds instead of a role (see roles/espnow-probe.defaults). It lives here
 # so it gets the same isolated build dir and sdkconfig as everything else.
+#
+# espnow-probe-receiver is the same instrument with the receiver switch set, and it
+# is a separate target for a reason: the switch cannot be flipped by hand after a
+# build, because ESP-IDF only reads the defaults when the generated sdkconfig does
+# not exist yet. Editing it by hand yields a second SENDER, and two senders with no
+# receiver look exactly like total packet loss.
 role="${1:-}"
 case "${role}" in
-  leaf | primary | gateway | espnow-probe) ;;
+  leaf | primary | gateway | espnow-probe | espnow-probe-receiver) ;;
   *)
     usage
     exit 2

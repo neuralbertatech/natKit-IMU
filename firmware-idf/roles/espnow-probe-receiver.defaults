@@ -1,0 +1,15 @@
+# Role fragment: the ESP-NOW bench probe as RECEIVER, for the multi-node loss run
+# (TEC-NATKIT-23). Applied by ./build-role.sh espnow-probe-receiver <target>.
+#
+# This exists as its own build target rather than as a hand-edited sdkconfig
+# because ESP-IDF reads sdkconfig.defaults* ONLY when the generated sdkconfig does
+# not yet exist -- so toggling the receiver switch by hand after a build silently
+# does nothing, and the image that lands is a second SENDER. Two senders and no
+# receiver looks exactly like total packet loss, which is the wrong answer to the
+# question this instrument exists to ask.
+#
+# Both ends must agree on CONFIG_NATKIT_ESPNOW_CHANNEL (default 1); a mismatch
+# also presents as every packet sending successfully while nothing arrives.
+CONFIG_NATKIT_ROLE_LEAF=y
+CONFIG_NATKIT_ESPNOW_PROBE=y
+CONFIG_NATKIT_ESPNOW_PROBE_RECEIVER=y
