@@ -71,12 +71,26 @@ void runLeaf() {
   ESP_LOGI(kTag, "leaf: device %" PRIu64 ", IMU on SPI, ESP-NOW only",
            deviceId());
 
+  // A leaf whose sensor did not start STILL JOINS THE RADIO.
+  //
+  // It used to fall into idleStatusLoop here, which made a sensor failure
+  // visible only to whoever was holding a USB cable -- the primary saw an absent
+  // node, indistinguishable from one that was unplugged or out of range. Now it
+  // announces, heartbeats and takes part in the timing broadcast, so the failure
+  // is diagnosable from the hub. It sends no data frames, because it has no data:
+  // sampleFromReadings would refuse anyway, and a frame of zeroes is worse than
+  // no frame.
+  //
+  // It is also what makes a sensorless board usable as a second timing node,
+  // which is how TEC-NATKIT-4 measures node-to-node coherence.
   Bno08x imu;
-  if (imu.begin() != ESP_OK) {
+  const bool have_imu = imu.begin() == ESP_OK;
+  if (!have_imu) {
     ESP_LOGE(kTag,
-             "IMU did not start -- staying alive so the console is still "
-             "readable rather than rebooting in a loop");
-    idleStatusLoop("leaf (no IMU)");
+             "IMU did not start -- continuing as a SENSORLESS leaf: no data "
+             "frames, but the radio, the heartbeat and the clock fit all run, so "
+             "this node is diagnosable from the primary rather than merely "
+             "absent");
   }
 
   if (espNowLinkStart() != ESP_OK) {
@@ -116,8 +130,10 @@ void runLeaf() {
   uint64_t last_log_us = 0;
 
   while (true) {
-    imu.service();
-    imu.enableDynamicCalibrationOnce();
+    if (have_imu) {
+      imu.service();
+      imu.enableDynamicCalibrationOnce();
+    }
 
     const uint64_t now = static_cast<uint64_t>(esp_timer_get_time());
 
@@ -128,7 +144,7 @@ void runLeaf() {
     // asynchronously at their own rates (~64 Hz accel, ~98 Hz for the rest), so a
     // "sample" is necessarily a merge across them -- which is exactly what the
     // schema carries and what the current firmware sends.
-    if (now >= next_sample_us) {
+    if (have_imu && now >= next_sample_us) {
       next_sample_us = now + kSampleIntervalUs;
       ImuSample sample{};
       if (sampleFromReadings(imu.readings(), sample) &&
@@ -199,6 +215,14 @@ void runLeaf() {
                           : static_cast<float>(frames_built - frames_at_last_log) *
                                 1'000'000.0F / static_cast<float>(elapsed_us);
 
+      if (!have_imu) {
+        ESP_LOGW(kTag,
+                 "sensorless leaf: no IMU on this board, so no data frames. Heap "
+                 "%" PRIu32 " B (min %" PRIu32 " B)",
+                 static_cast<uint32_t>(esp_get_free_heap_size()),
+                 static_cast<uint32_t>(esp_get_minimum_free_heap_size()));
+      }
+      if (have_imu) {
       ESP_LOGI(kTag,
                "accel %+7.3f %+7.3f %+7.3f (%s) | gyro %+7.3f %+7.3f %+7.3f "
                "(%s) | quat %+6.3f %+6.3f %+6.3f %+6.3f (%s)",
@@ -215,6 +239,7 @@ void runLeaf() {
                imu.calibrationEnabled() ? "on" : "pending",
                static_cast<uint32_t>(esp_get_free_heap_size()),
                static_cast<uint32_t>(esp_get_minimum_free_heap_size()));
+      }
       // Data frames and total packets are labelled separately on purpose: the leaf
       // also sends heartbeats and announces down this path, so a single "sent"
       // figure next to the frame count reads as though more frames were sent than

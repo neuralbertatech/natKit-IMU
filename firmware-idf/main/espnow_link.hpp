@@ -49,6 +49,8 @@ enum class PacketType : uint8_t {
   kSyncState = 7,     // leaf -> primary: payload is a SyncState
   kTimeProbe = 8,          // leaf -> primary: payload is a TimeProbe
   kTimeProbeFollowUp = 9,  // leaf -> primary: payload is a TimeProbeFollowUp
+  kSyncMarker = 10,        // primary -> broadcast: payload is a SyncMarker
+  kMarkerReport = 11,      // leaf -> primary: payload is a MarkerReport
 };
 
 struct EspNowEnvelope {
@@ -209,7 +211,47 @@ struct TimeProbeFollowUp {
   uint64_t tx_us;
 };
 
-// These five structs go on the wire by memcpy, so their layout is a contract
+// --- The marker: node-to-node coherence, measured (#315 / TEC-NATKIT-4) -----
+//
+// Everything above measures each leaf against the PRIMARY. Node-to-node
+// coherence -- which is what #315 is actually about, and what a recording with
+// two sensors on it depends on -- was until now only INFERRED from two such
+// figures plus an argument that their common-mode bias cancels. That argument is
+// reasonable and was untested.
+//
+// A marker tests it. The primary broadcasts one; both leaves receive THE SAME
+// WAVEFRONT (propagation between them differs by nanoseconds); each converts its
+// own local receive time into primary time using its own fit and reports the
+// answer. Two independent clocks, one physical event, and the difference between
+// their answers IS the node-to-node error -- no model, no cancellation argument.
+//
+// ⚠️ The marker is deliberately NOT fed into any fit. A leaf that estimated its
+// clock from these packets and was then scored on them would be marking its own
+// exam, which is exactly the circularity that makes a fit residual a poor
+// accuracy figure. It is a held-out sample.
+
+struct SyncMarker {
+  uint32_t seq;
+  uint32_t epoch;
+};
+
+struct MarkerReport {
+  uint64_t device_id;
+  uint32_t marker_seq;
+  uint32_t epoch;
+  // The leaf's own receive time for that marker, already converted into the
+  // primary's time base by the leaf's fit. Two leaves reporting the same number
+  // for the same marker are coherent; the spread between them is the error.
+  uint64_t primary_us;
+  // The raw local receive time as well, so the primary can re-derive the
+  // conversion rather than having to trust it -- and so a fit that is later
+  // improved can be re-applied to the same held-out sample.
+  uint64_t local_us;
+  uint8_t quality;  // SyncQuality at the moment of conversion
+  uint8_t reserved[7];
+};
+
+// These structs go on the wire by memcpy, so their layout is a contract
 // between two images rather than an internal detail -- and #349's gateway will
 // have to parse them from the other side of a serial link. Pinned here so a field
 // added in the middle is a build failure instead of a silently misread packet.
@@ -223,6 +265,9 @@ static_assert(sizeof(TimeProbe) == 16, "TimeProbe layout is a wire contract");
 static_assert(sizeof(TimeProbeFollowUp) == 24,
               "TimeProbeFollowUp layout is a wire contract");
 static_assert(sizeof(SyncState) == 88, "SyncState layout is a wire contract");
+static_assert(sizeof(SyncMarker) == 8, "SyncMarker layout is a wire contract");
+static_assert(sizeof(MarkerReport) == 40,
+              "MarkerReport layout is a wire contract");
 
 // --- Link ------------------------------------------------------------------
 
@@ -367,6 +412,15 @@ struct NodeState {
   int64_t naive_offset_us = 0;
   int64_t naive_error_us = 0;
   int64_t naive_error_worst_us = 0;
+
+  // This node's answer to the most recent marker it reported (#315). Held so the
+  // primary can pair it against another node's answer to the SAME marker.
+  bool marker_seen = false;
+  uint32_t marker_seq = 0;
+  uint64_t marker_primary_us = 0;
+  uint64_t marker_local_us = 0;
+  uint8_t marker_quality = 0;
+  uint32_t markers_reported = 0;
 };
 
 esp_err_t espNowPrimaryStart();
@@ -375,6 +429,42 @@ esp_err_t espNowPrimaryStart();
 // by value because the caller is a logging loop, not a consumer of history.
 const NodeState *espNowPrimaryNodes();
 uint32_t espNowPrimaryUnknownPackets();
+
+// --- Node-to-node coherence (#315) ------------------------------------------
+//
+// Computed on the primary because it is the only device that hears every leaf's
+// answer to the same marker. It is a property of a PAIR, not of a node, which is
+// why it does not live in NodeState.
+struct CoherenceStats {
+  bool seen = false;
+  uint32_t markers_paired = 0;
+  int64_t spread_us = 0;       // latest: leaf A's answer minus leaf B's
+  int64_t spread_min_us = 0;
+  int64_t spread_max_us = 0;
+  int64_t spread_sum_us = 0;
+  uint64_t spread_sum_sq = 0;
+  uint32_t excursions = 0;     // beyond kCoherenceExcursionUs of the running mean
+  int64_t excursion_worst_us = 0;
+  uint64_t device_a = 0;
+  uint64_t device_b = 0;
+};
+
+// One number for "how far apart can two of this rig's nodes be", in microseconds,
+// and a quality level to go with it. This is #315's deliverable: what a stream
+// should carry so a consumer can decide whether two sensors' samples may be
+// compared.
+struct CoherenceMetric {
+  uint8_t quality = 0;         // SyncQuality, the WORST across contributing nodes
+  bool measured = false;       // true = from markers; false = derived from fits
+  uint32_t typical_us = 0;     // 1 sd, the everyday figure
+  uint32_t bound_us = 0;       // the conservative one: 3 sd + the excursion tail
+  uint32_t worst_seen_us = 0;
+  uint32_t samples = 0;
+  uint32_t stale_us = 0;       // age of the newest contributing measurement
+};
+
+const CoherenceStats &espNowPrimaryCoherence();
+CoherenceMetric espNowPrimaryCoherenceMetric();
 
 // Timing-master state (#340), for the console and for whatever forwards it.
 uint32_t espNowPrimaryEpoch();

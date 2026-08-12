@@ -253,6 +253,53 @@ void runPrimary() {
       }
     }
 
+    // --- node-to-node coherence, and the metric #315 asks for ---------------
+    if (any) {
+      const CoherenceStats &c = espNowPrimaryCoherence();
+      const CoherenceMetric m = espNowPrimaryCoherenceMetric();
+
+      if (c.markers_paired >= 2) {
+        const double mean = static_cast<double>(c.spread_sum_us) /
+                            static_cast<double>(c.markers_paired);
+        const double mean_sq = static_cast<double>(c.spread_sum_sq) /
+                               static_cast<double>(c.markers_paired);
+        const double variance = mean_sq - mean * mean;
+        const uint32_t sd =
+            static_cast<uint32_t>(variance > 0.0 ? std::sqrt(variance) : 0.0);
+        // One broadcast wavefront, two clocks, and the difference between what
+        // they each say the time was. No model in it.
+        ESP_LOGI(kTag,
+                 "coherence %" PRIu64 " vs %" PRIu64
+                 ": spread now %+lld us | mean %+lld us, sd %lu us over %lu "
+                 "paired markers | range %+lld .. %+lld us | %lu excursions "
+                 "(worst %lld us)",
+                 c.device_a, c.device_b,
+                 static_cast<long long>(c.spread_us),
+                 static_cast<long long>(mean), static_cast<unsigned long>(sd),
+                 static_cast<unsigned long>(c.markers_paired),
+                 static_cast<long long>(c.spread_min_us),
+                 static_cast<long long>(c.spread_max_us),
+                 static_cast<unsigned long>(c.excursions),
+                 static_cast<long long>(c.excursion_worst_us));
+      }
+
+      if (m.typical_us > 0 || m.measured) {
+        ESP_LOGI(kTag,
+                 "TIME COHERENCE METRIC: %s, typical %lu us, bound %lu us, "
+                 "worst seen %lu us | %s from %lu samples | newest node data "
+                 "%lu ms old",
+                 syncQualityName(m.quality),
+                 static_cast<unsigned long>(m.typical_us),
+                 static_cast<unsigned long>(m.bound_us),
+                 static_cast<unsigned long>(m.worst_seen_us),
+                 m.measured ? "MEASURED node-to-node against a held-out marker"
+                            : "DERIVED from one node's fit (no second node to be "
+                              "coherent with)",
+                 static_cast<unsigned long>(m.samples),
+                 static_cast<unsigned long>(m.stale_us / 1000));
+      }
+    }
+
     if (!any) {
       ESP_LOGI(kTag,
                "no nodes yet (timing broadcast at beacon %lu of epoch %08lx; "

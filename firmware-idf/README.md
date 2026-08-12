@@ -28,6 +28,7 @@ an optimisation.
 | TEC-NATKIT-23 on-air frame format | done: 524 B, one frame = one packet |
 | TEC-NATKIT-24 leaf: sampling + `esp_now_send` | done |
 | **#340 the 1-second ESP-NOW timing broadcast** | **done, see Timing below** |
+| **#315 time-coherence confidence metric** | **done, measured on three boards** |
 | TEC-NATKIT-25 primary: node registry, reassembly, serial mux, backpressure | not started |
 | TEC-NATKIT-26 gateway: WiFi/Ethernet, `esp-mqtt`, `esp_netif_sntp` | not started |
 | TEC-NATKIT-27 bench against the current firmware, adopt or discard | not started |
@@ -79,6 +80,62 @@ Three findings worth not rediscovering:
   worst). It does *not* explain the probe excursions — only ~1% of probes excurse,
   so the higher-priority WiFi task is largely protecting the receive callback from
   it — but it is a real constraint on TEC-NATKIT-25's serial mux.
+
+## Coherence between nodes (#315)
+
+Everything above measures one leaf against the **primary**. What a recording with
+two sensors on it actually depends on is whether two *leaves* agree, and that was
+only inferred until there were three boards.
+
+The primary broadcasts a **`SyncMarker`** every fifth beacon. Both leaves receive
+the same wavefront (they are metres apart, so propagation between them differs by
+nanoseconds), each converts its own receive time into primary time using its own
+fit, and reports the answer. The difference between their two answers is the
+node-to-node error — no model, no cancellation argument.
+
+**The marker is deliberately held out of every fit.** A leaf that estimated its
+clock from these packets and was then scored on them would be marking its own
+exam, which is the same circularity that makes a fit residual a poor accuracy
+figure.
+
+**Measured, two leaves + one primary, 5.5-minute soak, 57 paired markers:**
+
+| | leaf A vs primary | leaf B vs primary | **leaf A vs leaf B** |
+|---|---|---|---|
+| bias | −139 µs | −133 µs | **+0 µs** |
+| scatter (sd) | 35 µs | 32 µs | **16 µs** |
+| range | −1243 .. −44 µs | −1676 .. −41 µs | **−37 .. +34 µs** |
+| excursions | 1 | 4 | **0** |
+
+Two things fall out of that table, and both were predictions worth testing:
+
+- **The bias is common-mode and cancels.** −139 and −133 µs against the primary,
+  +0 µs between the leaves. It is the difference between the two directions'
+  callback latencies, and both leaves have the same one.
+- **Node-to-node is BETTER than either node's figure against the primary, not
+  worse.** Combining two measurements would normally add noise. It does not here
+  because the marker path never touches the primary's receive callback or a
+  leaf's transmit callback — only the two leaves' receive callbacks, which are
+  the same code on the same silicon reacting to the same instant. The excursions
+  vanish for the same reason: they live in the probe path, not in the clocks.
+
+`espNowPrimaryCoherenceMetric()` reduces this to what a stream should carry: a
+`typical_us` (1 sd), a conservative `bound_us` (3 sd plus the excursion tail), the
+worst ever seen, the **worst** quality across contributing nodes, and a `measured`
+flag that is false when there is only one node and the figure had to be derived
+from its fit instead. On the bench: **typical 17 µs, bound 50 µs, worst 37 µs.**
+
+⚠️ **This measures RELATIVE agreement.** An error common to both leaves — both
+mis-estimating the primary's clock the same way — is invisible here, and it is
+also irrelevant to comparing two sensors. It is not irrelevant to *server*-to-node,
+which needs a wall clock and therefore waits for the gateway (TEC-NATKIT-26).
+
+⚠️ **QEMU can no longer boot any role that starts the radio.** `esp_phy_enable`
+asserts (`phy_module_has_clock_bits`) because there is no PHY to enable, and the
+board reboots in a loop. This is not a regression: the primary, which has no
+sensor code at all, fails identically. It was not seen at TEC-NATKIT-21 because
+every role was then a stub that never touched the radio. QEMU is still useful for
+boot, banner and config checks up to `espNowLinkStart()`.
 
 ## Prerequisites
 

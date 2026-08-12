@@ -1,6 +1,7 @@
 #include "espnow_link.hpp"
 
 #include <cinttypes>
+#include <cmath>
 #include <cstring>
 
 #include "device_id.hpp"
@@ -140,6 +141,28 @@ void leafRecvCallback(const esp_now_recv_info_t *info, const uint8_t *data,
         TimeFollowUp follow_up{};
         std::memcpy(&follow_up, payload, sizeof(follow_up));
         timeSyncOnFollowUp(follow_up);
+      }
+      break;
+    }
+    case PacketType::kSyncMarker: {
+      // A held-out sample: converted with the fit, never fed INTO it. Answering
+      // from the callback rather than from a task is deliberate -- the answer is
+      // "what time do I think it is", and queueing the conversion behind a task
+      // switch would fold that task switch into the answer.
+      if (payload_size >= sizeof(SyncMarker)) {
+        SyncMarker marker{};
+        std::memcpy(&marker, payload, sizeof(marker));
+
+        MarkerReport report{};
+        report.device_id = deviceId();
+        report.marker_seq = marker.seq;
+        report.epoch = marker.epoch;
+        report.local_us = rx_local_us;
+        report.quality = static_cast<uint8_t>(timeSyncStatus().quality);
+        if (!timeSyncToPrimary(rx_local_us, report.primary_us)) {
+          report.primary_us = 0;  // unsynced: say so rather than answer anyway
+        }
+        espNowLinkSend(PacketType::kMarkerReport, &report, sizeof(report));
       }
       break;
     }
@@ -633,6 +656,74 @@ void scoreProbe(NodeState &node, const TimeProbeFollowUp &follow_up) {
       node.probe_error_sum_us / static_cast<int64_t>(node.probe_error_count);
 }
 
+CoherenceStats sCoherence{};
+
+// How far off a pair has to be before it is a scheduling artefact rather than a
+// clock disagreement. Twice the single-node figure, because a pair carries two
+// nodes' worth of it.
+constexpr int64_t kCoherenceExcursionUs = 2000;
+
+// Pairs this node's answer to a marker against every other node's answer to the
+// SAME marker.
+//
+// This is the whole of #315's measurement: one broadcast wavefront, two clocks,
+// and the difference between what they each think the time was. Nothing here
+// models anything -- there is no cancellation argument and no assumption about
+// where the error comes from.
+void pairMarker(NodeState &node) {
+  for (NodeState &other : sNodes) {
+    if (!other.in_use || &other == &node || !other.marker_seen) {
+      continue;
+    }
+    if (other.marker_seq != node.marker_seq) {
+      continue;  // different events are not comparable, which is the point
+    }
+    // A node that could not convert has no answer to compare.
+    if (other.marker_primary_us == 0 || node.marker_primary_us == 0) {
+      continue;
+    }
+
+    const int64_t spread = static_cast<int64_t>(node.marker_primary_us) -
+                           static_cast<int64_t>(other.marker_primary_us);
+
+    if (!sCoherence.seen) {
+      sCoherence.seen = true;
+      sCoherence.spread_min_us = spread;
+      sCoherence.spread_max_us = spread;
+      sCoherence.device_a = node.device_id;
+      sCoherence.device_b = other.device_id;
+    }
+    sCoherence.spread_us = spread;
+    if (spread < sCoherence.spread_min_us) {
+      sCoherence.spread_min_us = spread;
+    }
+    if (spread > sCoherence.spread_max_us) {
+      sCoherence.spread_max_us = spread;
+    }
+
+    // Same tail treatment as the probe error, for the same reason: an accuracy
+    // figure a 1% tail can set is not an accuracy figure.
+    const int64_t mean =
+        sCoherence.markers_paired > 0
+            ? sCoherence.spread_sum_us /
+                  static_cast<int64_t>(sCoherence.markers_paired)
+            : spread;
+    const int64_t deviation = spread - mean;
+    const int64_t magnitude = deviation < 0 ? -deviation : deviation;
+    if (sCoherence.markers_paired > 0 && magnitude > kCoherenceExcursionUs) {
+      ++sCoherence.excursions;
+      if (magnitude > sCoherence.excursion_worst_us) {
+        sCoherence.excursion_worst_us = magnitude;
+      }
+      continue;
+    }
+
+    sCoherence.spread_sum_us += spread;
+    sCoherence.spread_sum_sq += static_cast<uint64_t>(spread * spread);
+    ++sCoherence.markers_paired;
+  }
+}
+
 // Kept short on purpose: this runs on the WiFi task, so it updates counters and
 // gets out. All logging happens in the primary's own loop.
 void primaryRecvCallback(const esp_now_recv_info_t *info, const uint8_t *data,
@@ -765,6 +856,25 @@ void primaryRecvCallback(const esp_now_recv_info_t *info, const uint8_t *data,
       }
       break;
     }
+    case PacketType::kMarkerReport: {
+      if (payload_size >= sizeof(MarkerReport)) {
+        MarkerReport report{};
+        std::memcpy(&report, payload, sizeof(report));
+        // Accessor rather than sEpoch directly: the beacon state is declared
+        // further down this file, and scoreProbe above reaches for it the same
+        // way.
+        if (report.epoch == espNowPrimaryEpoch()) {
+          node->marker_seen = true;
+          node->marker_seq = report.marker_seq;
+          node->marker_primary_us = report.primary_us;
+          node->marker_local_us = report.local_us;
+          node->marker_quality = report.quality;
+          ++node->markers_reported;
+          pairMarker(*node);
+        }
+      }
+      break;
+    }
     case PacketType::kTimeBeacon:
     case PacketType::kTimeFollowUp:
       // Another primary's timing broadcast on our channel. Counted, not acted on:
@@ -798,6 +908,12 @@ volatile bool sAwaitingBeaconTx = false;
 uint32_t sEpoch = 0;
 uint32_t sBeaconSeq = 0;
 uint32_t sBeaconsWithoutTxStamp = 0;
+
+// One marker every N beacons. Five seconds is often enough to build a
+// distribution over a soak and rare enough that it is not competing with the
+// data stream for airtime -- the marker costs one broadcast plus one small
+// unicast per leaf.
+constexpr uint32_t kMarkerEvery = 5;
 
 void primarySendCallback(const wifi_tx_info_t *, esp_now_send_status_t) {
   if (!sAwaitingBeaconTx) {
@@ -870,6 +986,17 @@ void beaconTask(void *) {
     }
     broadcastPacket(PacketType::kTimeFollowUp, &follow_up, sizeof(follow_up));
 
+    // The held-out sample (#315). Sent on its own cadence, and NOT paired with a
+    // follow-up: no leaf feeds it into a fit, so its transmit time does not need
+    // to be known accurately. What matters is only that every leaf hears the
+    // SAME wavefront, which a single broadcast guarantees for free.
+    if (kMarkerEvery > 0 && beacon.seq % kMarkerEvery == 0) {
+      SyncMarker marker{};
+      marker.seq = beacon.seq;
+      marker.epoch = sEpoch;
+      broadcastPacket(PacketType::kSyncMarker, &marker, sizeof(marker));
+    }
+
     vTaskDelay(pdMS_TO_TICKS(CONFIG_NATKIT_TIME_BEACON_MS));
   }
 }
@@ -913,6 +1040,101 @@ esp_err_t espNowPrimaryStart() {
 const NodeState *espNowPrimaryNodes() { return sNodes; }
 
 uint32_t espNowPrimaryUnknownPackets() { return sUnknownPackets; }
+
+const CoherenceStats &espNowPrimaryCoherence() { return sCoherence; }
+
+// #315's deliverable: one bounded number, plus the honesty about where it came
+// from.
+//
+// The two-tier shape is the point. `typical_us` is what a consumer should expect
+// on an ordinary sample; `bound_us` is what it should not exceed, and it carries
+// the tail explicitly rather than averaging it away -- because the question "can
+// I compare these two sensors' samples" is answered by the worst case, not the
+// median.
+//
+// `measured` is the other half of the honesty. With two or more leaves this is a
+// real measurement of one wavefront against two clocks. With one leaf there is
+// nothing to be coherent WITH, so it falls back to deriving a figure from the
+// single node's own fit against the primary -- which is a weaker claim, and
+// says so.
+CoherenceMetric espNowPrimaryCoherenceMetric() {
+  CoherenceMetric metric{};
+  const uint64_t now = static_cast<uint64_t>(esp_timer_get_time());
+
+  // The quality is the WORST of the contributing nodes, never an average: a
+  // stream is only as comparable as its least synchronised member, and averaging
+  // a locked node with an unsynced one produces a number that describes neither.
+  uint8_t worst_quality = static_cast<uint8_t>(SyncQuality::kLocked);
+  uint64_t newest = 0;
+  bool any = false;
+  for (const NodeState &node : sNodes) {
+    if (!node.in_use || !node.sync_seen) {
+      continue;
+    }
+    any = true;
+    if (node.last_sync.quality < worst_quality) {
+      worst_quality = node.last_sync.quality;
+    }
+    if (node.last_seen_us > newest) {
+      newest = node.last_seen_us;
+    }
+  }
+  if (!any) {
+    return metric;
+  }
+  metric.quality = worst_quality;
+  metric.stale_us = static_cast<uint32_t>(newest == 0 ? 0 : now - newest);
+
+  if (sCoherence.markers_paired >= 2) {
+    metric.measured = true;
+    metric.samples = sCoherence.markers_paired;
+    const double mean = static_cast<double>(sCoherence.spread_sum_us) /
+                        static_cast<double>(sCoherence.markers_paired);
+    const double mean_sq = static_cast<double>(sCoherence.spread_sum_sq) /
+                           static_cast<double>(sCoherence.markers_paired);
+    const double variance = mean_sq - mean * mean;
+    const double sd = variance > 0.0 ? std::sqrt(variance) : 0.0;
+    // The mean spread is folded into the typical figure rather than subtracted
+    // out. Between two NODES a constant offset is not a common-mode nuisance to
+    // be calibrated away -- it is exactly the disagreement being reported.
+    const double bias = mean < 0.0 ? -mean : mean;
+    metric.typical_us = static_cast<uint32_t>(bias + sd);
+    metric.bound_us = static_cast<uint32_t>(bias + 3.0 * sd) +
+                      static_cast<uint32_t>(sCoherence.excursion_worst_us);
+    const int64_t worst = sCoherence.spread_max_us > -sCoherence.spread_min_us
+                              ? sCoherence.spread_max_us
+                              : -sCoherence.spread_min_us;
+    metric.worst_seen_us = static_cast<uint32_t>(worst < 0 ? -worst : worst);
+    return metric;
+  }
+
+  // Fallback: one leaf, or not enough paired markers yet. Derive from that node's
+  // own measured error against the primary and DOUBLE it, because two such nodes
+  // would each contribute one. Marked `measured = false`, which is the whole
+  // reason that flag exists.
+  for (const NodeState &node : sNodes) {
+    if (!node.in_use || node.probe_error_count < 2) {
+      continue;
+    }
+    const double mean = static_cast<double>(node.probe_error_sum_us) /
+                        static_cast<double>(node.probe_error_count);
+    const double mean_sq = static_cast<double>(node.probe_error_sum_sq) /
+                           static_cast<double>(node.probe_error_count);
+    const double variance = mean_sq - mean * mean;
+    const double sd = variance > 0.0 ? std::sqrt(variance) : 0.0;
+    // The BIAS is deliberately not included here: it is common-mode between two
+    // leaves and cancels. That is a modelled claim rather than a measured one,
+    // which is precisely why this branch reports measured = false.
+    const uint32_t typical = static_cast<uint32_t>(2.0 * sd);
+    if (typical > metric.typical_us) {
+      metric.typical_us = typical;
+      metric.bound_us = static_cast<uint32_t>(6.0 * sd) +
+                        static_cast<uint32_t>(node.probe_excursion_worst_us);
+      metric.samples = node.probe_error_count;
+    }
+  }
+  return metric;
+}
 
 uint32_t espNowPrimaryEpoch() { return sEpoch; }
 
