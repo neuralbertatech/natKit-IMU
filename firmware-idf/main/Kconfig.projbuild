@@ -188,6 +188,138 @@ config NATKIT_TIME_SYNC_PROBE_MS
         probe's measured arrival against what the leaf's reported fit predicted,
         and the difference is the sync error.
 
+config NATKIT_REGISTRY_SEALED
+    bool "Seal the primary's node registry at boot"
+    default n
+    help
+        A sealed registry accepts only the nodes already on its roster and
+        counts and drops everything else. An open one learns any node that
+        turns up and remembers it in NVS.
+
+        Open by default is deliberate: a registry that has to be populated by
+        hand before anything works is a registry people disable. Quietly
+        accepting a stranger is the worse failure only AFTER you have told the
+        rig who its nodes are -- so seal it once a rig is the set of nodes you
+        want, and a neighbouring rig on the same channel stops being able to
+        appear in your recordings.
+
+        Applied at every boot, so this build option is the state of the rig
+        rather than a one-way switch. It is how a fielded primary is frozen
+        while there is no downward command channel; that path is
+        TEC-NATKIT-26's decision.
+
+config NATKIT_REGISTRY_CLEAR_ON_BOOT
+    bool "Forget every remembered node at boot"
+    default n
+    help
+        Bench control. Wipes the persisted roster on startup so a rig can be
+        re-learned from scratch without erasing the whole NVS partition.
+
+        Leave this off in anything real: combined with a sealed registry it
+        would produce a primary that boots having forgotten every node and
+        refuses to learn any, which rejects the entire rig.
+
+config NATKIT_UPLINK_UART_NUM
+    int "Primary uplink UART (0 shares the console; 1 is the real link)"
+    default 1
+    range 0 2
+    help
+        Which UART carries the primary's framed stream to the gateway
+        (TEC-NATKIT-25).
+
+        1 is the design: a dedicated wire, with UART0 left as the human console.
+        This matters more than it looks -- #340 measured the primary's console
+        blocking its own task for ~87 ms every second on status lines alone, and
+        the uplink cannot share that budget.
+
+        0 is a BRING-UP mode for a bench with no USB-to-TTL adapter on it: the
+        binary frames are interleaved into the USB console alongside the log
+        text, and the reader resynchronises past the text. That works because
+        resync-after-garbage is a requirement of the protocol anyway, so this
+        mode exercises it hard. The logger is routed through the same lock as
+        the frame writer in this mode, or a log line landing mid-frame would
+        corrupt most of them.
+
+config NATKIT_UPLINK_BAUD
+    int "Primary uplink baud rate"
+    default 921600
+    range 9600 4000000
+    help
+        Budget this rather than picking it. Each node costs about
+        (18 + 24 + 50 * samples-per-frame + 4) bytes per frame at
+        1e6 / (sample interval * samples per frame) frames per second -- roughly
+        2.7 KB/s at the defaults. A UART carries baud/10 bytes per second at 8N1.
+
+        So 115200 (~11.5 KB/s) is about 4 nodes and 921600 (~92 KB/s) is about
+        33. natVR stalled its pipeline running ~19 KB/s of frames into a 115200
+        console, which is the whole reason this help text does arithmetic. The
+        primary prints the same sum at boot with the configured values.
+
+config NATKIT_UPLINK_TX_GPIO
+    int "Primary uplink UART TX GPIO"
+    default 26
+    range 0 39
+    help
+        Ignored when the uplink shares UART0. 26 and 25 are free on the
+        ESP32-PICO-V3-02 -- no strapping function, not flash or PSRAM, and clear
+        of every BNO08x pin in board_config.hpp.
+
+config NATKIT_UPLINK_RX_GPIO
+    int "Primary uplink UART RX GPIO"
+    default 25
+    range 0 39
+    help
+        Ignored when the uplink shares UART0. Nothing is received on it yet --
+        the downward command path is TEC-NATKIT-26's decision -- but the pin is
+        claimed now so the wiring and the enclosure (#320) do not have to change
+        later.
+
+config NATKIT_UPLINK_QUEUE_DEPTH
+    int "Primary uplink queue depth (frames)"
+    default 16
+    range 2 64
+    help
+        How many frames the primary holds while the wire is busy. When it fills,
+        the OLDEST is dropped -- the same policy and the same reasoning as the
+        leaf's radio queue, since for a sensor stream the freshest frame is the
+        valuable one and both sequence numbers in the header make the gap
+        detectable on the far side.
+
+        Each slot costs a whole maximum-size frame, so depth trades RAM for how
+        long the gateway can stall before frames are lost.
+
+config NATKIT_UPLINK_WRITE_TIMEOUT_MS
+    int "How long to wait for a frame to reach the wire (milliseconds)"
+    default 100
+    range 10 5000
+    help
+        Bounded on purpose. If the far end has stopped reading and the driver's
+        buffer fills, the drain task has to come back and let the queue's drop
+        policy run -- waiting forever would turn back-pressure into a silent
+        stall, which is exactly the failure natVR hit.
+
+config NATKIT_UPLINK_TX_BUFFER
+    int "Uplink UART driver TX buffer (bytes)"
+    default 2048
+    range 256 16384
+
+config NATKIT_UPLINK_RX_BUFFER
+    int "Uplink UART driver RX buffer (bytes)"
+    default 512
+    range 256 16384
+
+config NATKIT_UPLINK_STATUS_MS
+    int "How often the primary sends node and primary status frames (ms)"
+    default 1000
+    range 100 60000
+    help
+        The uplink's own telemetry: per-node counters plus each node's clock fit,
+        and the primary's health including what it dropped.
+
+        The clock fit is not optional garnish -- the gateway cannot turn a data
+        frame's device-relative timestamps into anything publishable without it,
+        because the leaf deliberately does not rewrite its own timestamps (#340).
+
 config NATKIT_IMU_LOG_INTERVAL_MS
     int "IMU sample log interval (milliseconds, 0 = off)"
     default 1000

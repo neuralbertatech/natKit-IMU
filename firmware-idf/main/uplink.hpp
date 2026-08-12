@@ -1,0 +1,151 @@
+#pragma once
+
+#include <cstddef>
+#include <cstdint>
+
+#include "esp_err.h"
+#include "espnow_link.hpp"
+#include "imu_frame.hpp"  // the frame constants the queue item is sized from
+
+namespace natkit {
+
+// The primary's framed serial uplink to the gateway (#348 / TEC-NATKIT-25).
+//
+// --- Why a frame at all -----------------------------------------------------
+//
+// The far end is a second microcontroller reading a byte stream that it may join
+// half way through, after either end resets, and possibly with another writer on
+// the same wire. So the format has to answer three questions on its own: where
+// does a frame start, how long is it, and did it arrive intact. Magic, length and
+// CRC, in that order.
+//
+// It is NOT a reassembly protocol. #346 measured the canonical frame at 524 bytes
+// against a 1470-byte ESP-NOW ceiling and decided one frame is one packet, so
+// nothing arriving over the radio is ever partial. This ticket's "reassembly"
+// scope is therefore dead rather than deferred, and a lost packet stays what it
+// already was: a whole missing frame that seqNo makes detectable.
+//
+// --- Layout, little-endian throughout ---------------------------------------
+//
+//   0   1  magic 'N'
+//   1   1  magic 'K'
+//   2   1  version
+//   3   1  type (UplinkType)
+//   4   8  stream id -- the device id that is already inside every topic name
+//  12   4  uplink sequence, the PRIMARY's own, so uplink loss is distinguishable
+//          from radio loss (the payload carries the radio's sequence separately)
+//  16   2  payload length
+//  18   N  payload
+// 18+N  4  CRC32 over bytes [0, 18+N)
+//
+// The two sequence numbers are the point of the header. A gap in the radio
+// sequence means a node's frame never reached us; a gap in the uplink sequence
+// means we dropped it or the wire ate it. Those have different causes and
+// different fixes, and one counter cannot tell them apart.
+
+constexpr uint8_t kUplinkMagic0 = 'N';
+constexpr uint8_t kUplinkMagic1 = 'K';
+constexpr uint8_t kUplinkVersion = 1;
+constexpr size_t kUplinkHeaderSize = 18;
+constexpr size_t kUplinkCrcSize = 4;
+
+enum class UplinkType : uint8_t {
+  // Payload is the canonical NatImuBulkDataSchema Binary frame, VERBATIM.
+  //
+  // Passed through untouched on purpose. The primary knows how to shift this
+  // node's timestamps into its own clock, and deliberately does not: the
+  // correction travels as a value in kNodeStatus below, so the raw device time
+  // survives to the gateway and the shift stays undoable and improvable. Same
+  // reasoning as the leaf not rewriting its own timestamps (#340).
+  kData = 1,
+  // Per-node counters and that node's clock fit. The gateway needs this to turn
+  // a kData frame's device-relative timestamps into anything publishable.
+  kNodeStatus = 2,
+  // The primary's own health, including what it dropped and the rig's
+  // time-coherence metric (#315).
+  kPrimaryStatus = 3,
+};
+
+// What the gateway needs about one node: who it is, whether we are losing it, and
+// how to interpret its clock.
+struct UplinkNodeStatus {
+  uint64_t device_id;
+  uint8_t mac[6];
+  uint16_t reserved0;
+  uint32_t data_frames;
+  uint32_t seq_gaps;
+  uint32_t seq_duplicates;
+  uint32_t seq_restarts;
+  uint32_t heartbeats;
+  uint64_t last_seen_us;      // in the PRIMARY's clock
+  SyncState sync;             // the leaf's fit; apply with syncStateToPrimary()
+  uint8_t sync_valid;
+  uint8_t reserved1[7];
+};
+
+struct UplinkPrimaryStatus {
+  uint64_t device_id;
+  uint64_t uptime_us;
+  uint32_t epoch;
+  uint32_t free_heap;
+  uint32_t min_free_heap;
+  uint32_t nodes_known;
+  uint32_t nodes_rejected;      // packets from MACs the registry will not accept
+  uint32_t unknown_packets;
+  // Uplink counters. `dropped` is the number that matters: it is the primary
+  // saying what it discarded, which is the only way to trust an aggregator.
+  uint32_t frames_queued;
+  uint32_t frames_sent;
+  uint32_t frames_dropped;
+  uint32_t write_timeouts;
+  uint64_t bytes_sent;
+  // #315's metric for the whole rig.
+  uint32_t coherence_typical_us;
+  uint32_t coherence_bound_us;
+  uint32_t coherence_worst_us;
+  uint32_t coherence_samples;
+  uint8_t coherence_quality;
+  uint8_t coherence_measured;
+  uint8_t registry_sealed;
+  uint8_t reserved[5];
+};
+
+struct UplinkStats {
+  uint32_t frames_queued = 0;
+  uint32_t frames_sent = 0;
+  uint32_t frames_dropped = 0;   // queue was full; OLDEST discarded
+  uint32_t write_timeouts = 0;
+  uint32_t oversize_rejected = 0;
+  uint64_t bytes_sent = 0;
+  uint32_t queue_high_water = 0;
+};
+
+// Brings up the uplink UART and its drain task.
+esp_err_t uplinkStart();
+
+// Queues one frame. NEVER BLOCKS: like the leaf's radio queue, a full queue drops
+// the OLDEST frame rather than stalling the caller. The caller here is the
+// ESP-NOW receive callback running on the WiFi task, and blocking it would lose
+// packets from every node to relieve congestion caused by one.
+//
+// Returns false only if the payload cannot fit a frame at all, which is a
+// programming error rather than back-pressure.
+bool uplinkSend(UplinkType type, uint64_t stream_id, const void *payload,
+                size_t payload_size);
+
+const UplinkStats &uplinkStats();
+
+// The largest payload the uplink will carry: the canonical frame at its
+// configured maximum. Sized from the frame constants rather than a round number
+// so a change to samples-per-frame cannot silently overflow a queue item.
+constexpr size_t kUplinkMaxPayload =
+    kFrameHeaderSize + kMaxSamplesPerFrame * kSampleSize;
+constexpr size_t kUplinkMaxFrame =
+    kUplinkHeaderSize + kUplinkMaxPayload + kUplinkCrcSize;
+
+static_assert(sizeof(UplinkNodeStatus) <= kUplinkMaxPayload,
+              "node status must fit the frame the queue is sized for");
+static_assert(sizeof(UplinkPrimaryStatus) <= kUplinkMaxPayload,
+              "primary status must fit the frame the queue is sized for");
+
+}  // namespace natkit

@@ -7,6 +7,8 @@ idf_component_register(
         "espnow_link.cpp"
         "espnow_probe.cpp"
         "imu_frame.cpp"
+        "uplink.cpp"
+        "registry.cpp"
         "time_sync.cpp"
         "leaf.cpp"
         "primary.cpp"
@@ -17,6 +19,7 @@ idf_component_register(
         esp_app_format
         esp_driver_gpio
         esp_driver_spi
+        esp_driver_uart
         esp_event
         esp_netif
         esp_wifi

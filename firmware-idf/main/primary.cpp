@@ -1,7 +1,11 @@
 #include <cinttypes>
 #include <cmath>
+#include <cstring>
 
 #include "device_id.hpp"
+#include "esp_system.h"
+#include "registry.hpp"
+#include "uplink.hpp"
 #include "esp_log.h"
 #include "esp_timer.h"
 #include "espnow_link.hpp"
@@ -70,10 +74,65 @@ const char *syncQualityName(uint8_t quality) {
   }
 }
 
+// Fills the per-node status the gateway needs, INCLUDING that node's clock fit --
+// without which a data frame's device-relative timestamps cannot be turned into
+// anything publishable, because the leaf deliberately does not rewrite its own.
+void fillNodeStatus(const NodeState &node, UplinkNodeStatus &out) {
+  out = UplinkNodeStatus{};
+  out.device_id = node.device_id;
+  std::memcpy(out.mac, node.mac, 6);
+  out.data_frames = node.data_frames;
+  out.seq_gaps = node.seq_gaps;
+  out.seq_duplicates = node.seq_duplicates;
+  out.seq_restarts = node.seq_restarts;
+  out.heartbeats = node.heartbeats;
+  out.last_seen_us = node.last_seen_us;
+  out.sync = node.last_sync;
+  out.sync_valid = node.sync_seen ? 1 : 0;
+}
+
+void fillPrimaryStatus(UplinkPrimaryStatus &out) {
+  out = UplinkPrimaryStatus{};
+  out.device_id = deviceId();
+  out.uptime_us = static_cast<uint64_t>(esp_timer_get_time());
+  out.epoch = espNowPrimaryEpoch();
+  out.free_heap = static_cast<uint32_t>(esp_get_free_heap_size());
+  out.min_free_heap = static_cast<uint32_t>(esp_get_minimum_free_heap_size());
+  out.nodes_known = registryCount();
+  out.nodes_rejected = registryRejections();
+  out.unknown_packets = espNowPrimaryUnknownPackets();
+
+  const UplinkStats &up = uplinkStats();
+  out.frames_queued = up.frames_queued;
+  out.frames_sent = up.frames_sent;
+  out.frames_dropped = up.frames_dropped;
+  out.write_timeouts = up.write_timeouts;
+  out.bytes_sent = up.bytes_sent;
+
+  const CoherenceMetric metric = espNowPrimaryCoherenceMetric();
+  out.coherence_typical_us = metric.typical_us;
+  out.coherence_bound_us = metric.bound_us;
+  out.coherence_worst_us = metric.worst_seen_us;
+  out.coherence_samples = metric.samples;
+  out.coherence_quality = metric.quality;
+  out.coherence_measured = metric.measured ? 1 : 0;
+  out.registry_sealed = registrySealed() ? 1 : 0;
+}
+
 }  // namespace
 
 void runPrimary() {
   ESP_LOGI(kTag, "primary: device %" PRIu64 ", ESP-NOW hub", deviceId());
+
+  // Registry BEFORE the radio, so the first packet to arrive is already judged
+  // against the roster rather than admitted because we had not finished loading.
+  registryLoad();
+
+  if (uplinkStart() != ESP_OK) {
+    ESP_LOGE(kTag,
+             "uplink did not start -- continuing as a hub so the console still "
+             "shows what the radio is doing");
+  }
 
   if (espNowPrimaryStart() != ESP_OK) {
     ESP_LOGE(kTag, "ESP-NOW did not start");
@@ -90,6 +149,7 @@ void runPrimary() {
 
   uint32_t previous_frames[kMaxTrackedNodes] = {};
   uint32_t ticks = 0;
+  uint64_t next_status_us = 0;
 
   // How long this loop's own console output blocks, and the worst seen.
   //
@@ -336,6 +396,53 @@ void runPrimary() {
         static_cast<uint64_t>(esp_timer_get_time()) - console_started);
     if (console_us > console_worst_us) {
       console_worst_us = console_us;
+    }
+
+    // --- telemetry down the uplink ------------------------------------------
+    //
+    // Sent on its own cadence rather than with the console lines, because the
+    // console is a human convenience and this is the gateway's only view of what
+    // the primary discarded. The two must not share a fate.
+    const uint64_t now_us = static_cast<uint64_t>(esp_timer_get_time());
+    if (now_us >= next_status_us) {
+      next_status_us =
+          now_us + static_cast<uint64_t>(CONFIG_NATKIT_UPLINK_STATUS_MS) * 1000ULL;
+
+      const NodeState *status_nodes = espNowPrimaryNodes();
+      for (size_t i = 0; i < kMaxTrackedNodes; ++i) {
+        if (!status_nodes[i].in_use) {
+          continue;
+        }
+        UplinkNodeStatus node_status{};
+        fillNodeStatus(status_nodes[i], node_status);
+        uplinkSend(UplinkType::kNodeStatus, status_nodes[i].device_id,
+                   &node_status, sizeof(node_status));
+      }
+
+      UplinkPrimaryStatus primary_status{};
+      fillPrimaryStatus(primary_status);
+      uplinkSend(UplinkType::kPrimaryStatus, deviceId(), &primary_status,
+                 sizeof(primary_status));
+    }
+
+    // The uplink's own health on the console too, since a gateway that is not
+    // reading is otherwise invisible from this end.
+    if (ticks % 10 == 0) {
+      const UplinkStats &up = uplinkStats();
+      ESP_LOGI(kTag,
+               "uplink: %lu frames queued, %lu sent (%llu B), %lu DROPPED, %lu "
+               "write timeouts, queue high water %lu/%d | registry %s, %lu "
+               "node(s), %lu rejected",
+               static_cast<unsigned long>(up.frames_queued),
+               static_cast<unsigned long>(up.frames_sent),
+               static_cast<unsigned long long>(up.bytes_sent),
+               static_cast<unsigned long>(up.frames_dropped),
+               static_cast<unsigned long>(up.write_timeouts),
+               static_cast<unsigned long>(up.queue_high_water),
+               CONFIG_NATKIT_UPLINK_QUEUE_DEPTH,
+               registrySealed() ? "SEALED" : "open",
+               static_cast<unsigned long>(registryCount()),
+               static_cast<unsigned long>(registryRejections()));
     }
   }
 }

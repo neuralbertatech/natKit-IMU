@@ -16,8 +16,10 @@
 #include "freertos/task.h"
 #include "esp_random.h"
 #include "imu_frame.hpp"
+#include "registry.hpp"
 #include "sdkconfig.h"
 #include "time_sync.hpp"
+#include "uplink.hpp"
 
 namespace natkit {
 namespace {
@@ -737,6 +739,15 @@ void primaryRecvCallback(const esp_now_recv_info_t *info, const uint8_t *data,
     return;
   }
 
+  // The registry decides before anything else does. An unrecognised node is
+  // counted and dropped rather than forwarded: a neighbouring rig on our channel
+  // is a real scenario, and its frames appearing in someone's recording would be
+  // very hard to explain afterwards. While the registry is open this admits and
+  // remembers the node, which is what makes a fresh rig self-configuring.
+  if (!registryAccepts(info->src_addr)) {
+    return;  // registryRejections() counts it; the registry logs it, rate-limited
+  }
+
   NodeState *node = nodeFor(info->src_addr);
   if (node == nullptr) {
     ++sUnknownPackets;
@@ -781,6 +792,12 @@ void primaryRecvCallback(const esp_now_recv_info_t *info, const uint8_t *data,
       // than on the leaf so that the raw device time survives on the wire and the
       // correction stays undoable.
       applyTimeShift(*node, device_ts_us, arrival_us);
+
+      // Forward VERBATIM. The primary knows how to shift this frame's timestamps
+      // and deliberately does not: the fit travels separately in the node-status
+      // frame, so raw device time survives to the gateway and the correction
+      // stays undoable. Same principle as the leaf not rewriting its own.
+      uplinkSend(UplinkType::kData, node->device_id, payload, payload_size);
 
       if (node->seq_seen) {
         // The expected case is spelled out FIRST and does nothing, rather than
