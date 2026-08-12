@@ -84,6 +84,79 @@ config NATKIT_IMU_REPORT_INTERVAL_US
         current firmware -- so treat this as a compatibility setting rather than
         a tuning knob. The BNO08x will not honour arbitrarily small values.
 
+config NATKIT_IMU_SAMPLE_INTERVAL_US
+    int "Frame sample interval (microseconds)"
+    default 20000
+    range 1000 1000000
+    help
+        How often the leaf snapshots the sensor's latest readings into a frame
+        sample. 20000 us = 50 Hz, matching DELAY_BETWEEN_SAMPLES in
+        ../embeded/include/BoardConfig.hpp.
+
+        This is NOT the sensor's report rate (that is
+        NATKIT_IMU_REPORT_INTERVAL_US, configured on the hub). The four SH2 reports
+        arrive asynchronously at their own rates, so a frame sample is a snapshot
+        merged across them -- which is what the schema carries and what the current
+        firmware sends. Treat it as a compatibility setting.
+
+config NATKIT_IMU_SAMPLES_PER_FRAME
+    int "Samples per frame"
+    default 10
+    range 1 16
+    help
+        How many samples are batched into one canonical frame. 10 matches
+        IMU_SAMPLES_PER_FRAME in ../embeded/include/kafkaTopic.hpp, which makes the
+        frame 24 + 50 * 10 = 524 bytes -- the size TEC-NATKIT-23 measured against
+        the 1470-byte ESP-NOW ceiling when deciding that one frame is one packet.
+
+        Raising this changes that arithmetic: at 16 samples a frame is 824 bytes,
+        still one packet, but the transmit queue item grows with it. Above 28 the
+        frame would no longer fit in a single ESP-NOW packet and the decision this
+        whole slice rests on would need revisiting.
+
+config NATKIT_IMU_DECLARED_RATE_HZ
+    int "Declared sample rate in the frame header (Hz)"
+    default 100
+    range 1 1000
+    help
+        The sampleRateHz advertised in each frame header. 100 matches
+        IMU_SAMPLE_RATE_HZ in ../embeded/include/kafkaTopic.hpp.
+
+        Informational by design, and deliberately NOT derived from the sample
+        interval above: every sample carries its own timestamp, and that is the
+        source of truth for a viewer's time axis. It is declared to match the
+        current firmware so a recording from either is read the same way.
+
+config NATKIT_ESPNOW_TX_QUEUE_DEPTH
+    int "Leaf transmit queue depth (frames)"
+    default 8
+    range 2 64
+    help
+        How many packets the leaf will hold while the radio is busy or the primary
+        is away. When it fills, the OLDEST packet is dropped: for a sensor stream
+        the freshest frame is the valuable one, and the gap is detectable on the far
+        side from seqNo.
+
+        The queue is what keeps the sample loop from ever stalling on the radio,
+        which is a requirement of TEC-NATKIT-24 rather than a tuning choice -- so
+        the interesting number is not how deep it is but that a full queue drops
+        instead of blocking. Each slot costs a full packet buffer, so depth trades
+        RAM for how long a primary can be away before frames are lost.
+
+config NATKIT_ESPNOW_HEARTBEAT_MS
+    int "Leaf heartbeat interval (milliseconds, 0 = off)"
+    default 2000
+    range 0 60000
+    help
+        How often the leaf sends its status on the same path as the data: uptime,
+        heap, frames built/sent/dropped, sensor report count, hub resets and the
+        four calibration accuracies.
+
+        It exists so a silent node is distinguishable from a node with nothing to
+        say. It also makes a drop ATTRIBUTABLE: frames the leaf dropped from a full
+        queue are its own back-pressure, not the primary's loss, and from the
+        receiving side alone the two are indistinguishable.
+
 config NATKIT_IMU_LOG_INTERVAL_MS
     int "IMU sample log interval (milliseconds, 0 = off)"
     default 1000
