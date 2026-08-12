@@ -57,13 +57,21 @@ config NATKIT_ESPNOW_PROBE_RECEIVER
 
 config NATKIT_ESPNOW_CHANNEL
     int "ESP-NOW channel for the probe"
-    depends on NATKIT_ESPNOW_PROBE
     default 1
     range 1 13
     help
         Both ends must match. A channel mismatch presents as every packet sending
         successfully while nothing is received, which reads as total loss rather
         than as a misconfiguration.
+
+        Deliberately NOT "depends on NATKIT_ESPNOW_PROBE", even though only the
+        probe reads it. Every source file in main/ is compiled into every image
+        (the invariant that stops a role from silently rotting), so a symbol that
+        disappears with its switch is a build break for the other three roles --
+        which is exactly what it was: espnow_probe.cpp used this as a VALUE, so
+        leaf, primary and gateway all failed to compile with "was not declared in
+        this scope". The receiver switch above survives its dependency only
+        because it is read with #if, where an absent symbol is a legal 0.
 
 config NATKIT_IMU_REPORT_INTERVAL_US
     int "BNO08x report interval (microseconds)"
