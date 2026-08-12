@@ -97,6 +97,17 @@ esp_err_t gatewayNetStart() {
   ESP_ERROR_CHECK(esp_wifi_set_mode(WIFI_MODE_STA));
   ESP_ERROR_CHECK(esp_wifi_set_config(WIFI_IF_STA, &wifi));
   ESP_ERROR_CHECK(esp_wifi_start());
+  // ⚠️ Power save OFF, and leaving it unsaid was a measurable defect rather than
+  // an omission of style. An associated station defaults to WIFI_PS_MIN_MODEM
+  // and sleeps between the AP's beacons, so publishes queue up and go out in
+  // bursts at beacon boundaries. Measured at the broker: frames arriving 3 ms
+  // apart and then not for 2.8 s, against a steady 200 ms cadence one hop
+  // earlier -- which is what "the live stream looks choppy" actually was.
+  //
+  // The leaf and primary already set this for #340's timing work; the gateway
+  // needs it for a plainer reason. It is mains-adjacent, always on, and its
+  // entire job is forwarding promptly.
+  ESP_ERROR_CHECK(esp_wifi_set_ps(WIFI_PS_NONE));
 
   // esp_netif_sntp, NOT a raw lwIP client. IDF 5.x defaults the lwIP
   // thread-safety assert ON, which is what tripped ESPNtpClient in the current

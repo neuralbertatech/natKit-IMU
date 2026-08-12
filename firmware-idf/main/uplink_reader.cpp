@@ -125,8 +125,15 @@ void readerTask(void *) {
       room = sizeof(sBuffer) - sFilled;
     }
 
+    // A SHORT timeout, because `room` is most of the scan buffer and therefore
+    // almost never fills -- so this call returns on the timeout nearly every
+    // time, and the timeout IS the batching interval. At 50 ms the reader
+    // collected several frames and published them back to back, which showed up
+    // at the broker as bursts 3 ms apart separated by long gaps. 5 ms keeps the
+    // task cheap (it still blocks rather than spinning) while forwarding a frame
+    // about as soon as it lands.
     const int read = uart_read_bytes(kUartPort, sBuffer + sFilled, room,
-                                     pdMS_TO_TICKS(50));
+                                     pdMS_TO_TICKS(5));
     if (read > 0) {
       sFilled += static_cast<size_t>(read);
       sStats.bytes_read += static_cast<uint64_t>(read);
