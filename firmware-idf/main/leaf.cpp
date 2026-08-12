@@ -110,6 +110,21 @@ void runLeaf() {
                static_cast<uint32_t>(esp_get_free_heap_size()),
                static_cast<uint32_t>(esp_get_minimum_free_heap_size()));
 
+      // Per-sensor counts, not just the total. The total alone cannot say
+      // whether all four reports are arriving at the configured interval or one
+      // of them is running fast and masking another that is silent -- and the
+      // hub's actual rate is not the rate we asked for
+      // (CONFIG_NATKIT_IMU_REPORT_INTERVAL_US), which is a comparability
+      // question for any recording made with this firmware.
+      ESP_LOGI(kTag,
+               "reports: accel %lu, gyro %lu, mag %lu, rotation %lu (interval "
+               "asked %d us)",
+               static_cast<unsigned long>(r.accelerometer.count),
+               static_cast<unsigned long>(r.gyroscope.count),
+               static_cast<unsigned long>(r.magnetometer.count),
+               static_cast<unsigned long>(r.rotation.count),
+               CONFIG_NATKIT_IMU_REPORT_INTERVAL_US);
+
       const HalStats &hal = Bno08x::halStats();
       ESP_LOGI(kTag,
                "shtp: %lu reads -> %lu packets, empty %lu, oversize %lu, spi "

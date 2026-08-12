@@ -5,6 +5,7 @@
 #include "board_config.hpp"
 #include "driver/gpio.h"
 #include "driver/spi_master.h"
+#include "esp_attr.h"
 #include "esp_log.h"
 #include "esp_timer.h"
 #include "freertos/FreeRTOS.h"
@@ -40,7 +41,42 @@ constexpr uint8_t kCalibrationMaxAttempts = 3;
 // would stretch this to 5s and coarsen every SHTP exchange tenfold).
 constexpr int kIntWaitPolls = 500;
 
+// Header/channel/sequence of the first few packets, logged once at bring-up.
+// The failure this port is chasing shows up in the FIRST second -- a handful of
+// good channel-3 reports and then channel-0 noise -- and a once-a-second summary
+// cannot show the transition. Bounded rather than a flag, so the trace cannot be
+// left on by accident, and emitted only after CS is released so it never lands
+// inside an SHTP exchange.
+constexpr uint32_t kTracePackets = 24;
+
 spi_device_handle_t sSpi = nullptr;
+
+// SPI staging buffers, deliberately not the caller's.
+//
+// Two reasons, both measured constraints of spi_master rather than style. First,
+// DMA needs its buffers word-aligned and in internal RAM, and sh2's own rx/tx
+// buffers are library statics that promise neither; a misaligned buffer is
+// rejected with ESP_ERR_INVALID_ARG, which would show up as a transport failure
+// with no obvious cause. Second, the ESP32's SPI DMA writes whole 32-bit words,
+// so a read of a length that is not a multiple of 4 can scribble up to 3 bytes
+// PAST the requested end -- here that overrun lands in our own slack (512 byte
+// buffers against sh2's 384-byte maximum transfer) instead of in sh2's state.
+WORD_ALIGNED_ATTR uint8_t sRxScratch[kBnoSpiMaxTransferBytes];
+WORD_ALIGNED_ATTR uint8_t sTxScratch[kBnoSpiMaxTransferBytes];
+
+// Zeros, and the whole point is that they are transmitted.
+//
+// Adafruit_SPIDevice::read() memsets the caller's buffer to its sendvalue (0x00
+// for this HAL) and then does a FULL-DUPLEX transfer, so MOSI carries zeros for
+// every clock of every read. This HAL used to pass tx_buffer = nullptr, which in
+// spi_master means "no MOSI phase" -- the pin is not driven at all. The BNO08x is
+// full duplex: whatever sits on MOSI while we clock a read is shifted into the
+// hub's SHTP receiver, so an undriven line feeds it garbage writes. That matches
+// what was measured on hardware (real SH2_RESET events with zero INT timeouts of
+// ours, and a read stream decaying to 15-byte channel-0 packets) far better than
+// the framing did. Driving zeros is not defensive: it is what the stack that
+// streams on this board does.
+WORD_ALIGNED_ATTR uint8_t sZeroTx[kBnoSpiMaxTransferBytes];
 
 // SHTP transport counters. A sensor bring-up fails in the transport far more
 // often than in the decode, and "no reports" looks identical whether the hub is
@@ -95,17 +131,26 @@ bool waitForInt() {
   return false;
 }
 
-// One CS-framed transfer. spi_master drives CS per transaction, which is the
-// same framing the Adafruit_SPIDevice read/write calls produced.
+// CS is driven by hand, as a plain GPIO, rather than by the SPI peripheral.
+//
+// This is the second difference from the stack that streams on this board:
+// Adafruit_SPIDevice asserts CS with digitalWrite (setChipSelect(LOW)) before
+// beginning its transfers and releases it after, so the hub gets microseconds of
+// CS-to-first-clock setup and last-clock-to-CS hold. Peripheral-driven CS gives it
+// a fraction of a bit-time. Doing it by hand also makes "one CS assertion per
+// SHTP packet" the plain reading of the code instead of an interaction between
+// acquire_bus and CS_KEEP_ACTIVE.
+inline void csAssert() { gpio_set_level(kBnoCs, 0); }
+inline void csRelease() { gpio_set_level(kBnoCs, 1); }
+
+// One transfer inside an already-asserted CS. Always full duplex: rx may be null
+// (a write, MISO discarded) but tx never is, because MOSI must be driven.
 bool spiTransfer(const uint8_t *tx, uint8_t *rx, size_t len) {
   if (len == 0) {
     return true;
   }
   spi_transaction_t t{};
   t.length = len * 8;
-  // A null tx_buffer means "no MOSI phase" and a null rx_buffer means "discard
-  // MISO"; the clock is driven either way, which is all the hub needs to shift a
-  // packet out on a read.
   t.tx_buffer = tx;
   t.rx_buffer = rx;
   return spi_device_polling_transmit(sSpi, &t) == ESP_OK;
@@ -131,74 +176,88 @@ int halRead(sh2_Hal_t *, uint8_t *buffer, unsigned len, uint32_t *t_us) {
   // The Adafruit HAL this replaces did two independently CS-framed reads: 4 bytes
   // for the SHTP header, then the whole packet again from byte 0, relying on the
   // hub re-presenting an unread packet after CS deasserts. Ported literally, that
-  // does not work here. Measured on hardware: the first four sensor reports
+  // did not work here. Measured on hardware: the first four sensor reports
   // arrived and then the stream turned to garbage -- 17,593 reads with zero
   // errors, every packet claiming 15 bytes on SHTP channel 0 with sequence
   // numbers jumping around (198, 74, 208, 88) instead of the channel 3 sensor
-  // reports we had enabled. That is the signature of a byte-shifted stream: the
-  // header read consumed data the body read then missed.
+  // reports we had enabled.
   //
   // Holding CS across both transfers removes the assumption entirely -- the
   // header tells us the length and the body read continues the SAME transfer
-  // rather than hoping to see it again. CS_KEEP_ACTIVE requires the bus to be
-  // acquired first, and the final transfer must NOT set it or CS never releases.
-  esp_err_t acquired = spi_device_acquire_bus(sSpi, portMAX_DELAY);
-  if (acquired != ESP_OK) {
+  // rather than hoping to see it again. NOTE that the byte-shift reading of that
+  // capture is now in doubt: MOSI was undriven at the time (see sZeroTx), so the
+  // hub was very likely already wedged by garbage on its own receive line, which
+  // would explain the same evidence without the framing being at fault. If this
+  // HAL streams, that question is moot; if it does not, the two-transaction
+  // framing is worth re-testing now that MOSI and CS behave like the working
+  // stack's.
+  csAssert();
+
+  if (!spiTransfer(sZeroTx, sRxScratch, 4)) {
+    csRelease();
     ++sStats.header_transfer_failed;
     return 0;
   }
 
-  spi_transaction_t header{};
-  header.length = 4 * 8;
-  header.rx_buffer = buffer;
-  header.flags = SPI_TRANS_CS_KEEP_ACTIVE;
-  if (spi_device_polling_transmit(sSpi, &header) != ESP_OK) {
-    ++sStats.header_transfer_failed;
-    spi_device_release_bus(sSpi);
-    return 0;
-  }
-
-  uint16_t packet_size =
-      static_cast<uint16_t>(buffer[0]) | static_cast<uint16_t>(buffer[1]) << 8;
+  uint16_t packet_size = static_cast<uint16_t>(sRxScratch[0]) |
+                         static_cast<uint16_t>(sRxScratch[1]) << 8;
   packet_size &= ~0x8000;  // clear the "continuation" bit
   sStats.last_header = packet_size;
-  sStats.last_channel = buffer[2];
-  sStats.last_seq = buffer[3];
+  sStats.last_channel = sRxScratch[2];
+  sStats.last_seq = sRxScratch[3];
 
   if (packet_size == 0) {
+    csRelease();
     ++sStats.empty_headers;
-    spi_device_release_bus(sSpi);  // releasing deasserts CS
     return 0;
   }
-  if (packet_size > len) {
+  if (packet_size > len || packet_size > sizeof(sRxScratch)) {
+    csRelease();
     ++sStats.oversize_headers;
-    spi_device_release_bus(sSpi);
     return 0;
   }
 
   // A header-only packet is complete already; anything longer has its remainder
-  // read straight after the header, into the same buffer.
+  // read straight after the header, into the same staging buffer.
   if (packet_size > 4) {
-    spi_transaction_t body{};
-    body.length = (packet_size - 4) * 8;
-    body.rx_buffer = buffer + 4;
-    if (spi_device_polling_transmit(sSpi, &body) != ESP_OK) {
+    if (!spiTransfer(sZeroTx, sRxScratch + 4, packet_size - 4)) {
+      csRelease();
       ++sStats.body_transfer_failed;
-      spi_device_release_bus(sSpi);
       return 0;
     }
   }
 
-  spi_device_release_bus(sSpi);
+  csRelease();
+
+  memcpy(buffer, sRxScratch, packet_size);
   ++sStats.packets_read;
+
+  if (sStats.packets_read <= kTracePackets) {
+    ESP_LOGI(kTag, "shtp rx #%lu: %u bytes, channel %u, seq %u",
+             static_cast<unsigned long>(sStats.packets_read), packet_size,
+             sRxScratch[2], sRxScratch[3]);
+  }
+
   return packet_size;
 }
 
 int halWrite(sh2_Hal_t *, uint8_t *buffer, unsigned len) {
+  if (len == 0 || len > sizeof(sTxScratch)) {
+    return 0;
+  }
   if (!waitForInt()) {
     return 0;
   }
-  if (!spiTransfer(buffer, nullptr, len)) {
+
+  // Staged for the same alignment reason as the read path: sh2's tx buffer is a
+  // library static with no DMA guarantees.
+  memcpy(sTxScratch, buffer, len);
+
+  csAssert();
+  const bool ok = spiTransfer(sTxScratch, nullptr, len);
+  csRelease();
+
+  if (!ok) {
     return 0;
   }
   return static_cast<int>(len);
@@ -244,6 +303,17 @@ esp_err_t Bno08x::begin() {
   reset_cfg.pin_bit_mask = 1ULL << kBnoReset;
   reset_cfg.mode = GPIO_MODE_OUTPUT;
   ESP_ERROR_CHECK(gpio_config(&reset_cfg));
+  // Idle high: the hub runs when RESET is released, and a pin left at its 0
+  // default holds it in reset from boot until hardwareReset() below.
+  ESP_ERROR_CHECK(gpio_set_level(kBnoReset, 1));
+
+  // CS is ours, not the peripheral's (see csAssert). Set idle-high BEFORE the
+  // first transfer, or the hub sees a selected bus during bring-up.
+  gpio_config_t cs_cfg{};
+  cs_cfg.pin_bit_mask = 1ULL << kBnoCs;
+  cs_cfg.mode = GPIO_MODE_OUTPUT;
+  ESP_ERROR_CHECK(gpio_config(&cs_cfg));
+  ESP_ERROR_CHECK(gpio_set_level(kBnoCs, 1));
 
   gpio_config_t int_cfg{};
   int_cfg.pin_bit_mask = 1ULL << kBnoInt;
@@ -267,7 +337,7 @@ esp_err_t Bno08x::begin() {
   spi_device_interface_config_t dev{};
   dev.mode = kBnoSpiMode;
   dev.clock_speed_hz = kBnoSpiClockHz;
-  dev.spics_io_num = kBnoCs;
+  dev.spics_io_num = -1;  // CS is driven by hand; see csAssert()
   dev.queue_size = 1;
   err = spi_bus_add_device(kBnoSpiHost, &dev, &sSpi);
   if (err != ESP_OK) {
