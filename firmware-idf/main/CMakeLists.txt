@@ -9,6 +9,8 @@ idf_component_register(
         "imu_frame.cpp"
         "uplink.cpp"
         "registry.cpp"
+        "uplink_reader.cpp"
+        "gateway_net.cpp"
         "time_sync.cpp"
         "leaf.cpp"
         "primary.cpp"
@@ -26,6 +28,9 @@ idf_component_register(
         esp_hw_support
         esp_timer
         nvs_flash
+        mqtt
+        lwip
+        esp_netif
         sh2
 )
 

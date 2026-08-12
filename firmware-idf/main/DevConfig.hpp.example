@@ -1,0 +1,22 @@
+#pragma once
+
+// Local credentials for the GATEWAY role (TEC-NATKIT-26).
+//
+// Copy to DevConfig.hpp and fill in. DevConfig.hpp is gitignored -- the same
+// shape and the same reasoning as ../../embeded/include/DevConfig.hpp, which
+// this deliberately mirrors so there is one convention across both firmwares
+// rather than two.
+//
+// ⚠️ ONLY THE GATEWAY READS THIS. A leaf has no WiFi association, no MQTT and no
+// NTP by design, and a primary has none either; putting credentials anywhere
+// they could reach a leaf image would undo the thing this epic is testing.
+
+// The network the gateway associates with.
+#define DEV_WIFI_SSID "your_wifi_ssid"
+#define DEV_WIFI_PASSWORD "your_wifi_password"
+
+// The machine running the natKit stack: the MQTT broker the bridge listens
+// behind, and the NTP server beside it. Both are containers in the dev
+// compose file (mosquitto on 1883, ntp on 123).
+#define DEV_MQTT_URI "mqtt://192.168.1.100:1883"
+#define DEV_NTP_SERVER "192.168.1.100"

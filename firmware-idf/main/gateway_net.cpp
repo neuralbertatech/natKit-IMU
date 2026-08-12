@@ -1,0 +1,192 @@
+#include "gateway_net.hpp"
+
+#include <cstring>
+#include <ctime>
+#include <sys/time.h>
+
+#include "DevConfig.hpp"
+#include "esp_event.h"
+#include "esp_log.h"
+#include "esp_netif.h"
+#include "esp_netif_sntp.h"
+#include "esp_wifi.h"
+#include "mqtt_client.h"
+#include "sdkconfig.h"
+
+namespace natkit {
+namespace {
+
+constexpr char kTag[] = "natkit-gwnet";
+
+GatewayNetStats sStats{};
+esp_mqtt_client_handle_t sMqtt = nullptr;
+
+void wifiEventHandler(void *, esp_event_base_t base, int32_t id, void *data) {
+  if (base == WIFI_EVENT && id == WIFI_EVENT_STA_START) {
+    esp_wifi_connect();
+    return;
+  }
+  if (base == WIFI_EVENT && id == WIFI_EVENT_STA_DISCONNECTED) {
+    sStats.wifi_connected = false;
+    ++sStats.wifi_disconnects;
+    // Reconnect immediately and keep doing so. The failure this avoids is the
+    // one the current firmware had: a device that gives up on the network and
+    // needs a human to power-cycle it, in a rig that is otherwise unattended.
+    esp_wifi_connect();
+    return;
+  }
+  if (base == IP_EVENT && id == IP_EVENT_STA_GOT_IP) {
+    const auto *event = static_cast<ip_event_got_ip_t *>(data);
+    sStats.wifi_connected = true;
+    ESP_LOGI(kTag, "wifi up, ip " IPSTR, IP2STR(&event->ip_info.ip));
+  }
+}
+
+void mqttEventHandler(void *, esp_event_base_t, int32_t id, void *data) {
+  const auto *event = static_cast<esp_mqtt_event_handle_t>(data);
+  switch (static_cast<esp_mqtt_event_id_t>(id)) {
+    case MQTT_EVENT_CONNECTED:
+      sStats.mqtt_connected = true;
+      ESP_LOGI(kTag, "mqtt connected to %s", DEV_MQTT_URI);
+      break;
+    case MQTT_EVENT_DISCONNECTED:
+      // Tracked from the EVENT, never inferred from a publish return code. A
+      // half-open socket returns success from publish, which is exactly how the
+      // old firmware convinced itself it was still streaming into nothing.
+      sStats.mqtt_connected = false;
+      ++sStats.mqtt_disconnects;
+      ESP_LOGW(kTag, "mqtt disconnected (%lu so far); the client will retry",
+               static_cast<unsigned long>(sStats.mqtt_disconnects));
+      break;
+    case MQTT_EVENT_ERROR:
+      ++sStats.mqtt_errors;
+      if (event != nullptr && event->error_handle != nullptr) {
+        ESP_LOGW(kTag, "mqtt error, type %d", event->error_handle->error_type);
+      }
+      break;
+    default:
+      break;
+  }
+}
+
+void sntpSyncCallback(struct timeval *tv) {
+  sStats.time_synced = true;
+  ESP_LOGI(kTag, "clock synced: %lld s since the epoch",
+           static_cast<long long>(tv->tv_sec));
+}
+
+}  // namespace
+
+esp_err_t gatewayNetStart() {
+  ESP_ERROR_CHECK(esp_netif_init());
+  ESP_ERROR_CHECK(esp_event_loop_create_default());
+  esp_netif_create_default_wifi_sta();
+
+  wifi_init_config_t cfg = WIFI_INIT_CONFIG_DEFAULT();
+  ESP_ERROR_CHECK(esp_wifi_init(&cfg));
+  ESP_ERROR_CHECK(esp_event_handler_instance_register(
+      WIFI_EVENT, ESP_EVENT_ANY_ID, wifiEventHandler, nullptr, nullptr));
+  ESP_ERROR_CHECK(esp_event_handler_instance_register(
+      IP_EVENT, IP_EVENT_STA_GOT_IP, wifiEventHandler, nullptr, nullptr));
+
+  wifi_config_t wifi{};
+  std::strncpy(reinterpret_cast<char *>(wifi.sta.ssid), DEV_WIFI_SSID,
+               sizeof(wifi.sta.ssid) - 1);
+  std::strncpy(reinterpret_cast<char *>(wifi.sta.password), DEV_WIFI_PASSWORD,
+               sizeof(wifi.sta.password) - 1);
+  ESP_ERROR_CHECK(esp_wifi_set_mode(WIFI_MODE_STA));
+  ESP_ERROR_CHECK(esp_wifi_set_config(WIFI_IF_STA, &wifi));
+  ESP_ERROR_CHECK(esp_wifi_start());
+
+  // esp_netif_sntp, NOT a raw lwIP client. IDF 5.x defaults the lwIP
+  // thread-safety assert ON, which is what tripped ESPNtpClient in the current
+  // firmware; this wrapper does its work on the right task.
+  esp_sntp_config_t sntp = ESP_NETIF_SNTP_DEFAULT_CONFIG(DEV_NTP_SERVER);
+  sntp.sync_cb = sntpSyncCallback;
+  sntp.start = true;
+  sntp.server_from_dhcp = false;
+  ESP_ERROR_CHECK(esp_netif_sntp_init(&sntp));
+
+  esp_mqtt_client_config_t mqtt{};
+  mqtt.broker.address.uri = DEV_MQTT_URI;
+  // Let esp-mqtt own reconnection. It has a real state machine; the hand-rolled
+  // loop in the current firmware had to learn backoff, keepalive and half-open
+  // detection one outage at a time.
+  mqtt.network.reconnect_timeout_ms = 2000;
+  mqtt.network.timeout_ms = 5000;
+  mqtt.session.keepalive = 30;
+  // A broker that is DOWN AT BOOT must not strand the device. esp-mqtt retries
+  // on this timer forever rather than failing start, which is the behaviour the
+  // old firmware needed a manual reset to recover from.
+  sMqtt = esp_mqtt_client_init(&mqtt);
+  if (sMqtt == nullptr) {
+    ESP_LOGE(kTag, "could not create the mqtt client");
+    return ESP_FAIL;
+  }
+  ESP_ERROR_CHECK(esp_mqtt_client_register_event(
+      sMqtt, MQTT_EVENT_ANY, mqttEventHandler, nullptr));
+  ESP_ERROR_CHECK(esp_mqtt_client_start(sMqtt));
+
+  ESP_LOGI(kTag,
+           "gateway networking started: ssid '%s', broker %s, ntp %s. Not "
+           "waiting for any of them -- the serial side keeps draining so the "
+           "primary is never back-pressured by our network.",
+           DEV_WIFI_SSID, DEV_MQTT_URI, DEV_NTP_SERVER);
+  return ESP_OK;
+}
+
+bool gatewayTimeValid() {
+  // Anything before 2020 is the RTC's power-on value, not a synced clock. The
+  // sync callback is the primary signal; this is the belt-and-braces check that
+  // stops a 1970 timestamp reaching a recording if the callback is ever missed.
+  return sStats.time_synced && gatewayWallClockUs() > 1577836800ULL * 1000000ULL;
+}
+
+uint64_t gatewayWallClockUs() {
+  struct timeval tv {};
+  gettimeofday(&tv, nullptr);
+  return static_cast<uint64_t>(tv.tv_sec) * 1000000ULL +
+         static_cast<uint64_t>(tv.tv_usec);
+}
+
+bool gatewayPublish(const char *topic, const void *payload, size_t length) {
+  if (sMqtt == nullptr || !sStats.mqtt_connected) {
+    ++sStats.publishes_failed;
+    return false;
+  }
+  // ⚠️ esp_mqtt_client_publish, NOT esp_mqtt_client_enqueue, and this was
+  // measured rather than reasoned.
+  //
+  // `enqueue(..., store=true)` looked like the right call: non-blocking, and it
+  // returns a message id so nothing appears to fail. It caps throughput at
+  // roughly ONE MESSAGE PER MQTT POLL CYCLE, because the queued outbox is
+  // serviced by the client's own task loop. Measured: the gateway reported
+  // publishing ~5 frames/s with "refused 0" while mosquitto received 1.07/s and
+  // Kafka 1.10/s -- about 78% of the stream lost, with every counter on the
+  // device saying it was fine, because the counter was counting ENQUEUES rather
+  // than deliveries.
+  //
+  // publish() hands the frame to the socket on this task instead. At QoS 0 there
+  // is no acknowledgement to wait for, so it is quick, and a failure is returned
+  // rather than absorbed.
+  const int id = esp_mqtt_client_publish(
+      sMqtt, topic, static_cast<const char *>(payload),
+      static_cast<int>(length), 0, 0);
+  if (id < 0) {
+    ++sStats.publishes_failed;
+    return false;
+  }
+  ++sStats.publishes_ok;
+  sStats.bytes_published += length;
+  return true;
+}
+
+const GatewayNetStats &gatewayNetStats() {
+  wifi_ap_record_t ap{};
+  if (sStats.wifi_connected && esp_wifi_sta_get_ap_info(&ap) == ESP_OK) {
+    sStats.rssi = ap.rssi;
+  }
+  return sStats;
+}
+
+}  // namespace natkit
