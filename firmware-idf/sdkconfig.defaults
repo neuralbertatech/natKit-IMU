@@ -19,3 +19,20 @@ CONFIG_ESP_MAIN_TASK_STACK_SIZE=8192
 # that 500 ms budget into 5 s and coarsens every single SHTP exchange tenfold --
 # on a hub that has already proven fragile about timing.
 CONFIG_FREERTOS_HZ=1000
+
+# --- SPI Ethernet, on EVERY target rather than only the S3 -------------------
+#
+# The IDF's own esp_eth, explicitly. The vendored copies were deleted from
+# natKit-IMU in 891cc38 and were what broke the earlier combined-framework
+# build; nothing should reintroduce them.
+#
+# ⚠️ These live here, not in sdkconfig.defaults.esp32s3, because of the epic's
+# own invariant: every source in main/ compiles into every image, so a role or a
+# target cannot rot unnoticed. ethernet_net.cpp references esp_eth_mac_new_w5500
+# and friends, and those symbols only exist when the driver is selected -- so
+# scoping this to one target broke the classic ESP32 build the moment the file
+# was added. The cost on a target that will never use it is a few KB of flash in
+# a partition that is 34% free; the cost of the alternative is a build that only
+# fails when someone happens to pick the other chip.
+CONFIG_ETH_USE_SPI_ETHERNET=y
+CONFIG_ETH_SPI_ETHERNET_W5500=y

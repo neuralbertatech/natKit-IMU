@@ -3,7 +3,9 @@
 #include <cstring>
 
 #include "device_id.hpp"
+#include "driver/gpio.h"
 #include "esp_system.h"
+#include "ethernet_net.hpp"
 #include "gateway_net.hpp"
 #include "registry.hpp"
 #include "uplink.hpp"
@@ -54,6 +56,13 @@ constexpr char kTag[] = "natkit-primary";
 constexpr bool kWifiUplink = true;
 #else
 constexpr bool kWifiUplink = false;
+#endif
+
+// The wired alternative, and the one that does not fight the radio.
+#ifdef CONFIG_NATKIT_PRIMARY_ETH_UPLINK
+constexpr bool kEthUplink = true;
+#else
+constexpr bool kEthUplink = false;
 #endif
 
 const char *accuracyName(uint8_t accuracy) {
@@ -138,6 +147,31 @@ void runPrimary() {
   // against the roster rather than admitted because we had not finished loading.
   registryLoad();
 
+#if CONFIG_NATKIT_HOLD_RCP_IN_RESET
+  // Hold the ESP32-H2 radio co-processor in reset.
+  //
+  // ⚠️ This is an EXPERIMENT with a measurement attached, not a tidy-up. The ESP
+  // Thread Border Router board carries an H2 a few millimetres from the S3, and
+  // an H2 running stock RCP firmware transmits 802.15.4 in the SAME 2.4 GHz band
+  // ESP-NOW uses. Measured on this board: the S3's transmits are heard fine by
+  // the leaves (26 beacons seen, clock locked) while the leaves' unicasts to it
+  // almost all fail to be acknowledged -- a transmitter that works and a
+  // receiver that is deaf, which is what an in-band interferer inches away looks
+  // like. Disabling the Ethernet uplink changed nothing, so the W5500 is not it.
+  //
+  // If holding the H2 down fixes reception, the co-processor is the cause and
+  // this board needs it managed rather than ignored.
+  gpio_config_t rcp{};
+  rcp.pin_bit_mask = 1ULL << CONFIG_NATKIT_RCP_RESET_GPIO;
+  rcp.mode = GPIO_MODE_OUTPUT;
+  gpio_config(&rcp);
+  gpio_set_level(static_cast<gpio_num_t>(CONFIG_NATKIT_RCP_RESET_GPIO), 0);
+  ESP_LOGW(kTag,
+           "holding the ESP32-H2 co-processor in reset on GPIO %d -- testing "
+           "whether it is desensitising this board's ESP-NOW receiver",
+           CONFIG_NATKIT_RCP_RESET_GPIO);
+#endif
+
   // #373: associate FIRST, before esp_now_init, because the association owns the
   // radio's channel and ESP-NOW has to follow it. Doing this the other way round
   // gives an ESP-NOW hub pinned to a channel the AP then moves it off, which is
@@ -145,6 +179,15 @@ void runPrimary() {
   if (kWifiUplink) {
     if (gatewayWifiStart() != ESP_OK) {
       ESP_LOGE(kTag, "WiFi did not start; continuing as an ESP-NOW hub only");
+    }
+  }
+  if (kEthUplink) {
+    // Before esp_now_init for the same reason as the WiFi path: the netif and
+    // event loop should exist before anything else wants them. Unlike WiFi
+    // there is nothing here for ESP-NOW to inherit -- no channel, no
+    // association, no shared airtime.
+    if (ethernetStart() != ESP_OK) {
+      ESP_LOGE(kTag, "Ethernet did not start; continuing as an ESP-NOW hub only");
     }
   }
 
@@ -157,6 +200,20 @@ void runPrimary() {
   if (espNowPrimaryStart() != ESP_OK) {
     ESP_LOGE(kTag, "ESP-NOW did not start");
     idleStatusLoop("primary (no radio)");
+  }
+
+  if (kEthUplink) {
+    // The SAME services as the WiFi path, unchanged: SNTP and MQTT are
+    // netif-agnostic, so the whole publish chain proven end-to-end into Kafka on
+    // TEC-NATKIT-26 works here with no modification. That is the payoff for
+    // having split gatewayWifiStart from gatewayServicesStart.
+    if (gatewayServicesStart() != ESP_OK) {
+      ESP_LOGE(kTag, "MQTT/SNTP did not start; nodes still land on the console");
+    }
+    ESP_LOGW(kTag,
+             "ETHERNET UPLINK IS ON: one chip running the ESP-NOW hub, the "
+             "timing master and a WIRED uplink, with no radio contention -- "
+             "which is the thing #373 could not achieve over WiFi.");
   }
 
   if (kWifiUplink) {
@@ -233,6 +290,12 @@ void runPrimary() {
                static_cast<unsigned long>(node.last_declared_rate));
 
       // --- the time-shift proxy, and its two instruments (#340) -------------
+      if (node.rssi_seen) {
+        ESP_LOGI(kTag, "  rssi %d dBm (best %d, worst %d) over %lu packets",
+                 node.rssi_last, node.rssi_best, node.rssi_worst,
+                 static_cast<unsigned long>(node.data_frames + node.announces +
+                                            node.heartbeats));
+      }
       if (node.sync_seen) {
         const SyncState &sync = node.last_sync;
         ESP_LOGI(kTag,

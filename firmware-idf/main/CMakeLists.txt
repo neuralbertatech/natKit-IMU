@@ -11,6 +11,7 @@ idf_component_register(
         "registry.cpp"
         "uplink_reader.cpp"
         "gateway_net.cpp"
+        "ethernet_net.cpp"
         "time_sync.cpp"
         "leaf.cpp"
         "primary.cpp"
@@ -24,13 +25,13 @@ idf_component_register(
         esp_driver_uart
         esp_event
         esp_netif
+        esp_eth
         esp_wifi
         esp_hw_support
         esp_timer
         nvs_flash
         mqtt
         lwip
-        esp_netif
         sh2
 )
 

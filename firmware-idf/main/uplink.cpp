@@ -72,7 +72,11 @@ size_t writeLe(uint8_t *out, T value) {
   return sizeof(T);
 }
 
-#ifdef CONFIG_NATKIT_PRIMARY_WIFI_UPLINK
+// EITHER uplink publishes rather than writing to a wire. The exit is the same
+// (MQTT); only how the packets reach the network differs, and nothing below this
+// point cares which.
+#if defined(CONFIG_NATKIT_PRIMARY_WIFI_UPLINK) || \
+    defined(CONFIG_NATKIT_PRIMARY_ETH_UPLINK)
 constexpr bool kWifiUplink = true;
 #else
 constexpr bool kWifiUplink = false;

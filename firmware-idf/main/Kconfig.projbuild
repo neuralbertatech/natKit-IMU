@@ -188,6 +188,109 @@ config NATKIT_TIME_SYNC_PROBE_MS
         probe's measured arrival against what the leaf's reported fit predicted,
         and the difference is the sync error.
 
+config NATKIT_HOLD_RCP_IN_RESET
+    bool "Hold the ESP32-H2 radio co-processor in reset (Thread BR board)"
+    default n
+    help
+        The ESP Thread Border Router board carries an ESP32-H2 a few
+        millimetres from the S3, and stock RCP firmware transmits 802.15.4 in
+        the SAME 2.4 GHz band ESP-NOW uses. That makes it a candidate in-band
+        interferer sitting inside the S3's own antenna near-field.
+
+        Measured on this board: the S3 is HEARD fine by the leaves (beacons
+        arrive, their clocks lock) while their unicasts back are almost never
+        acknowledged -- a working transmitter and a deaf receiver, which is what
+        a nearby interferer looks like. Disabling the Ethernet uplink changed
+        nothing, so the W5500 is not the cause.
+
+        This is an experiment with a measurement attached. If holding the H2
+        down restores reception, this board needs the co-processor managed
+        rather than left running whatever was flashed to it last.
+
+config NATKIT_RCP_RESET_GPIO
+    int "GPIO wired to the co-processor's reset"
+    default 7
+    help
+        7 on the ESP Thread Border Router board (CONFIG_PIN_TO_RCP_RESET in
+        Espressif's own basic_thread_border_router), taken from
+        ~/code/esp-thread-br rather than guessed.
+
+config NATKIT_PRIMARY_ETH_UPLINK
+    bool "Primary uplinks over WIRED ETHERNET and publishes to MQTT itself"
+    default n
+    help
+        The primary keeps being the ESP-NOW hub and timing master, and reaches
+        the broker over a wire. No serial link, no second board, and -- unlike
+        NATKIT_PRIMARY_WIFI_UPLINK below -- no radio contention at all.
+
+        This is the answer to the question the epic assumed away. #373 measured
+        one chip doing ESP-NOW plus associated WiFi losing ~85% of its ESP-NOW
+        frames: acknowledged at the MAC layer, then dropped above it by a WiFi
+        task busy servicing the association. Ethernet is OFF THE RADIO, so
+        ESP-NOW keeps a channel we choose and there is no association to inherit
+        a channel from.
+
+        ⚠️ ESP32-S3 ONLY, and not because of a software limit: the S3 has no
+        internal Ethernet MAC, so this is a W5500 (MAC+PHY behind SPI) rather
+        than a PHY on an EMAC. The classic ESP32 would use its EMAC and a
+        different driver entirely.
+
+config NATKIT_ETH_SPI_HOST
+    int "W5500 SPI host"
+    default 2
+    range 0 2
+    help
+        2 (SPI3_HOST) on the ESP Thread Border Router board.
+
+        Deliberately NOT the sensor's host: the BNO08x is on SPI2_HOST
+        (board_config.hpp). This board carries no sensor, but sharing a bus
+        between a 1 MHz hub that has already proven fussy about timing
+        (TEC-NATKIT-22) and a 36 MHz Ethernet controller is a class of problem
+        worth never having.
+
+config NATKIT_ETH_SPI_SCLK_GPIO
+    int "W5500 SCLK GPIO"
+    default 21
+
+config NATKIT_ETH_SPI_MOSI_GPIO
+    int "W5500 MOSI GPIO"
+    default 45
+
+config NATKIT_ETH_SPI_MISO_GPIO
+    int "W5500 MISO GPIO"
+    default 38
+
+config NATKIT_ETH_SPI_CS_GPIO
+    int "W5500 CS GPIO"
+    default 41
+
+config NATKIT_ETH_SPI_INT_GPIO
+    int "W5500 interrupt GPIO"
+    default 39
+
+config NATKIT_ETH_PHY_RST_GPIO
+    int "W5500 reset GPIO"
+    default 40
+
+config NATKIT_ETH_SPI_CLOCK_MHZ
+    int "W5500 SPI clock (MHz)"
+    default 36
+    range 5 80
+    help
+        Every default above is KNOWN-GOOD rather than derived: they are the
+        values Espressif's own basic_thread_border_router ships for this board,
+        and Zach confirmed that firmware working on this exact hardware. Taken
+        from ~/code/esp-thread-br rather than read off a schematic, which is why
+        they can be trusted without a continuity check.
+
+        ⚠️ Pins on this board that are already spoken for, so nothing else
+        wanders onto them:
+          19, 20        native USB Serial/JTAG (the S3 console)
+          26-32         SPI flash and PSRAM
+          21, 38-41, 45 this W5500
+          7, 8          ESP32-H2 radio co-processor reset and boot
+          17, 18        ESP32-H2 radio co-processor UART
+
 config NATKIT_PRIMARY_WIFI_UPLINK
     bool "Primary associates with WiFi and publishes to MQTT itself (#373)"
     default n
@@ -283,7 +386,7 @@ config NATKIT_UPLINK_BAUD
 
 config NATKIT_UPLINK_TX_GPIO
     int "Primary uplink UART TX GPIO"
-    default 17 if IDF_TARGET_ESP32S3
+    default 4 if IDF_TARGET_ESP32S3
     default 26
     range 0 48
     help
@@ -302,7 +405,7 @@ config NATKIT_UPLINK_TX_GPIO
 
 config NATKIT_UPLINK_RX_GPIO
     int "Primary uplink UART RX GPIO"
-    default 18 if IDF_TARGET_ESP32S3
+    default 5 if IDF_TARGET_ESP32S3
     default 25
     range 0 48
     help

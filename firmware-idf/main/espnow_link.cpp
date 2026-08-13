@@ -32,10 +32,24 @@ constexpr uint8_t kBroadcast[6] = {0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF};
 // True when this image drives ESP-NOW on a radio that is ALSO associated with an
 // access point (#373). An unset bool Kconfig emits no symbol, so it is resolved
 // once here rather than read as a value.
+// ⚠️ WIFI ONLY. This flag means "ESP-NOW is sharing an ASSOCIATED radio", which
+// is what forces peers onto the interface's channel and stops us setting one. The
+// Ethernet uplink does NOT set it: a wired uplink leaves the radio entirely ours,
+// so the configured channel still applies and there is nothing to follow.
 #ifdef CONFIG_NATKIT_PRIMARY_WIFI_UPLINK
 constexpr bool kWifiUplink = true;
 #else
 constexpr bool kWifiUplink = false;
+#endif
+
+// True when this image publishes to MQTT itself, over either uplink -- which is
+// what decides whether frames are shifted to wall clock here rather than
+// forwarded raw to a gateway.
+#if defined(CONFIG_NATKIT_PRIMARY_WIFI_UPLINK) || \
+    defined(CONFIG_NATKIT_PRIMARY_ETH_UPLINK)
+constexpr bool kSelfPublish = true;
+#else
+constexpr bool kSelfPublish = false;
 #endif
 
 // The channel an ESP-NOW peer is added on. ALWAYS 0, which means "whatever
@@ -423,7 +437,14 @@ esp_err_t startRadio() {
   // No esp_netif_init() and no netif at all: ESP-NOW does not go through lwIP, so
   // a leaf never brings up a network interface. The event loop IS required --
   // esp_wifi_init posts to it.
-  ESP_ERROR_CHECK(esp_event_loop_create_default());
+  // ⚠️ ESP_ERR_INVALID_STATE here means "already created", which is now a NORMAL
+  // case rather than a failure: an uplink that brings up a netif first (Ethernet,
+  // or WiFi under #373) has already made it. ESP_ERROR_CHECK on this aborted the
+  // whole board in a reboot loop the moment the Ethernet uplink was enabled.
+  const esp_err_t loop = esp_event_loop_create_default();
+  if (loop != ESP_OK && loop != ESP_ERR_INVALID_STATE) {
+    return loop;
+  }
 
   wifi_init_config_t cfg = WIFI_INIT_CONFIG_DEFAULT();
   ESP_ERROR_CHECK(esp_wifi_init(&cfg));
@@ -837,6 +858,26 @@ void primaryRecvCallback(const esp_now_recv_info_t *info, const uint8_t *data,
   node->last_seen_us = arrival_us;
   node->bytes += static_cast<uint32_t>(len);
 
+  // How strong was it? A near-total loss with a HEALTHY rssi means something
+  // above the radio is dropping frames; the same loss with a terrible rssi means
+  // the RF path itself. Those have completely different fixes and the frame
+  // count cannot tell them apart.
+  if (info->rx_ctrl != nullptr) {
+    const int8_t rssi = static_cast<int8_t>(info->rx_ctrl->rssi);
+    if (!node->rssi_seen) {
+      node->rssi_seen = true;
+      node->rssi_best = rssi;
+      node->rssi_worst = rssi;
+    }
+    node->rssi_last = rssi;
+    if (rssi > node->rssi_best) {
+      node->rssi_best = rssi;
+    }
+    if (rssi < node->rssi_worst) {
+      node->rssi_worst = rssi;
+    }
+  }
+
   switch (static_cast<PacketType>(data[3])) {
     case PacketType::kData: {
       if (payload_size < kFrameHeaderSize) {
@@ -870,8 +911,8 @@ void primaryRecvCallback(const esp_now_recv_info_t *info, const uint8_t *data,
       // and deliberately does not: the fit travels separately in the node-status
       // frame, so raw device time survives to the gateway and the correction
       // stays undoable. Same principle as the leaf not rewriting its own.
-      if (kWifiUplink) {
-        // #373: this chip IS the last hop, so the shift is applied here. The
+      if (kSelfPublish) {
+        // This chip IS the last hop, so the shift is applied here. The
         // primary-to-wall half is a LOCAL subtraction on one clock rather than
         // the gateway's cross-serial estimate, which makes it strictly better
         // than the two-board path -- worth remembering when comparing them.

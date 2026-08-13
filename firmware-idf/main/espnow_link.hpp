@@ -426,6 +426,14 @@ struct NodeState {
   uint64_t marker_local_us = 0;
   uint8_t marker_quality = 0;
   uint32_t markers_reported = 0;
+
+  // RSSI of the packets we actually receive from this node, in dBm. A receiver
+  // that is deaf and a transmitter that is far away look identical in a frame
+  // count; they do not look alike in an RSSI.
+  bool rssi_seen = false;
+  int8_t rssi_last = 0;
+  int8_t rssi_best = 0;
+  int8_t rssi_worst = 0;
 };
 
 esp_err_t espNowPrimaryStart();
