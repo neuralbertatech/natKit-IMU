@@ -197,7 +197,6 @@ void runLeaf() {
   static uint8_t frame[kFrameHeaderSize + kMaxSamplesPerFrame * kSampleSize];
 
   uint64_t next_log_us = 0;
-  uint64_t next_sample_us = 0;
   uint64_t next_heartbeat_us = kHeartbeatIntervalUs;
   uint32_t reports_at_last_log = 0;
   uint32_t frames_at_last_log = 0;
@@ -383,27 +382,16 @@ void runLeaf() {
       next_log_us = now + kLogIntervalUs;
     }
 
-    // ⚠️ Sleep until the NEXT SAMPLE IS DUE, not for a flat tick.
+    // A plain tick. The deadline-aware version this replaces was left behind when
+    // sampling moved to its own task: it computed its wait from `next_sample_us`,
+    // which nothing advances any more, so `remaining` was always 0 and this
+    // became a BUSY SPIN calling imu.service() as fast as the CPU allowed. That
+    // hammered SPI continuously and cost 81% of received beacons -- at -22 dBm,
+    // so it read as a radio problem and was not one.
     //
-    // A fixed 1 ms delay plus a variable imu.service() made the loop miss 10 ms
-    // deadlines routinely: at the old 20 ms interval that was invisible, at
-    // 10 ms (#380) it cost ~9% of samples with the radio reporting zero loss to
-    // explain it. Yielding for exactly the remaining time keeps the pump running
-    // as fast as the hub needs while letting the sample cadence set the rhythm.
-    //
-    // Still a delay rather than a spin: the tx, announce and sync tasks run at
-    // higher priority and must be able to preempt, and a busy loop here would
-    // also stop the idle task from ever running.
-    if (have_imu) {
-      const uint64_t after = static_cast<uint64_t>(esp_timer_get_time());
-      const uint64_t remaining =
-          next_sample_us > after ? next_sample_us - after : 0;
-      // Round DOWN to whole ticks and never sleep past the deadline; a 0-tick
-      // delay still yields to equal-priority work.
-      vTaskDelay(remaining / 1000 > 0 ? pdMS_TO_TICKS(remaining / 1000) : 0);
-    } else {
-      vTaskDelay(kPumpDelay);
-    }
+    // Sampling no longer depends on this loop's timing, so the pump only has to
+    // keep up with the hub's reports.
+    vTaskDelay(kPumpDelay);
   }
 }
 
