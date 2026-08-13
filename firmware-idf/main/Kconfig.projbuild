@@ -110,6 +110,28 @@ config NATKIT_CHANNEL_SURVEY_DWELL_MS
         whose access point beacons every 100 ms needs a few hundred milliseconds
         before it is distinguishable from a quiet one.
 
+config NATKIT_TX_POWER_QUARTER_DBM
+    int "Radio transmit power (quarter-dBm, 0 = leave at the default)"
+    default 0
+    range 0 80
+    help
+        ⚠️ ON A BENCH, FULL POWER CAN BE WORSE THAN LOW POWER, which is the
+        opposite of the intuition and cost a long time to consider.
+
+        At the IDF default of 78-80 quarter-dBm (19.5-20 dBm) and a few
+        centimetres of separation, the signal arriving at the other board is
+        around +9 dBm once free-space loss is subtracted. That is far above any
+        2.4 GHz receiver's linear range -- the front end compresses, the AGC
+        mis-reports, and packets are lost while the RSSI reads like a distant
+        transmitter. Symptoms seen on this rig that fit: a hub reporting -83 dBm
+        for a leaf 3 cm away whose own view of the hub was a healthy -24, RSSI
+        for the same pair jumping between -16 and -83 with nothing moved, and
+        reciprocity apparently violated (a passive path cannot do that, so the
+        fault has to be in a receiver).
+
+        Set this LOW for bench work -- 8 quarter-dBm is 2 dBm -- and leave it at 0
+        for a deployment, where the nodes are metres apart and every dB helps.
+
 config NATKIT_ESPNOW_CHANNEL
     int "ESP-NOW channel"
     default 3

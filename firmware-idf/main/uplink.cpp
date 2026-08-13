@@ -88,6 +88,23 @@ constexpr bool kWifiUplink = false;
 constexpr char kTopicTemplate[] =
     "natKit/sending/Data-%" PRIu64 "-Binary-NatImuBulkDataSchema";
 
+// Status goes out too, on its own topics.
+//
+// ⚠️ THIS IS THE ONLY WAY TO WATCH AN ESP32-S3 PRIMARY. Opening its USB console
+// RESETS it -- proven by two opens three seconds apart both reporting an uptime
+// of 3.3 s -- because it is the native USB Serial/JTAG rather than a bridge, so
+// leaving DTR and RTS alone does not help. Every attempt to diagnose the hub by
+// reading its console instead rebooted it into a fresh boot with NTP unsynced and
+// no nodes found, which is indistinguishable from the fault being diagnosed.
+//
+// So the hub reports through the thing it is already good at: publishing. These
+// carry exactly what the console lines carry -- per-node counters, RSSI, sync
+// state, and the primary's own uplink and coherence figures.
+constexpr char kNodeStatusTopic[] =
+    "natKit/sending/Log-%" PRIu64 "-Binary-NatKitNodeStatusV1";
+constexpr char kPrimaryStatusTopic[] =
+    "natKit/sending/Log-%" PRIu64 "-Binary-NatKitPrimaryStatusV1";
+
 char sTopic[96];
 
 // Unwraps one of our own uplink frames and publishes its payload.
@@ -101,10 +118,6 @@ void publishFrame(const uint8_t *frame, size_t length) {
   if (length < kUplinkHeaderSize + kUplinkCrcSize) {
     return;
   }
-  if (static_cast<UplinkType>(frame[3]) != UplinkType::kData) {
-    ++sStats.frames_sent;  // consumed, just not published
-    return;
-  }
   uint64_t stream_id = 0;
   uint16_t payload_length = 0;
   std::memcpy(&stream_id, frame + 4, sizeof(stream_id));
@@ -113,7 +126,18 @@ void publishFrame(const uint8_t *frame, size_t length) {
     return;
   }
 
-  std::snprintf(sTopic, sizeof(sTopic), kTopicTemplate, stream_id);
+  const char *topic = kTopicTemplate;
+  switch (static_cast<UplinkType>(frame[3])) {
+    case UplinkType::kNodeStatus:
+      topic = kNodeStatusTopic;
+      break;
+    case UplinkType::kPrimaryStatus:
+      topic = kPrimaryStatusTopic;
+      break;
+    default:
+      break;
+  }
+  std::snprintf(sTopic, sizeof(sTopic), topic, stream_id);
   if (gatewayPublish(sTopic, frame + kUplinkHeaderSize, payload_length)) {
     ++sStats.frames_sent;
     sStats.bytes_sent += payload_length;

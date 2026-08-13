@@ -532,6 +532,15 @@ esp_err_t startRadio(bool survey) {
   // it, left `power` at its initialiser, and the console reported "0.0 dBm" --
   // which reads as a radio turned down to nothing rather than as a query that
   // never ran. Reported in quarter-dBm; ~78 is the usual +19.5 dBm maximum.
+#if CONFIG_NATKIT_TX_POWER_QUARTER_DBM > 0
+  // Deliberately turned DOWN. See NATKIT_TX_POWER_QUARTER_DBM: at bench
+  // distances full power overloads the far receiver rather than helping it.
+  const esp_err_t set_err =
+      esp_wifi_set_max_tx_power(CONFIG_NATKIT_TX_POWER_QUARTER_DBM);
+  ESP_LOGW(kTag, "transmit power forced to %d quarter-dBm (%.1f dBm): %s",
+           CONFIG_NATKIT_TX_POWER_QUARTER_DBM,
+           CONFIG_NATKIT_TX_POWER_QUARTER_DBM / 4.0, esp_err_to_name(set_err));
+#endif
   int8_t power = 0;
   const esp_err_t power_err = esp_wifi_get_max_tx_power(&power);
   sStats.tx_power_quarter_dbm = power;
