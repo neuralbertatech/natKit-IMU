@@ -401,7 +401,8 @@ void sweepTxPower() {
   const uint32_t dwell = CONFIG_NATKIT_TX_POWER_SWEEP_DWELL_MS;
 
   int8_t best = kLevels[0];
-  bool found = false;
+  uint32_t best_pct = 0;
+  bool any = false;
   ESP_LOGI(kTag, "sweeping transmit power, %lu ms per level",
            static_cast<unsigned long>(dwell));
 
@@ -420,26 +421,40 @@ void sweepTxPower() {
     ESP_LOGI(kTag, "  %4.1f dBm: %3lu acked of %3lu (%lu%%)%s", level / 4.0,
              static_cast<unsigned long>(sent), static_cast<unsigned long>(total),
              static_cast<unsigned long>(pct),
-             (!found && total > 0 && pct >= CONFIG_NATKIT_TX_POWER_SWEEP_MIN_PCT)
-                 ? "   <- lowest that works"
-                 : "");
-    if (!found && total > 0 && pct >= CONFIG_NATKIT_TX_POWER_SWEEP_MIN_PCT) {
+             (total > 0 && pct > best_pct) ? "   <- best so far" : "");
+    // ⚠️ BEST acknowledgement rate, not "first one above a threshold", and
+    // strictly greater so ties go to the LOWER level. An absolute threshold was
+    // tried and was silently dead: on this bench the whole table read 2.0 dBm
+    // 13%, every higher level 0%, so a 90% bar was never cleared and the sweep
+    // fell through to its fallback on EVERY boot -- for weeks, while appearing to
+    // work because the fallback happened to be the floor, which is also the right
+    // answer here. Changing that fallback to full power is what exposed it.
+    if (total > 0 && pct > best_pct) {
+      best_pct = pct;
       best = level;
-      found = true;
-      // Keep sweeping rather than stopping: the whole table is the useful
-      // artefact, and seeing the HIGHER levels fail is what proves the overload
-      // rather than merely implying it.
+      any = true;
     }
   }
 
   esp_wifi_set_max_tx_power(best);
   sStats.tx_power_chosen_quarter_dbm = static_cast<uint8_t>(best);
   sStats.tx_power_swept = true;
+  // ⚠️ Update the REPORTED value too. It is captured once in startRadio, so
+  // without this the console kept printing the boot-time 19.5 dBm while the radio
+  // was actually running at 2.0 -- a counter describing a setting it no longer
+  // reflected, which is the same trap this codebase keeps falling into.
+  sStats.tx_power_quarter_dbm = static_cast<int8_t>(best);
   ESP_LOGW(kTag,
-           "transmit power set to %.1f dBm%s. Lowest-that-works is deliberate: "
-           "more power can mean FEWER packets at close range, because the far "
-           "receiver saturates.",
-           best / 4.0, found ? "" : " (nothing met the threshold; using the floor)");
+           "transmit power set to %.1f dBm, the best of %u levels at %lu%% "
+           "acked%s. ⚠️ TREAT THAT PERCENTAGE AS A RANKING ONLY, NEVER AS A "
+           "HEALTH FIGURE: 13%% here coincided with 10.6 frames/s at the hub and "
+           "ZERO sequence gaps. The acknowledgement is a MAC-layer reply that the "
+           "busy hub often does not get back in time; the data frame lands "
+           "regardless. Only the hub's gap count says whether delivery is "
+           "actually working.",
+           best / 4.0, (unsigned)(sizeof(kLevels) / sizeof(kLevels[0])),
+           static_cast<unsigned long>(best_pct),
+           any ? "" : " (no level transmitted at all; using the floor)");
 }
 
 void announceTask(void *) {

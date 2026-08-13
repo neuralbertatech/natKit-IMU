@@ -143,10 +143,21 @@ config NATKIT_TX_POWER_SWEEP_DWELL_MS
         to resolve 95% from 90% -- which is the right precision, since the
         transition out of saturation is tens of dB wide.
 
-config NATKIT_TX_POWER_SWEEP_MIN_PCT
-    int "Acknowledgement percentage a level must reach to be accepted"
-    default 90
-    range 50 100
+# ⚠️ NO ACCEPTANCE THRESHOLD, AND NO MARGIN. Both were tried and both were wrong,
+# so they are recorded here rather than left as an option someone re-adds.
+#
+# The threshold (NATKIT_TX_POWER_SWEEP_MIN_PCT, 90%) was unreachable: the measured
+# table on this bench is 2.0 dBm at 13% acked and every higher level at 0%. It was
+# therefore dead on every boot, falling through to the fallback -- undetected only
+# because the fallback was the floor, which is also the correct answer here.
+#
+# The margin (NATKIT_TX_POWER_SWEEP_MARGIN_STEPS, 2) was an attempt to fix the
+# near-far problem, where the leaf closer to the hub captures the receiver and the
+# far one is squeezed out. Raising both leaves uniformly made it WORSE, not better:
+# 10.6 frames/s each fell to 2.6 and 6.2. Near-far is about the DIFFERENCE in
+# arriving power, so a margin applied to everyone cancels out and only adds
+# saturation. Equalising received power needs the hub to say what it is hearing,
+# which is a feedback path this architecture does not yet have.
 
 config NATKIT_TX_POWER_QUARTER_DBM
     int "Radio transmit power (quarter-dBm, 0 = leave at the default)"
