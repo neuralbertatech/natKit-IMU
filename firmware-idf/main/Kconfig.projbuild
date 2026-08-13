@@ -56,13 +56,29 @@ config NATKIT_ESPNOW_PROBE_RECEIVER
         actual loss. Both must be on the same channel.
 
 config NATKIT_ESPNOW_CHANNEL
-    int "ESP-NOW channel for the probe"
-    default 1
+    int "ESP-NOW channel"
+    default 11
     range 1 13
     help
         Both ends must match. A channel mismatch presents as every packet sending
         successfully while nothing is received, which reads as total loss rather
         than as a misconfiguration.
+
+        ⚠️ 11, NOT 1, AND THE DIFFERENCE WAS 66 dB. On the ESP Thread Border
+        Router board, channel 1 is unusable: the S3 heard leaves a few
+        centimetres away at -82 dBm and received 4-8 frames against sequence
+        numbers in the hundreds. Moving to channel 11 -- changing nothing else --
+        took the same link to -16 dBm, 285 frames at the full 5/s, and 12 gaps.
+        Channel 1 spans 2401-2423 MHz, which is where a 25 MHz crystal's 96th and
+        97th harmonics land, so a board full of clocks is a plausible source.
+
+        This cost most of a session to find because the symptom looks like a
+        hardware fault: transmit worked (the leaves heard the hub at -25 dBm)
+        while receive did not, and an antenna cannot do that -- a passive path is
+        reciprocal. Both transmit powers were measured equal (19.5 and 20.0 dBm),
+        which is what made "the receiver is being jammed" the only explanation
+        left. If a future board behaves this way, MOVE CHANNEL BEFORE SUSPECTING
+        THE RADIO.
 
         Deliberately NOT "depends on NATKIT_ESPNOW_PROBE", even though only the
         probe reads it. Every source file in main/ is compiled into every image

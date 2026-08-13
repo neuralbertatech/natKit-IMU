@@ -295,6 +295,15 @@ struct LinkStats {
   // and a leaf pinned elsewhere hears nothing while every send succeeds locally.
   uint8_t scan_channel = 0;
   uint32_t channel_hops = 0;
+  // RSSI of the PRIMARY's packets as heard here. The counterpart of NodeState's
+  // rssi: together they say whether the path is symmetric. A bad antenna
+  // attenuates both directions equally; a receiver problem shows up on one side
+  // only, and a frame count cannot tell those apart.
+  bool rssi_seen = false;
+  int8_t rssi_last = 0;
+  int8_t rssi_best = 0;
+  int8_t rssi_worst = 0;
+  int8_t tx_power_quarter_dbm = 0;
 };
 
 // Starts the radio and the transmit task. Never associates.

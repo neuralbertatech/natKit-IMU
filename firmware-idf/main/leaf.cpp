@@ -257,6 +257,13 @@ void runLeaf() {
                static_cast<unsigned long>(link.send_retries),
                static_cast<unsigned long>(link.announces));
 
+      if (link.rssi_seen) {
+        ESP_LOGI(kTag,
+                 "link: primary heard at %d dBm (best %d, worst %d) | our tx "
+                 "power %.1f dBm",
+                 link.rssi_last, link.rssi_best, link.rssi_worst,
+                 link.tx_power_quarter_dbm / 4.0);
+      }
       // The clock fit (#340). Printed next to the link line because the two fail
       // together: a leaf that has lost its primary stops being able to say when
       // anything happened as well as where it went.

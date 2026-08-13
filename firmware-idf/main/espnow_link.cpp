@@ -158,6 +158,18 @@ void leafRecvCallback(const esp_now_recv_info_t *info, const uint8_t *data,
       info->rx_ctrl != nullptr ? static_cast<uint32_t>(info->rx_ctrl->timestamp)
                                : 0;
 
+  if (info->rx_ctrl != nullptr) {
+    const int8_t rssi = static_cast<int8_t>(info->rx_ctrl->rssi);
+    if (!sStats.rssi_seen) {
+      sStats.rssi_seen = true;
+      sStats.rssi_best = rssi;
+      sStats.rssi_worst = rssi;
+    }
+    sStats.rssi_last = rssi;
+    if (rssi > sStats.rssi_best) sStats.rssi_best = rssi;
+    if (rssi < sStats.rssi_worst) sStats.rssi_worst = rssi;
+  }
+
   const uint8_t *payload = data + kEnvelopeSize;
   const size_t payload_size = static_cast<size_t>(len) - kEnvelopeSize;
 
@@ -346,6 +358,12 @@ void txTask(void *) {
 // presents as "the hub is not there" and is really "we were not listening when
 // it was".
 constexpr uint32_t kChannelDwellMs = 1300;
+
+// How many consecutive send failures mean "this hub is not coming back on this
+// channel". Far above kAbsentAfterFailures, which only changes retry policy: this
+// one throws away a working association, so it must not fire on a hub that is
+// merely rebooting.
+constexpr uint32_t kRescanAfterFailures = 150;
 constexpr uint8_t kMaxChannel = 13;
 
 void announceTask(void *) {
@@ -360,9 +378,28 @@ void announceTask(void *) {
     espNowLinkSend(PacketType::kAnnounce, &announce, sizeof(announce));
     ++sStats.announces;
 
-    if (sPrimaryKnown) {
+    // ⚠️ A leaf that has found a hub must be able to LOSE it and look again.
+    //
+    // Learning the primary used to be permanent, which stranded a leaf on a dead
+    // channel forever: move the hub to another channel and the leaf sits happily
+    // on the old one, unicasting into nothing, with `primary_absent` set and no
+    // way to recover short of a reboot. Found by moving the primary from channel
+    // 1 to 11 and watching both leaves fail to follow.
+    //
+    // So a long run of failures gives the channel back to the search. The
+    // threshold is deliberately much longer than a transient outage -- the leaf
+    // survived a 30 s primary reboot on TEC-NATKIT-24 without needing this.
+    if (sPrimaryKnown && sStats.consecutive_failures < kRescanAfterFailures) {
       vTaskDelay(pdMS_TO_TICKS(10000));
       continue;
+    }
+    if (sPrimaryKnown) {
+      ESP_LOGW(kTag,
+               "primary unreachable for %lu sends; giving up on it and scanning "
+               "channels again",
+               static_cast<unsigned long>(sStats.consecutive_failures));
+      sPrimaryKnown = false;
+      sStats.primary_known = false;
     }
 
     // --- searching: walk the channels ---------------------------------------
@@ -461,6 +498,19 @@ esp_err_t startRadio() {
   // a station is WIFI_PS_MIN_MODEM, so leaving this unsaid would have meant
   // measuring the power-save state machine.
   ESP_ERROR_CHECK(esp_wifi_set_ps(WIFI_PS_NONE));
+
+  // Read the radio's ACTUAL transmit power rather than assuming the default.
+  //
+  // ⚠️ The return code is checked, and that matters: an earlier version ignored
+  // it, left `power` at its initialiser, and the console reported "0.0 dBm" --
+  // which reads as a radio turned down to nothing rather than as a query that
+  // never ran. Reported in quarter-dBm; ~78 is the usual +19.5 dBm maximum.
+  int8_t power = 0;
+  const esp_err_t power_err = esp_wifi_get_max_tx_power(&power);
+  sStats.tx_power_quarter_dbm = power;
+  ESP_LOGI(kTag, "radio tx power %d quarter-dBm (%.1f dBm), query %s", power,
+           power / 4.0, esp_err_to_name(power_err));
+
   // Fixed channel on both ends, and never esp_wifi_connect. A channel mismatch
   // presents as every packet sending successfully while nothing is received, which
   // reads as total loss rather than as a misconfiguration.
