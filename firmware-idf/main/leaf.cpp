@@ -145,7 +145,21 @@ void runLeaf() {
     // "sample" is necessarily a merge across them -- which is exactly what the
     // schema carries and what the current firmware sends.
     if (have_imu && now >= next_sample_us) {
-      next_sample_us = now + kSampleIntervalUs;
+      // ⚠️ ADVANCE THE DEADLINE, do not restart it from now.
+      //
+      // `next_sample_us = now + interval` folds every overshoot into the next
+      // period, so the loop runs at (interval + however long a pass took) rather
+      // than at `interval`, and drifts permanently slow. At the old 20 ms that
+      // cost little; at 10 ms (#380) it was ~22% -- 78 samples/s against the 100
+      // the header declares, with zero packet loss to explain it, which is
+      // exactly the kind of shortfall that gets blamed on the radio.
+      next_sample_us += kSampleIntervalUs;
+      // If we have fallen more than a whole period behind -- a long SPI stall,
+      // say -- resynchronise rather than sprinting to catch up, which would
+      // bunch samples together and lie about when they were taken.
+      if (next_sample_us <= now) {
+        next_sample_us = now + kSampleIntervalUs;
+      }
       ImuSample sample{};
       if (sampleFromReadings(imu.readings(), sample) &&
           sample_count < kSamplesPerFrame) {
@@ -291,6 +305,18 @@ void runLeaf() {
                static_cast<unsigned long>(sync.outliers_rejected),
                static_cast<unsigned long long>(beacon_age_ms),
                static_cast<unsigned long>(sync.mac_spread_us));
+      // ⚠️ The two counters that say WHY a window was thrown away. Without them
+      // a fit that keeps restarting from a handful of points is a mystery: the
+      // leaf reports "0 outliers" while its window is plainly being cleared, and
+      // the remaining causes -- a primary reboot, or a fit rejected as
+      // implausible -- were both invisible.
+      ESP_LOGI(kTag,
+               "clock: window resets -- %lu implausible fits, %lu epoch changes "
+               "| pairs %lu used of %lu beacons",
+               static_cast<unsigned long>(sync.implausible_fits),
+               static_cast<unsigned long>(sync.epoch_changes),
+               static_cast<unsigned long>(sync.pairs_used),
+               static_cast<unsigned long>(sync.beacons_seen));
       // The number that justifies the two-step protocol: how long the primary's
       // beacon sat between being handed to esp_now_send and actually going out.
       // That delay is what a one-step beacon would have folded straight into the
@@ -306,6 +332,18 @@ void runLeaf() {
                  static_cast<unsigned long>(sync.queue_delay_max_us),
                  static_cast<long long>(sync.mac_minus_timer_us),
                  static_cast<unsigned long>(sync.mac_spread_us));
+      // ⚠️ The two counters that say WHY a window was thrown away. Without them
+      // a fit that keeps restarting from a handful of points is a mystery: the
+      // leaf reports "0 outliers" while its window is plainly being cleared, and
+      // the remaining causes -- a primary reboot, or a fit rejected as
+      // implausible -- were both invisible.
+      ESP_LOGI(kTag,
+               "clock: window resets -- %lu implausible fits, %lu epoch changes "
+               "| pairs %lu used of %lu beacons",
+               static_cast<unsigned long>(sync.implausible_fits),
+               static_cast<unsigned long>(sync.epoch_changes),
+               static_cast<unsigned long>(sync.pairs_used),
+               static_cast<unsigned long>(sync.beacons_seen));
       }
 
       reports_at_last_log = total;

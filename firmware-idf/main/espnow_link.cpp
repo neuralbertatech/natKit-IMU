@@ -949,44 +949,6 @@ void primaryRecvCallback(const esp_now_recv_info_t *info, const uint8_t *data,
       node->last_sample_count = sample_count;
       node->last_declared_rate = declared_rate;
 
-      // --- the time shift, and the instrument that says whether it worked ----
-      //
-      // The frame's own timestamp is in the LEAF's clock. Shifting it into ours
-      // is what makes two nodes' samples comparable, and it is done here rather
-      // than on the leaf so that the raw device time survives on the wire and the
-      // correction stays undoable.
-      applyTimeShift(*node, device_ts_us, arrival_us);
-
-      // Forward VERBATIM. The primary knows how to shift this frame's timestamps
-      // and deliberately does not: the fit travels separately in the node-status
-      // frame, so raw device time survives to the gateway and the correction
-      // stays undoable. Same principle as the leaf not rewriting its own.
-      if (kSelfPublish) {
-        // This chip IS the last hop, so the shift is applied here. The
-        // primary-to-wall half is a LOCAL subtraction on one clock rather than
-        // the gateway's cross-serial estimate, which makes it strictly better
-        // than the two-board path -- worth remembering when comparing them.
-        static uint8_t shifted[kMaxPayload];
-        if (!node->sync_seen) {
-          ++node->publish_no_sync;
-        } else if (!gatewayTimeValid()) {
-          ++node->publish_no_time;
-        } else if (payload_size <= sizeof(shifted)) {
-          std::memcpy(shifted, payload, payload_size);
-          const int64_t primary_to_wall =
-              static_cast<int64_t>(gatewayWallClockUs()) -
-              static_cast<int64_t>(arrival_us);
-          if (rewriteFrameTimestamps(shifted, payload_size, node->last_sync,
-                                     primary_to_wall)) {
-            uplinkSend(UplinkType::kData, node->device_id, shifted, payload_size);
-          } else {
-            ++node->publish_no_shift;
-          }
-        }
-      } else {
-        uplinkSend(UplinkType::kData, node->device_id, payload, payload_size);
-      }
-
       if (node->seq_seen) {
         // The expected case is spelled out FIRST and does nothing, rather than
         // being left to fall through the others. Leaving it implicit is what broke
@@ -1035,6 +997,45 @@ void primaryRecvCallback(const esp_now_recv_info_t *info, const uint8_t *data,
       }
       node->last_seq = seq;
       node->seq_seen = true;
+
+      // --- the time shift, and the instrument that says whether it worked ----
+      //
+      // The frame's own timestamp is in the LEAF's clock. Shifting it into ours
+      // is what makes two nodes' samples comparable, and it is done here rather
+      // than on the leaf so that the raw device time survives on the wire and the
+      // correction stays undoable.
+      applyTimeShift(*node, device_ts_us, arrival_us);
+
+      // Forward VERBATIM. The primary knows how to shift this frame's timestamps
+      // and deliberately does not: the fit travels separately in the node-status
+      // frame, so raw device time survives to the gateway and the correction
+      // stays undoable. Same principle as the leaf not rewriting its own.
+      if (kSelfPublish) {
+        // This chip IS the last hop, so the shift is applied here. The
+        // primary-to-wall half is a LOCAL subtraction on one clock rather than
+        // the gateway's cross-serial estimate, which makes it strictly better
+        // than the two-board path -- worth remembering when comparing them.
+        static uint8_t shifted[kMaxPayload];
+        if (!node->sync_seen) {
+          ++node->publish_no_sync;
+        } else if (!gatewayTimeValid()) {
+          ++node->publish_no_time;
+        } else if (payload_size <= sizeof(shifted)) {
+          std::memcpy(shifted, payload, payload_size);
+          const int64_t primary_to_wall =
+              static_cast<int64_t>(gatewayWallClockUs()) -
+              static_cast<int64_t>(arrival_us);
+          if (rewriteFrameTimestamps(shifted, payload_size, node->last_sync,
+                                     primary_to_wall)) {
+            uplinkSend(UplinkType::kData, node->device_id, shifted, payload_size);
+          } else {
+            ++node->publish_no_shift;
+          }
+        }
+      } else {
+        uplinkSend(UplinkType::kData, node->device_id, payload, payload_size);
+      }
+
       break;
     }
     case PacketType::kHeartbeat:
