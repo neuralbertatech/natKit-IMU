@@ -442,6 +442,14 @@ struct NodeState {
   uint8_t marker_quality = 0;
   uint32_t markers_reported = 0;
 
+  // How each data frame actually reached us. The leaf can report "tx failure"
+  // and "primary PRESUMED GONE" while frames arrive perfectly well, because a
+  // leaf that has given up on unicast falls back to BROADCAST -- which needs no
+  // acknowledgement and therefore always "succeeds". Without this split, a rig
+  // riding entirely on that fallback is indistinguishable from a healthy one.
+  uint32_t frames_unicast = 0;
+  uint32_t frames_broadcast = 0;
+
   // RSSI of the packets we actually receive from this node, in dBm. A receiver
   // that is deaf and a transmitter that is far away look identical in a frame
   // count; they do not look alike in an RSSI.

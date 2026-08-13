@@ -298,6 +298,11 @@ void runPrimary() {
                  static_cast<unsigned long>(node.publish_no_time),
                  static_cast<unsigned long>(node.publish_no_shift));
       }
+      if (node.frames_unicast || node.frames_broadcast) {
+        ESP_LOGI(kTag, "  delivery: %lu unicast, %lu BROADCAST fallback",
+                 static_cast<unsigned long>(node.frames_unicast),
+                 static_cast<unsigned long>(node.frames_broadcast));
+      }
       if (node.rssi_seen) {
         ESP_LOGI(kTag, "  rssi %d dBm (best %d, worst %d) over %lu packets",
                  node.rssi_last, node.rssi_best, node.rssi_worst,

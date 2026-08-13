@@ -954,6 +954,13 @@ void primaryRecvCallback(const esp_now_recv_info_t *info, const uint8_t *data,
 
   switch (static_cast<PacketType>(data[3])) {
     case PacketType::kData: {
+      // Addressed to us, or shouted at everyone? des_addr is the only place this
+      // distinction survives -- ESP-NOW hands both to the same callback.
+      if (info->des_addr != nullptr && (info->des_addr[0] & 0x01) != 0) {
+        ++node->frames_broadcast;
+      } else {
+        ++node->frames_unicast;
+      }
       if (payload_size < kFrameHeaderSize) {
         ++sUnknownPackets;
         return;
