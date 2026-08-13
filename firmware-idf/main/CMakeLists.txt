@@ -12,6 +12,7 @@ idf_component_register(
         "uplink_reader.cpp"
         "gateway_net.cpp"
         "ethernet_net.cpp"
+        "channel_survey.cpp"
         "time_sync.cpp"
         "leaf.cpp"
         "primary.cpp"

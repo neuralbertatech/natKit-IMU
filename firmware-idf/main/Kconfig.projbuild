@@ -55,6 +55,41 @@ config NATKIT_ESPNOW_PROBE_RECEIVER
         Flash one board as sender (default) and a second with this set to measure
         actual loss. Both must be on the same channel.
 
+config NATKIT_CHANNEL_SURVEY
+    bool "Primary surveys the band at boot and picks the quietest channel"
+    default y
+    help
+        Zach's idea, and it costs nothing: the primary cannot publish for the
+        first ~33 s after a reset anyway, because NTP has not synced and every
+        data frame is refused rather than published with a 1970 timestamp. A
+        thirteen-channel survey fits inside that window.
+
+        Worth doing because channel choice has been the single largest factor in
+        this rig's throughput, and it is a property of the SITE. On one bench the
+        hub's view of a leaf a few centimetres away ranged from -22 dBm and the
+        full rate on channel 3 to -83 dBm and nothing at all on channel 11. A
+        hard-coded number that is right in one room is wrong in the next, and the
+        failure is silent -- it presents as a bad radio, not a bad channel.
+
+        Leaves need no configuration for this: they already hop channels until
+        they find a hub, so the primary is free to move.
+
+        ⚠️ It finds CROWDED channels, not NOISY ones. Non-802.11 interference is
+        invisible to a promiscuous receiver, and that is exactly what ruins
+        channel 1 on the ESP Thread Border Router board -- its own clocks. Turn
+        this off and pin NATKIT_ESPNOW_CHANNEL if a site needs a channel the
+        survey will not choose.
+
+config NATKIT_CHANNEL_SURVEY_DWELL_MS
+    int "How long to listen on each channel (milliseconds)"
+    default 2000
+    range 200 5000
+    help
+        13 channels at 2000 ms is 26 s, which fits the ~33 s NTP window with room
+        to spare. Shorter dwells make the survey cheaper and noisier: a channel
+        whose access point beacons every 100 ms needs a few hundred milliseconds
+        before it is distinguishable from a quiet one.
+
 config NATKIT_ESPNOW_CHANNEL
     int "ESP-NOW channel"
     default 3

@@ -16,6 +16,7 @@
 #include "freertos/task.h"
 #include "esp_random.h"
 #include "imu_frame.hpp"
+#include "channel_survey.hpp"
 #include "gateway_net.hpp"
 #include "registry.hpp"
 #include "sdkconfig.h"
@@ -477,7 +478,9 @@ void syncTask(void *) {
   }
 }
 
-esp_err_t startRadio() {
+uint8_t sChosenChannel = CONFIG_NATKIT_ESPNOW_CHANNEL;
+
+esp_err_t startRadio(bool survey) {
   if (kWifiUplink) {
     // The association is brought up FIRST, by gateway_net, because it owns
     // esp_netif and esp_wifi_init. ESP-NOW is then layered on the same radio and
@@ -538,8 +541,20 @@ esp_err_t startRadio() {
   // Fixed channel on both ends, and never esp_wifi_connect. A channel mismatch
   // presents as every packet sending successfully while nothing is received, which
   // reads as total loss rather than as a misconfiguration.
-  ESP_ERROR_CHECK(esp_wifi_set_channel(CONFIG_NATKIT_ESPNOW_CHANNEL,
-                                       WIFI_SECOND_CHAN_NONE));
+  // The survey runs HERE: after the radio is up, before esp_now_init, and only
+  // on the primary (a leaf finds whatever channel the hub chose by hopping). It
+  // leaves the radio in promiscuous mode while it runs, which is why it cannot
+  // happen once ESP-NOW owns the interface.
+  uint8_t channel = CONFIG_NATKIT_ESPNOW_CHANNEL;
+#if CONFIG_NATKIT_CHANNEL_SURVEY
+  if (survey) {
+    channel = channelSurveyRun(channel, CONFIG_NATKIT_CHANNEL_SURVEY_DWELL_MS);
+  }
+#else
+  (void)survey;
+#endif
+  sChosenChannel = channel;
+  ESP_ERROR_CHECK(esp_wifi_set_channel(channel, WIFI_SECOND_CHAN_NONE));
 
   ESP_ERROR_CHECK(esp_now_init());
   return ESP_OK;
@@ -557,7 +572,7 @@ esp_err_t addBroadcastPeer() {
 }  // namespace
 
 esp_err_t espNowLinkStart() {
-  ESP_ERROR_CHECK(startRadio());
+  ESP_ERROR_CHECK(startRadio(false));
 
   sTxQueue = xQueueCreate(CONFIG_NATKIT_ESPNOW_TX_QUEUE_DEPTH, sizeof(TxItem));
   sSendDone = xSemaphoreCreateBinary();
@@ -1259,7 +1274,8 @@ void beaconTask(void *) {
 }  // namespace
 
 esp_err_t espNowPrimaryStart() {
-  ESP_ERROR_CHECK(startRadio());
+  // Only the primary surveys; it is the one that chooses.
+  ESP_ERROR_CHECK(startRadio(true));
 
   // A boot identifier, not a device identifier: what a leaf needs to detect is
   // that this primary's esp_timer restarted at zero, and only a value that
@@ -1284,10 +1300,10 @@ esp_err_t espNowPrimaryStart() {
   uint8_t mac[6] = {};
   esp_wifi_get_mac(WIFI_IF_STA, mac);
   ESP_LOGI(kTag,
-           "primary up on channel %d as %02x:%02x:%02x:%02x:%02x:%02x, timing "
+           "primary up on channel %u as %02x:%02x:%02x:%02x:%02x:%02x, timing "
            "master for epoch %08lx, beacon + follow-up every 1s, tracking up to "
            "%u nodes",
-           CONFIG_NATKIT_ESPNOW_CHANNEL, mac[0], mac[1], mac[2], mac[3], mac[4],
+           sChosenChannel, mac[0], mac[1], mac[2], mac[3], mac[4],
            mac[5], static_cast<unsigned long>(sEpoch), (unsigned)kMaxTrackedNodes);
   return ESP_OK;
 }
