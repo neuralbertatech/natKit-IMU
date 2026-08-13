@@ -372,6 +372,76 @@ constexpr uint32_t kChannelDwellMs = 1300;
 constexpr uint64_t kRescanAfterSilenceUs = 15ULL * 1000000ULL;
 constexpr uint8_t kMaxChannel = 13;
 
+// Sweep our own transmit power and keep the LOWEST setting that still gets its
+// packets acknowledged.
+//
+// ⚠️ THIS MEASURES THE RIGHT THING, which the channel survey does not. That one
+// scores strangers' 802.11 traffic and had to be turned off after it picked a
+// channel our own link could not cross. This scores OUR link directly: an ESP-NOW
+// unicast reports success only when the far side's MAC acknowledged it, so the
+// success ratio at a given power IS the thing we care about, measured on the real
+// path with the real packets.
+//
+// Lowest-that-works rather than highest-that-works, and that is the whole point.
+// Measured on this bench: at 19.5 dBm and a few centimetres the hub received 0.4
+// frames/s, and at 2 dBm it received 8.5 -- because ~+9 dBm arriving at a 2.4 GHz
+// front end saturates it. Sweeping upward and stopping at the first level that
+// works therefore lands below the overload region automatically, at whatever
+// distance the rig happens to be set up.
+//
+// It runs in the window where the primary cannot publish anyway (NTP unsynced),
+// so like the channel survey it costs nothing that was not already being lost --
+// and it uses the DATA FRAMES ALREADY BEING SENT as its probes rather than adding
+// traffic.
+void sweepTxPower() {
+  // Ascending, coarsely: 2, 5, 8.5, 11, 14, 17, 19.5 dBm. Fine steps would cost
+  // time without changing the answer -- the transition from saturated to sane is
+  // tens of dB wide, not fractions.
+  static const int8_t kLevels[] = {8, 20, 34, 44, 56, 68, 78};
+  const uint32_t dwell = CONFIG_NATKIT_TX_POWER_SWEEP_DWELL_MS;
+
+  int8_t best = kLevels[0];
+  bool found = false;
+  ESP_LOGI(kTag, "sweeping transmit power, %lu ms per level",
+           static_cast<unsigned long>(dwell));
+
+  for (int8_t level : kLevels) {
+    if (esp_wifi_set_max_tx_power(level) != ESP_OK) {
+      continue;
+    }
+    const uint32_t sent0 = sStats.packets_sent;
+    const uint32_t fail0 = sStats.send_failures;
+    vTaskDelay(pdMS_TO_TICKS(dwell));
+    const uint32_t sent = sStats.packets_sent - sent0;
+    const uint32_t fail = sStats.send_failures - fail0;
+    const uint32_t total = sent + fail;
+    const uint32_t pct = total > 0 ? (100 * sent) / total : 0;
+
+    ESP_LOGI(kTag, "  %4.1f dBm: %3lu acked of %3lu (%lu%%)%s", level / 4.0,
+             static_cast<unsigned long>(sent), static_cast<unsigned long>(total),
+             static_cast<unsigned long>(pct),
+             (!found && total > 0 && pct >= CONFIG_NATKIT_TX_POWER_SWEEP_MIN_PCT)
+                 ? "   <- lowest that works"
+                 : "");
+    if (!found && total > 0 && pct >= CONFIG_NATKIT_TX_POWER_SWEEP_MIN_PCT) {
+      best = level;
+      found = true;
+      // Keep sweeping rather than stopping: the whole table is the useful
+      // artefact, and seeing the HIGHER levels fail is what proves the overload
+      // rather than merely implying it.
+    }
+  }
+
+  esp_wifi_set_max_tx_power(best);
+  sStats.tx_power_chosen_quarter_dbm = static_cast<uint8_t>(best);
+  sStats.tx_power_swept = true;
+  ESP_LOGW(kTag,
+           "transmit power set to %.1f dBm%s. Lowest-that-works is deliberate: "
+           "more power can mean FEWER packets at close range, because the far "
+           "receiver saturates.",
+           best / 4.0, found ? "" : " (nothing met the threshold; using the floor)");
+}
+
 void announceTask(void *) {
   uint8_t channel = CONFIG_NATKIT_ESPNOW_CHANNEL;
   while (true) {
@@ -413,6 +483,15 @@ void announceTask(void *) {
     const bool beacons_silent =
         last_beacon != 0 &&
         now_us - last_beacon > kRescanAfterSilenceUs;
+
+#if CONFIG_NATKIT_TX_POWER_SWEEP
+    // Once, after the hub is found: there is nothing to measure ACKs against
+    // until there is something to acknowledge them.
+    if (sPrimaryKnown && !sStats.tx_power_swept) {
+      sweepTxPower();
+      continue;
+    }
+#endif
 
     if (sPrimaryKnown && !beacons_silent) {
       vTaskDelay(pdMS_TO_TICKS(10000));

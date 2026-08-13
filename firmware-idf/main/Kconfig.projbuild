@@ -110,6 +110,44 @@ config NATKIT_CHANNEL_SURVEY_DWELL_MS
         whose access point beacons every 100 ms needs a few hundred milliseconds
         before it is distinguishable from a quiet one.
 
+config NATKIT_TX_POWER_SWEEP
+    bool "Leaf sweeps its transmit power at startup and keeps the lowest that works"
+    default y
+    help
+        Unlike NATKIT_CHANNEL_SURVEY, this measures the RIGHT thing. That one
+        scores strangers' 802.11 traffic and had to be defaulted off after it
+        chose a channel our own link could not cross. This scores OUR link: an
+        ESP-NOW unicast reports success only when the far side's MAC acknowledged
+        it, so the success ratio at a given power is exactly the quantity that
+        matters, measured on the real path with the real packets.
+
+        ⚠️ LOWEST that works, not highest, and that is the point. Measured on this
+        bench at a few centimetres: 19.5 dBm delivered 0.4 frames/s to the hub and
+        2 dBm delivered 8.5, because ~+9 dBm arriving at a 2.4 GHz front end
+        saturates it. Sweeping upward and taking the first level that works lands
+        below the overload region automatically, whatever the spacing turns out to
+        be -- which is better than a hard-coded power that is right on a bench and
+        wrong in a room.
+
+        Runs in the window where the primary cannot publish anyway (NTP unsynced),
+        and uses the data frames already being sent as its probes, so it adds no
+        traffic.
+
+config NATKIT_TX_POWER_SWEEP_DWELL_MS
+    int "How long to hold each power level (milliseconds)"
+    default 1500
+    range 300 10000
+    help
+        Seven levels at 1500 ms is about 10 s. At ~13 packets/s that is ~20
+        acknowledgements per level, enough to tell 100% from 30% but not enough
+        to resolve 95% from 90% -- which is the right precision, since the
+        transition out of saturation is tens of dB wide.
+
+config NATKIT_TX_POWER_SWEEP_MIN_PCT
+    int "Acknowledgement percentage a level must reach to be accepted"
+    default 90
+    range 50 100
+
 config NATKIT_TX_POWER_QUARTER_DBM
     int "Radio transmit power (quarter-dBm, 0 = leave at the default)"
     default 0

@@ -295,6 +295,9 @@ struct LinkStats {
   // and a leaf pinned elsewhere hears nothing while every send succeeds locally.
   uint8_t scan_channel = 0;
   uint32_t channel_hops = 0;
+  // Transmit-power sweep (see espNowLinkSweepPower). 0 until it has run.
+  uint8_t tx_power_chosen_quarter_dbm = 0;
+  bool tx_power_swept = false;
   // RSSI of the PRIMARY's packets as heard here. The counterpart of NodeState's
   // rssi: together they say whether the path is symmetric. A bad antenna
   // attenuates both directions equally; a receiver problem shows up on one side
