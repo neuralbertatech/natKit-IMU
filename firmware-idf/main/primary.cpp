@@ -290,6 +290,14 @@ void runPrimary() {
                static_cast<unsigned long>(node.last_declared_rate));
 
       // --- the time-shift proxy, and its two instruments (#340) -------------
+      if (node.publish_no_sync || node.publish_no_time || node.publish_no_shift) {
+        ESP_LOGW(kTag,
+                 "  NOT PUBLISHED: %lu no leaf fit, %lu no wall clock, %lu "
+                 "rewrite refused -- these never reached the uplink queue",
+                 static_cast<unsigned long>(node.publish_no_sync),
+                 static_cast<unsigned long>(node.publish_no_time),
+                 static_cast<unsigned long>(node.publish_no_shift));
+      }
       if (node.rssi_seen) {
         ESP_LOGI(kTag, "  rssi %d dBm (best %d, worst %d) over %lu packets",
                  node.rssi_last, node.rssi_best, node.rssi_worst,
@@ -519,6 +527,31 @@ void runPrimary() {
       fillPrimaryStatus(primary_status);
       uplinkSend(UplinkType::kPrimaryStatus, deviceId(), &primary_status,
                  sizeof(primary_status));
+    }
+
+    // The wired uplink's health. Without this the Ethernet path was INVISIBLE --
+    // no link state, no MQTT state, no clock state -- which is how a publish path
+    // discarding 75% of its frames went unnoticed while every radio counter read
+    // perfectly.
+    if (kEthUplink && ticks % 5 == 0) {
+      const EthernetStats &eth = ethernetStats();
+      const GatewayNetStats &net = gatewayNetStats();
+      ESP_LOGI(kTag,
+               "WIRED UPLINK: link %s, ip %lu.%lu.%lu.%lu, mqtt %s, clock %s | "
+               "published %lu (%llu B), refused %lu | link drops %lu, mqtt drops "
+               "%lu",
+               eth.link_up ? "up" : "DOWN",
+               static_cast<unsigned long>(eth.ip & 0xFF),
+               static_cast<unsigned long>((eth.ip >> 8) & 0xFF),
+               static_cast<unsigned long>((eth.ip >> 16) & 0xFF),
+               static_cast<unsigned long>((eth.ip >> 24) & 0xFF),
+               net.mqtt_connected ? "up" : "DOWN",
+               gatewayTimeValid() ? "SYNCED" : "NOT SYNCED",
+               static_cast<unsigned long>(net.publishes_ok),
+               static_cast<unsigned long long>(net.bytes_published),
+               static_cast<unsigned long>(net.publishes_failed),
+               static_cast<unsigned long>(eth.link_downs),
+               static_cast<unsigned long>(net.mqtt_disconnects));
     }
 
     // #373's headline line: the one chip's two jobs, side by side. The channel

@@ -967,8 +967,11 @@ void primaryRecvCallback(const esp_now_recv_info_t *info, const uint8_t *data,
         // the gateway's cross-serial estimate, which makes it strictly better
         // than the two-board path -- worth remembering when comparing them.
         static uint8_t shifted[kMaxPayload];
-        if (node->sync_seen && payload_size <= sizeof(shifted) &&
-            gatewayTimeValid()) {
+        if (!node->sync_seen) {
+          ++node->publish_no_sync;
+        } else if (!gatewayTimeValid()) {
+          ++node->publish_no_time;
+        } else if (payload_size <= sizeof(shifted)) {
           std::memcpy(shifted, payload, payload_size);
           const int64_t primary_to_wall =
               static_cast<int64_t>(gatewayWallClockUs()) -
@@ -976,6 +979,8 @@ void primaryRecvCallback(const esp_now_recv_info_t *info, const uint8_t *data,
           if (rewriteFrameTimestamps(shifted, payload_size, node->last_sync,
                                      primary_to_wall)) {
             uplinkSend(UplinkType::kData, node->device_id, shifted, payload_size);
+          } else {
+            ++node->publish_no_shift;
           }
         }
       } else {

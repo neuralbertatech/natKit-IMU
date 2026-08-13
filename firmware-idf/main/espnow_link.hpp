@@ -386,6 +386,12 @@ struct NodeState {
   int64_t shifted_delta_min = 0;
   int64_t shifted_delta_max = 0;
   uint32_t shift_failures = 0;  // frames that arrived while the leaf was unsynced
+  // Why a received frame never reached the uplink. Every one of these was a
+  // SILENT drop until a frontend rate of 1.7/s against a radio rate of 5/s made
+  // it obvious something was discarding frames with nothing to show for it.
+  uint32_t publish_no_sync = 0;   // the leaf's fit had not arrived yet
+  uint32_t publish_no_time = 0;   // no wall clock: NTP had not synced
+  uint32_t publish_no_shift = 0;  // the timestamp rewrite refused the frame
 
   // The probe instrument: measured minus predicted, in microseconds. This is the
   // headline accuracy figure for #340 and the raw material for #315's confidence
