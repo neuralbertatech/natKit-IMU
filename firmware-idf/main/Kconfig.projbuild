@@ -91,23 +91,36 @@ config NATKIT_ESPNOW_CHANNEL
 
 config NATKIT_IMU_REPORT_INTERVAL_US
     int "BNO08x report interval (microseconds)"
-    default 18000
+    default 10000
     range 2500 1000000
     help
-        How often the hub is asked to produce each enabled report. 18000 us is
-        what ../embeded uses (nominally ~55 Hz per report), and matching it is
-        what makes a recording from this fork comparable with one from the
-        current firmware -- so treat this as a compatibility setting rather than
-        a tuning knob. The BNO08x will not honour arbitrarily small values.
+        How often the hub is asked to produce each enabled report.
+
+        ⚠️ 10000 us (100 Hz) since #380. It was 18000 to match ../embeded, and
+        that "compatibility" was preserving a bug: the frame header has always
+        declared 100 Hz while the sample loop ran at 50. Sampling at 100 Hz
+        without asking the hub for reports at 100 Hz would simply duplicate
+        values -- the same lie in a new place -- so these two move together.
+
+        ⚠️ The hub does NOT honour this equally across reports. Measured on
+        TEC-NATKIT-22 against an 18000 us request: accel ~64 Hz, gyro/mag/
+        rotation ~98 Hz. Accel is the one at risk of not reaching 100 Hz, so
+        verify the per-report rates on the leaf console rather than trusting the
+        request. The BNO08x will not honour arbitrarily small values.
 
 config NATKIT_IMU_SAMPLE_INTERVAL_US
     int "Frame sample interval (microseconds)"
-    default 20000
+    default 10000
     range 1000 1000000
     help
         How often the leaf snapshots the sensor's latest readings into a frame
-        sample. 20000 us = 50 Hz, matching DELAY_BETWEEN_SAMPLES in
-        ../embeded/include/BoardConfig.hpp.
+        sample. 10000 us = 100 Hz.
+
+        ⚠️ 10000 since #380. It was 20000 (50 Hz) to match DELAY_BETWEEN_SAMPLES
+        in ../embeded/include/BoardConfig.hpp -- but that firmware ALSO declares
+        IMU_SAMPLE_RATE_HZ 100 in every frame header, so both firmwares have been
+        claiming twice the rate they sample. Matching the declaration is the fix;
+        matching the old interval was preserving the bug.
 
         This is NOT the sensor's report rate (that is
         NATKIT_IMU_REPORT_INTERVAL_US, configured on the hub). The four SH2 reports
@@ -140,8 +153,14 @@ config NATKIT_IMU_DECLARED_RATE_HZ
 
         Informational by design, and deliberately NOT derived from the sample
         interval above: every sample carries its own timestamp, and that is the
-        source of truth for a viewer's time axis. It is declared to match the
-        current firmware so a recording from either is read the same way.
+        source of truth for a viewer's time axis.
+
+        ⚠️ It is now TRUE, which it was not before #380. Both firmwares declared
+        100 here while sampling at 50, so anything trusting this field -- a
+        resampler, a feature window, an exported Parquet's metadata -- was working
+        from double the real rate. Consumers using per-sample timestamps were
+        always fine. If this is ever changed again, change the sample interval
+        with it.
 
 config NATKIT_ESPNOW_TX_QUEUE_DEPTH
     int "Leaf transmit queue depth (frames)"

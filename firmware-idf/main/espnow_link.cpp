@@ -999,6 +999,23 @@ void primaryRecvCallback(const esp_now_recv_info_t *info, const uint8_t *data,
         } else if (seq > node->last_seq + 1) {
           node->seq_gaps += static_cast<uint32_t>(seq - node->last_seq - 1);
         } else if (seq == node->last_seq) {
+          // ⚠️ DROPPED, not forwarded. A duplicate is the SAME frame arriving
+          // twice -- the leaf's retry path re-sending one whose send callback
+          // was late but which had already landed -- so forwarding it puts the
+          // same ten samples into a recording twice.
+          //
+          // This was deferred from TEC-NATKIT-24 as "dedupe belongs on the
+          // primary", and at 50 Hz it looked harmless: dupes ran at ~1%. At
+          // 100 Hz (#380) the radio is busy enough that callbacks are late
+          // constantly and it became ~50% -- 1073 frames received against a
+          // sequence range of 1031, and a broker seeing 16.5 frames/s from a leaf
+          // building 9. An inflated rate that looks like MORE data is a worse
+          // failure than a gap, because nothing downstream flags it.
+          //
+          // Only an immediately-repeated sequence is caught, which is what a
+          // retry produces. A duplicate arriving after a NEWER frame would still
+          // pass; that needs a window rather than one value, and there is no
+          // evidence of it happening.
           // The SAME frame twice. Distinguished from a restart because the causes
           // are unrelated and so are the fixes: a duplicate means the frame was
           // transmitted more than once (the leaf's retry path re-sends a frame
@@ -1007,6 +1024,7 @@ void primaryRecvCallback(const esp_now_recv_info_t *info, const uint8_t *data,
           // rebooted. Lumping them together made "restarts 6" appear against a
           // leaf whose own heartbeat said it had been up for one 66-second boot.
           ++node->seq_duplicates;
+          return;
         } else {
           // Strictly backwards: the leaf rebooted and began a new sequence.
           // Counted for the same reason the ESP-NOW probe had to learn to -- a
