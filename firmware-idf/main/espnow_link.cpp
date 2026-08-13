@@ -363,7 +363,12 @@ constexpr uint32_t kChannelDwellMs = 1300;
 // channel". Far above kAbsentAfterFailures, which only changes retry policy: this
 // one throws away a working association, so it must not fire on a hub that is
 // merely rebooting.
-constexpr uint32_t kRescanAfterFailures = 150;
+// How long the primary must be SILENT before a leaf gives up its channel. The
+// hub beacons every second, so 15 s is fifteen consecutive misses -- far beyond
+// any interference burst, and comfortably longer than the ~5 s a primary takes to
+// reboot (a reboot is survivable: TEC-NATKIT-24 rode out a 30 s outage without
+// this existing at all).
+constexpr uint64_t kRescanAfterSilenceUs = 15ULL * 1000000ULL;
 constexpr uint8_t kMaxChannel = 13;
 
 void announceTask(void *) {
@@ -389,15 +394,34 @@ void announceTask(void *) {
     // So a long run of failures gives the channel back to the search. The
     // threshold is deliberately much longer than a transient outage -- the leaf
     // survived a 30 s primary reboot on TEC-NATKIT-24 without needing this.
-    if (sPrimaryKnown && sStats.consecutive_failures < kRescanAfterFailures) {
+    // ⚠️ RESCAN ON SILENCE, NOT ON SEND FAILURES.
+    //
+    // Basing this on consecutive failures was wrong, and expensively so: a
+    // "failure" here means no MAC-layer ACK came back, which on this rig happens
+    // constantly while the frames themselves ARRIVE -- measured at 399 tx
+    // failures against a hub that was receiving ~10 frames/s and forwarding them
+    // to Kafka. So the leaf kept abandoning a primary it was successfully feeding
+    // and spending up to 17 s hopping channels, which is what made the frontend
+    // swing between 3 and 11 frames/s.
+    //
+    // Beacon silence is the authoritative signal. The primary broadcasts every
+    // second; broadcasts need no ACK, so hearing them proves the hub is present
+    // and on this channel no matter what the transmit path thinks.
+    const uint64_t now_us = static_cast<uint64_t>(esp_timer_get_time());
+    const uint64_t last_beacon = timeSyncStatus().last_beacon_local_us;
+    const bool beacons_silent =
+        last_beacon != 0 &&
+        now_us - last_beacon > kRescanAfterSilenceUs;
+
+    if (sPrimaryKnown && !beacons_silent) {
       vTaskDelay(pdMS_TO_TICKS(10000));
       continue;
     }
     if (sPrimaryKnown) {
       ESP_LOGW(kTag,
-               "primary unreachable for %lu sends; giving up on it and scanning "
-               "channels again",
-               static_cast<unsigned long>(sStats.consecutive_failures));
+               "no beacon for %llu ms; the primary is genuinely gone, so "
+               "scanning channels again",
+               static_cast<unsigned long long>((now_us - last_beacon) / 1000));
       sPrimaryKnown = false;
       sStats.primary_known = false;
     }
