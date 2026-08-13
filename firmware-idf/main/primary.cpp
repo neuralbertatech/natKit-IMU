@@ -197,16 +197,18 @@ void runPrimary() {
              "shows what the radio is doing");
   }
 
-  if (espNowPrimaryStart() != ESP_OK) {
-    ESP_LOGE(kTag, "ESP-NOW did not start");
-    idleStatusLoop("primary (no radio)");
-  }
-
   if (kEthUplink) {
-    // The SAME services as the WiFi path, unchanged: SNTP and MQTT are
-    // netif-agnostic, so the whole publish chain proven end-to-end into Kafka on
-    // TEC-NATKIT-26 works here with no modification. That is the payoff for
-    // having split gatewayWifiStart from gatewayServicesStart.
+    // ⚠️ SERVICES BEFORE THE RADIO, so NTP syncs WHILE the channel survey runs.
+    //
+    // The survey was added to fill the ~33 s in which NTP has not synced and
+    // nothing can be published. Started after the radio, it did not fill that
+    // window -- it QUEUED IN FRONT OF IT, pushing first publish from ~33 s to
+    // ~60 s. The two only overlap if SNTP is already running when the survey
+    // begins, and it can be: SNTP and MQTT are netif-agnostic and the Ethernet
+    // link is already up by here.
+    //
+    // The same split that made this reorder possible is what let the whole
+    // publish chain from TEC-NATKIT-26 be reused unchanged.
     if (gatewayServicesStart() != ESP_OK) {
       ESP_LOGE(kTag, "MQTT/SNTP did not start; nodes still land on the console");
     }
@@ -227,6 +229,11 @@ void runPrimary() {
              "associated WiFi station at once, and publishing straight to the "
              "broker. No serial link and no gateway. Watch the ESP-NOW counters "
              "against the two-board baselines -- that comparison is the point.");
+  }
+
+  if (espNowPrimaryStart() != ESP_OK) {
+    ESP_LOGE(kTag, "ESP-NOW did not start");
+    idleStatusLoop("primary (no radio)");
   }
 
   const uint32_t interval_s =

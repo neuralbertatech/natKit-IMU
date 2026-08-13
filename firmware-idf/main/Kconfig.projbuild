@@ -57,9 +57,29 @@ config NATKIT_ESPNOW_PROBE_RECEIVER
 
 config NATKIT_CHANNEL_SURVEY
     bool "Primary surveys the band at boot and picks the quietest channel"
-    default y
+    default n
     help
-        Zach's idea, and it costs nothing: the primary cannot publish for the
+        ⚠️ DEFAULT OFF, BECAUSE IT MEASURES THE WRONG THING AND CAN KILL THE
+        LINK. It scores OTHER NETWORKS' 802.11 traffic, which is not what limits
+        this rig: the interference that matters here is non-802.11 (the Thread
+        Border Router board's own clocks) and is INVISIBLE to a promiscuous
+        receiver. Observed: it chose a channel that was genuinely quiet by its own
+        table, on which the leaf then could not be heard at all -- the leaf
+        receiving beacons at -29 dBm with its clock locked, while the hub reported
+        "no nodes yet".
+
+        Measuring the ACTUAL LINK is what works. Sweeping channels and recording
+        the hub's RSSI of a real leaf found -22 dBm and the full rate on 3 and 10,
+        against -61 to -83 dBm and nothing on 9, 11 and 13. That is the survey
+        this should become: have a leaf transmit on each channel and score what
+        the hub hears, rather than scoring strangers.
+
+        Left in the tree, off by default, because the mechanism is sound and the
+        table it prints is genuinely useful next to a site survey -- it correctly
+        found the two access-point clusters Zach's UniFi scan shows. It is the
+        SCORING that is wrong, not the sweep.
+
+        The original reasoning, still true: the primary cannot publish for the
         first ~33 s after a reset anyway, because NTP has not synced and every
         data frame is refused rather than published with a 1970 timestamp. A
         thirteen-channel survey fits inside that window.
