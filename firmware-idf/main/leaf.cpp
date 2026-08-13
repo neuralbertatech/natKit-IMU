@@ -37,6 +37,73 @@ namespace {
 
 constexpr char kTag[] = "natkit-leaf";
 
+// --- sampling runs in its OWN task, and that is the fix rather than a tidy-up --
+//
+// It used to share the main loop with imu.service(), and at a 20 ms interval that
+// was fine. At 10 ms (#380) it was not: a service() call that overran the deadline
+// cost a sample, and MEASURED 15.2% of slots were lost that way -- 592 of 3903 --
+// while the radio reported zero packet loss to explain the missing data. Making
+// the delay deadline-aware did not help, because the overrun is inside service()
+// itself.
+//
+// So the cadence gets its own task at a higher priority, paced by
+// xTaskDelayUntil, which is drift-free by construction. All it does is SNAPSHOT
+// readings that service() has already decoded -- no SPI, no blocking -- so its
+// deadline does not depend on how long the sensor takes.
+//
+// ⚠️ The snapshot races service()'s writes, deliberately. A torn read would mix
+// one report's axes with another's, which is precisely what a "merged snapshot
+// across asynchronous reports" already is (see sampleFromReadings) -- so the race
+// changes nothing semantically and a lock here would put SPI latency back into
+// the cadence, which is the whole problem being fixed.
+Bno08x *sImu = nullptr;
+volatile uint32_t sFramesBuilt = 0;
+volatile uint32_t sMissedSlots = 0;
+
+void samplingTask(void *) {
+  constexpr size_t kSamplesPerFrame = CONFIG_NATKIT_IMU_SAMPLES_PER_FRAME;
+  static ImuSample samples[kMaxSamplesPerFrame]{};
+  static uint8_t frame[kFrameHeaderSize + kMaxSamplesPerFrame * kSampleSize];
+  size_t sample_count = 0;
+  uint64_t frame_seq = 0;
+
+  // Whole ticks: the tick rate is 1000 Hz, so a 10000 us interval is exactly 10.
+  const TickType_t period = pdMS_TO_TICKS(CONFIG_NATKIT_IMU_SAMPLE_INTERVAL_US / 1000);
+  TickType_t last = xTaskGetTickCount();
+
+  while (true) {
+    xTaskDelayUntil(&last, period);
+    if (sImu == nullptr) {
+      continue;
+    }
+
+    ImuSample sample{};
+    if (!sampleFromReadings(sImu->readings(), sample)) {
+      ++sMissedSlots;  // nothing decoded yet: a real slot with no reading in it
+      continue;
+    }
+    samples[sample_count++] = sample;
+    if (sample_count < kSamplesPerFrame) {
+      continue;
+    }
+
+    // deviceTsUs is the FIRST sample's time, matching the current firmware.
+    const uint64_t device_ts_us = samples[0].time_ms * 1000ULL;
+    const size_t length =
+        encodeFrame(samples, sample_count, frame_seq, device_ts_us,
+                    CONFIG_NATKIT_IMU_DECLARED_RATE_HZ, frame, sizeof(frame));
+    sample_count = 0;
+    if (length == 0) {
+      ESP_LOGE(kTag, "frame encoding failed -- layout constants disagree");
+      continue;
+    }
+    ++frame_seq;
+    ++sFramesBuilt;
+    // Never blocks, whether or not a primary is listening.
+    espNowLinkSend(PacketType::kData, frame, length);
+  }
+}
+
 const char *accuracyName(uint8_t accuracy) {
   switch (accuracy) {
     case 0:
@@ -93,6 +160,13 @@ void runLeaf() {
              "absent");
   }
 
+  sImu = &imu;
+  if (have_imu) {
+    // Priority 6: above the main loop (1) so a long service() cannot delay the
+    // cadence, and level with the tx task so neither starves the other.
+    xTaskCreate(samplingTask, "natkit-sample", 4096, nullptr, 6, nullptr);
+  }
+
   if (espNowLinkStart() != ESP_OK) {
     ESP_LOGE(kTag, "ESP-NOW did not start; the sensor still runs, so the console "
                    "remains useful for diagnosing it");
@@ -137,57 +211,6 @@ void runLeaf() {
 
     const uint64_t now = static_cast<uint64_t>(esp_timer_get_time());
 
-    // --- pack a sample on a fixed interval -----------------------------------
-    //
-    // A snapshot of the latest reading of each sensor, taken every
-    // CONFIG_NATKIT_IMU_SAMPLE_INTERVAL_US. The four SH2 reports arrive
-    // asynchronously at their own rates (~64 Hz accel, ~98 Hz for the rest), so a
-    // "sample" is necessarily a merge across them -- which is exactly what the
-    // schema carries and what the current firmware sends.
-    if (have_imu && now >= next_sample_us) {
-      // ⚠️ ADVANCE THE DEADLINE, do not restart it from now.
-      //
-      // `next_sample_us = now + interval` folds every overshoot into the next
-      // period, so the loop runs at (interval + however long a pass took) rather
-      // than at `interval`, and drifts permanently slow. At the old 20 ms that
-      // cost little; at 10 ms (#380) it was ~22% -- 78 samples/s against the 100
-      // the header declares, with zero packet loss to explain it, which is
-      // exactly the kind of shortfall that gets blamed on the radio.
-      next_sample_us += kSampleIntervalUs;
-      // If we have fallen more than a whole period behind -- a long SPI stall,
-      // say -- resynchronise rather than sprinting to catch up, which would
-      // bunch samples together and lie about when they were taken.
-      if (next_sample_us <= now) {
-        next_sample_us = now + kSampleIntervalUs;
-      }
-      ImuSample sample{};
-      if (sampleFromReadings(imu.readings(), sample) &&
-          sample_count < kSamplesPerFrame) {
-        samples[sample_count++] = sample;
-      }
-
-      if (sample_count == kSamplesPerFrame) {
-        // deviceTsUs is the FIRST sample's time, matching the current firmware
-        // (kafkaTopic.hpp uses imuDataList[0].getTime() * 1000).
-        const uint64_t device_ts_us = samples[0].time_ms * 1000ULL;
-        const size_t length =
-            encodeFrame(samples, sample_count, frame_seq, device_ts_us,
-                        CONFIG_NATKIT_IMU_DECLARED_RATE_HZ, frame, sizeof(frame));
-        sample_count = 0;
-
-        if (length == 0) {
-          ESP_LOGE(kTag, "frame encoding failed -- layout constants disagree");
-        } else {
-          ++frame_seq;
-          ++frames_built;
-          // Never blocks, whether or not a primary is listening. That is the
-          // requirement: the sample loop must survive the primary being powered
-          // off, dropping frames rather than stalling.
-          espNowLinkSend(PacketType::kData, frame, length);
-        }
-      }
-    }
-
     // --- heartbeat -----------------------------------------------------------
     if (kHeartbeatIntervalUs > 0 && now >= next_heartbeat_us) {
       next_heartbeat_us = now + kHeartbeatIntervalUs;
@@ -197,7 +220,7 @@ void runLeaf() {
       Heartbeat beat{};
       beat.device_id = deviceId();
       beat.uptime_us = now;
-      beat.frames_built = frames_built;
+      beat.frames_built = sFramesBuilt;
       beat.frames_sent = link.packets_sent;
       beat.frames_dropped = link.packets_dropped;
       beat.send_failures = link.send_failures;
@@ -226,7 +249,7 @@ void runLeaf() {
                                 1'000'000.0F / static_cast<float>(elapsed_us);
       const float frame_hz =
           elapsed_us == 0 ? 0.0F
-                          : static_cast<float>(frames_built - frames_at_last_log) *
+                          : static_cast<float>(sFramesBuilt - frames_at_last_log) *
                                 1'000'000.0F / static_cast<float>(elapsed_us);
 
       if (!have_imu) {
@@ -264,7 +287,7 @@ void runLeaf() {
                !espNowLinkHasPrimary() ? "SEARCHING for a primary"
                    : link.primary_absent ? "primary PRESUMED GONE (unicast, 1 try)"
                                          : "primary known (unicast)",
-               static_cast<unsigned long>(frames_built), frame_hz,
+               static_cast<unsigned long>(sFramesBuilt), frame_hz,
                static_cast<unsigned long>(link.packets_sent),
                static_cast<unsigned long>(link.packets_dropped),
                static_cast<unsigned long>(link.send_failures),
@@ -278,6 +301,14 @@ void runLeaf() {
                  link.rssi_last, link.rssi_best, link.rssi_worst,
                  link.tx_power_quarter_dbm / 4.0);
       }
+      // How often the sample loop lost a slot. At 10 ms (#380) a single
+      // imu.service() that overruns costs a sample, and 9% of slots missed is
+      // exactly the gap between 100 samples/s declared and 91 produced.
+      ESP_LOGI(kTag, "sample loop: %lu slots missed of ~%lu due (%.1f%%)",
+               static_cast<unsigned long>(sMissedSlots),
+               static_cast<unsigned long>(now / kSampleIntervalUs),
+               100.0 * sMissedSlots /
+                   (now / kSampleIntervalUs > 0 ? now / kSampleIntervalUs : 1));
       // The clock fit (#340). Printed next to the link line because the two fail
       // together: a leaf that has lost its primary stops being able to say when
       // anything happened as well as where it went.
@@ -347,12 +378,32 @@ void runLeaf() {
       }
 
       reports_at_last_log = total;
-      frames_at_last_log = frames_built;
+      frames_at_last_log = sFramesBuilt;
       last_log_us = now;
       next_log_us = now + kLogIntervalUs;
     }
 
-    vTaskDelay(kPumpDelay);
+    // ⚠️ Sleep until the NEXT SAMPLE IS DUE, not for a flat tick.
+    //
+    // A fixed 1 ms delay plus a variable imu.service() made the loop miss 10 ms
+    // deadlines routinely: at the old 20 ms interval that was invisible, at
+    // 10 ms (#380) it cost ~9% of samples with the radio reporting zero loss to
+    // explain it. Yielding for exactly the remaining time keeps the pump running
+    // as fast as the hub needs while letting the sample cadence set the rhythm.
+    //
+    // Still a delay rather than a spin: the tx, announce and sync tasks run at
+    // higher priority and must be able to preempt, and a busy loop here would
+    // also stop the idle task from ever running.
+    if (have_imu) {
+      const uint64_t after = static_cast<uint64_t>(esp_timer_get_time());
+      const uint64_t remaining =
+          next_sample_us > after ? next_sample_us - after : 0;
+      // Round DOWN to whole ticks and never sleep past the deadline; a 0-tick
+      // delay still yields to equal-priority work.
+      vTaskDelay(remaining / 1000 > 0 ? pdMS_TO_TICKS(remaining / 1000) : 0);
+    } else {
+      vTaskDelay(kPumpDelay);
+    }
   }
 }
 
