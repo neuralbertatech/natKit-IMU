@@ -234,6 +234,22 @@ config NATKIT_ESPNOW_CHANNEL
         this scope". The receiver switch above survives its dependency only
         because it is read with #if, where an absent symbol is a legal 0.
 
+config NATKIT_IMU_ENABLE_MAGNETOMETER
+    bool "Enable the magnetometer report"
+    default y
+    help
+        The magnetometer is enabled but is NOT on the wire -- the bulk schema has
+        no field for it. This exists to measure what it costs, because the four
+        reports share a budget rather than being independent.
+
+        Measured at a 100 Hz request, all four enabled: accel 116, gyro 93,
+        mag 90, quat 93 Hz, ~392 reports/s in total. Asking for 200 Hz instead
+        did not scale any of them -- gyro and quat rose to ~174 while accel FELL
+        from 116 to 63 and mag from 90 to 62. A request for more of one report
+        starves the others, which is the signature of a shared ceiling.
+
+        Not the SPI clock: 3 MHz produced numbers identical to 1 MHz.
+
 config NATKIT_IMU_REPORT_INTERVAL_US
     int "BNO08x report interval (microseconds)"
     default 10000

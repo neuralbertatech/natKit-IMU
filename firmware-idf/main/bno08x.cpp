@@ -445,18 +445,61 @@ esp_err_t Bno08x::begin() {
 }
 
 bool Bno08x::enableReports() {
-  // Exactly the four reports ../../embeded enables, at its interval. Changing
-  // this set changes what a recording contains, so it is not a knob to twiddle
-  // while porting.
+  // ⚠️ EVERY INTERVAL IS THE SAME HERE, AND THAT IS THE MEASURED OPTIMUM, not an
+  // oversight. The per-report structure is kept because the intervals ARE
+  // independent knobs and the obvious tuning is wrong; this is the record of it.
+  //
+  // The hub does not deliver what it is asked for. At a uniform 100 Hz request:
+  // accel 117, gyro 95, mag 91, quat 95 Hz -- the total is about right (398 of
+  // 400) but the accelerometer takes a fifth more than it asked for and the
+  // other three go short.
+  //
+  // Asking for more does not fix it, it inverts it. Uniform requests, delivered:
+  //
+  //     request   accel  gyro   mag  quat   total
+  //     100 Hz      117    95    91    95     398
+  //     125 Hz       83   155    78   155     471
+  //     150 Hz       65   175    63   175     478
+  //     200 Hz       63   174    62   177     476
+  //
+  // Two things fall out. There is a CEILING near 475 reports/s; and under
+  // contention the hub feeds gyro and rotation at the expense of accel and mag.
+  // Note also that gyro and quat have no rate between ~95 and ~160 -- anything
+  // below a 10 ms request snaps them to ~160 Hz.
+  //
+  // ⚠️ SO THE OBVIOUS TUNE BACKFIRES. Asking gyro and rotation for 9 ms to lift
+  // them over 100 does lift them, to ~160 -- and the total pins at the ceiling,
+  // dragging accel to 80 and mag to 75, BELOW 100, where they had been fine.
+  // Measured, not predicted. Uniform 10 ms sits at 398/s with headroom and is
+  // the best allocation available.
+  //
+  // ⚠️ AND ABOVE 100 Hz IS NOT A PROBLEM, BELOW IT IS. The frame builder takes a
+  // 100 Hz snapshot of each sensor's latest value, so a report arriving at 160 Hz
+  // merely wastes it, while one arriving at 95 Hz leaves ~5% of samples carrying
+  // the previous value. Judge these numbers against 100 as a FLOOR.
+  //
+  // The ceiling is the hub's, not ours. Three things were tried and none moved
+  // it: 3 MHz SPI instead of 1 MHz (identical numbers), draining sh2_service
+  // rather than calling it once per pump (+2 Hz), and disabling the magnetometer
+  // to free 91 Hz of budget (+2 Hz on the others -- so mag is very nearly free).
   struct ReportSpec {
     sh2_SensorId_t id;
     const char *name;
+    uint32_t interval_us;
   };
-  static constexpr ReportSpec kReports[] = {
-      {SH2_ACCELEROMETER, "accelerometer"},
-      {SH2_GYROSCOPE_CALIBRATED, "gyroscope"},
-      {SH2_MAGNETIC_FIELD_CALIBRATED, "magnetometer"},
-      {SH2_ROTATION_VECTOR, "rotation vector"},
+  static constexpr uint32_t kBase = CONFIG_NATKIT_IMU_REPORT_INTERVAL_US;
+  static const ReportSpec kReports[] = {
+      // The accelerometer over-delivers on this hub, so it is asked for LESS
+      // than the target rather than more.
+      {SH2_ACCELEROMETER, "accelerometer", kBase},
+      {SH2_GYROSCOPE_CALIBRATED, "gyroscope", kBase},
+#if CONFIG_NATKIT_IMU_ENABLE_MAGNETOMETER
+      // ⚠️ The magnetometer is NOT asked for more. It is the one report whose
+      // datasheet maximum is 100 Hz, and it peaked at 90 Hz on a 100 Hz request
+      // while every faster request made it WORSE (78 Hz at 125, 63 at 150).
+      {SH2_MAGNETIC_FIELD_CALIBRATED, "magnetometer", kBase},
+#endif
+      {SH2_ROTATION_VECTOR, "rotation vector", kBase},
   };
 
   sh2_SensorConfig_t config{};
@@ -467,10 +510,10 @@ bool Bno08x::enableReports() {
   config.changeSensitivity = 0;
   config.batchInterval_us = 0;
   config.sensorSpecific = 0;
-  config.reportInterval_us = CONFIG_NATKIT_IMU_REPORT_INTERVAL_US;
 
   bool all_ok = true;
   for (const ReportSpec &report : kReports) {
+    config.reportInterval_us = report.interval_us;
     const int status = sh2_setSensorConfig(report.id, &config);
     if (status != SH2_OK) {
       ESP_LOGE(kTag, "could not enable %s (%d)", report.name, status);
@@ -491,8 +534,18 @@ int Bno08x::service() {
 
   // Each report is folded in by the callback as sh2_service() dispatches it, so
   // this counts rather than collects.
+  // ⚠️ DRAIN, don't sample. sh2_service() returns after handling what is
+  // immediately available, so calling it once per pump caps the report rate at
+  // roughly one batch per pump however fast the hub is producing. Loop until a
+  // pass yields nothing, bounded so a chattering hub cannot hold the task here.
   sAppliedThisService = 0;
-  sh2_service();
+  for (int pass = 0; pass < 8; ++pass) {
+    const uint32_t before = sAppliedThisService;
+    sh2_service();
+    if (sAppliedThisService == before) {
+      break;
+    }
+  }
   return sAppliedThisService;
 }
 

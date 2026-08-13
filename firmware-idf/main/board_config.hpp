@@ -26,9 +26,13 @@ constexpr gpio_num_t kBnoMosi = GPIO_NUM_19;
 constexpr spi_host_device_t kBnoSpiHost = SPI2_HOST;
 
 // 1 MHz, SPI mode 3, MSB first — the settings the Adafruit stack used on this
-// board and the ones it has been streaming with. The BNO08x datasheet allows
-// 3 MHz; going faster is a deliberate experiment with a measurement attached,
-// not a free win, because this hub has proven fragile about timing.
+// board and the ones it has been streaming with.
+//
+// ⚠️ 3 MHz WAS TRIED AND BUYS NOTHING. The datasheet allows it, and the report
+// rates at 3 MHz are identical to 1 MHz to within noise: accel 115/114/117,
+// gyro 93/93/94, mag 90/90/90, quat 93/93/94 Hz in both cases. The report rate
+// is therefore NOT limited by how fast the bytes move, so raising the clock only
+// adds risk on a hub that has proven fragile about timing. Left at 1 MHz.
 constexpr int kBnoSpiClockHz = 1'000'000;
 constexpr int kBnoSpiMode = 3;
 

@@ -199,6 +199,9 @@ void runLeaf() {
   uint64_t next_log_us = 0;
   uint64_t next_heartbeat_us = kHeartbeatIntervalUs;
   uint32_t reports_at_last_log = 0;
+  // Per-report, not just the total: the aggregate cannot tell "all four at 100 Hz"
+  // from "three at 133 Hz and one dead", and those need different fixes.
+  uint32_t per_report_at_last_log[4] = {};
   uint32_t frames_at_last_log = 0;
   uint64_t last_log_us = 0;
 
@@ -267,6 +270,30 @@ void runLeaf() {
                r.gyroscope.y, r.gyroscope.z, accuracyName(r.gyroscope.accuracy),
                r.rotation.x, r.rotation.y, r.rotation.z, r.rotation.w,
                accuracyName(r.rotation.accuracy));
+      // ⚠️ THE MAGNETOMETER IS ENABLED AND ARRIVING, it is simply not on the wire
+      // -- the schema has no field for it (see imu_frame.hpp). So this line is the
+      // only place it is visible, and it is what says whether carrying it would
+      // cost anything: if mag is already at the same rate as the other three, the
+      // sensor and the SPI link are ALREADY paying for it.
+      {
+        const uint32_t per_report[4] = {r.accelerometer.count, r.gyroscope.count,
+                                        r.magnetometer.count, r.rotation.count};
+        const char *names[4] = {"accel", "gyro", "mag", "quat"};
+        char breakdown[128];
+        int written = 0;
+        for (int i = 0; i < 4; ++i) {
+          const float hz =
+              elapsed_us == 0
+                  ? 0.0F
+                  : static_cast<float>(per_report[i] - per_report_at_last_log[i]) *
+                        1'000'000.0F / static_cast<float>(elapsed_us);
+          written += snprintf(breakdown + written, sizeof(breakdown) - written,
+                              "%s%s %.1f Hz", i ? " | " : "", names[i], hz);
+          per_report_at_last_log[i] = per_report[i];
+        }
+        ESP_LOGI(kTag, "reports: %s   (configured %.1f Hz each)", breakdown,
+                 1'000'000.0 / CONFIG_NATKIT_IMU_REPORT_INTERVAL_US);
+      }
       ESP_LOGI(kTag,
                "sensor: %lu reports @ %.1f Hz | resets %lu | cal %s | heap "
                "%" PRIu32 " B (min %" PRIu32 " B)",
