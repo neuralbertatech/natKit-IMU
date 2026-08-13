@@ -22,8 +22,14 @@
 // The Arduino firmware in ../embeded is untouched and remains the image on the
 // bench; see ../README.md for the rollback command.
 
-#if !CONFIG_IDF_TARGET_ESP32 && !CONFIG_IDF_TARGET_ESP32C3
-#error "natKit-IMU fork supports classic ESP32 (the IMU's PICO-D4) and ESP32-C3 only"
+// ESP32-S3 joined the list on 2026-08-13, when a board with an Ethernet
+// daughterboard replaced one of the nodes. ⚠️ It is NOT interchangeable with the
+// classic ESP32 for networking: the S3 has no internal Ethernet MAC, so wired
+// uplink there means an SPI module (W5500 / DM9051 / ENC28J60), not a PHY on the
+// EMAC. Its console is also the native USB Serial/JTAG rather than a UART.
+#if !CONFIG_IDF_TARGET_ESP32 && !CONFIG_IDF_TARGET_ESP32C3 && \
+    !CONFIG_IDF_TARGET_ESP32S3
+#error "natKit-IMU fork supports classic ESP32, ESP32-C3 and ESP32-S3 only"
 #endif
 
 namespace {

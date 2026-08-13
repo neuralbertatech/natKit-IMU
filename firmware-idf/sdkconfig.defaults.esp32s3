@@ -1,0 +1,43 @@
+# ESP32-S3 target: the board carrying the Ethernet daughterboard (#349/#373).
+#
+# ESP-IDF appends sdkconfig.defaults.<target> to sdkconfig.defaults on
+# `idf.py set-target`; ./build-role.sh passes it explicitly (an explicit
+# SDKCONFIG_DEFAULTS suppresses the automatic append).
+#
+# ⚠️ THE S3 HAS NO INTERNAL ETHERNET MAC. The original ESP32 does, which is why
+# the epic's notes talk about choosing a PHY (LAN8720 and friends) -- that route
+# does not exist on this chip. An S3 with Ethernet is necessarily an SPI module
+# (W5500, DM9051 or ENC28J60) hanging off the bus, which is a different driver,
+# different pins and different throughput. See NATKIT_ETH_* in Kconfig.
+#
+# Why this target matters: Ethernet is OFF THE RADIO ENTIRELY. #373 measured a
+# primary that associates with WiFi losing ~85% of its ESP-NOW frames, because
+# an associated station takes the AP's channel and its WiFi task starves the
+# receive path. A wired uplink keeps ESP-NOW on a channel we choose, on a radio
+# nobody else is using, without needing a second chip bridged over serial.
+
+# Measured on this board with esptool (2026-08-13): ESP32-S3, 2 MB embedded
+# PSRAM (AP_3v3), 40 MHz crystal, MAC b8:f8:62:62:f7:3c. Flash size is not
+# reported by chip_id, so 4 MB is declared for the same reason as the ESP32
+# target: under-declaring wastes flash, while an image header claiming more than
+# the part has is the failure that bricks a boot.
+CONFIG_ESPTOOLPY_FLASHSIZE_4MB=y
+
+# PSRAM off, same reasoning as the ESP32 target: nothing here needs it, and
+# turning it on should come with a heap measurement rather than arriving as a
+# default.
+CONFIG_SPIRAM=n
+
+# ⚠️ The console is the S3's NATIVE USB Serial/JTAG, not a UART bridge. This
+# board enumerates as "Espressif USB JTAG/serial debug unit" (303a:1001) with no
+# CH34x or CP210x in sight, so leaving the console on UART0 would produce a
+# board that boots and says nothing -- which reads exactly like a dead image.
+CONFIG_ESP_CONSOLE_USB_SERIAL_JTAG=y
+
+# The IDF's own esp_eth, explicitly. The vendored copies were deleted from
+# natKit-IMU in 891cc38 and were what broke the earlier combined-framework
+# build; nothing should reintroduce them.
+CONFIG_ETH_USE_SPI_ETHERNET=y
+CONFIG_ETH_SPI_ETHERNET_W5500=y
+CONFIG_ETH_SPI_ETHERNET_DM9051=y
+CONFIG_ETH_SPI_ETHERNET_ENC28J60=y

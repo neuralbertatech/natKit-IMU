@@ -283,22 +283,33 @@ config NATKIT_UPLINK_BAUD
 
 config NATKIT_UPLINK_TX_GPIO
     int "Primary uplink UART TX GPIO"
+    default 17 if IDF_TARGET_ESP32S3
     default 26
-    range 0 39
+    range 0 48
     help
-        Ignored when the uplink shares UART0. 26 and 25 are free on the
-        ESP32-PICO-V3-02 -- no strapping function, not flash or PSRAM, and clear
-        of every BNO08x pin in board_config.hpp.
+        Ignored when the uplink shares UART0.
+
+        26/25 are free on the ESP32-PICO-V3-02 -- no strapping function, not
+        flash or PSRAM, and clear of every BNO08x pin in board_config.hpp.
+
+        ⚠️ THOSE NUMBERS ARE FATAL ON THE ESP32-S3, which is why this is
+        per-target. The S3 has no GPIO 22-25 at all, so `uart_set_pin` aborts
+        with "rx_io_num error" and the board reboots in a loop before anything
+        else runs -- and GPIO 26-32 there are the SPI flash and PSRAM pins, so
+        the "working" one of the pair would have been worse than the failing
+        one. 17/18 are ordinary GPIOs on the S3, clear of the native USB
+        Serial/JTAG pins (19/20) that this target's console depends on.
 
 config NATKIT_UPLINK_RX_GPIO
     int "Primary uplink UART RX GPIO"
+    default 18 if IDF_TARGET_ESP32S3
     default 25
-    range 0 39
+    range 0 48
     help
         Ignored when the uplink shares UART0. Nothing is received on it yet --
         the downward command path is TEC-NATKIT-26's decision -- but the pin is
         claimed now so the wiring and the enclosure (#320) do not have to change
-        later.
+        later. See the TX pin above for why this is per-target.
 
 config NATKIT_UPLINK_QUEUE_DEPTH
     int "Primary uplink queue depth (frames)"

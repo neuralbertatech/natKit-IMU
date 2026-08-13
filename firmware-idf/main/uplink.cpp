@@ -239,8 +239,20 @@ esp_err_t uplinkStart() {
   // In console-shared mode our configured baud is not the one in force -- the
   // console's is, because we never reconfigure UART0. Quoting the wrong one here
   // would make the budget below a fiction.
+  //
+  // ⚠️ CONFIG_ESP_CONSOLE_UART_BAUDRATE DOES NOT EXIST on a target whose console
+  // is the native USB Serial/JTAG (the ESP32-S3 board is one), so it cannot be
+  // read unconditionally -- referencing it there is a build failure, not a zero.
+#ifdef CONFIG_ESP_CONSOLE_UART_BAUDRATE
+  const uint32_t console_baud = CONFIG_ESP_CONSOLE_UART_BAUDRATE;
+#else
+  // USB Serial/JTAG: not a baud-limited link in any meaningful sense, so there
+  // is no budget to compute. Reported as 0 and handled below rather than
+  // invented, because a made-up ceiling is worse than an absent one.
+  const uint32_t console_baud = 0;
+#endif
   const uint32_t effective_baud =
-      kOnConsole ? CONFIG_ESP_CONSOLE_UART_BAUDRATE : CONFIG_NATKIT_UPLINK_BAUD;
+      kOnConsole ? console_baud : CONFIG_NATKIT_UPLINK_BAUD;
   const uint32_t wire_bytes_per_s = effective_baud / 10;  // 8N1
   ESP_LOGI(kTag,
            "uplink on UART%d at %d baud%s (tx gpio %d): ~%lu B/s per node against "

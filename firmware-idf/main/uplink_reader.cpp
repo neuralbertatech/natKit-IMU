@@ -18,6 +18,12 @@ constexpr uart_port_t kUartPort =
     static_cast<uart_port_t>(CONFIG_NATKIT_UPLINK_UART_NUM);
 constexpr bool kOnConsole = CONFIG_NATKIT_UPLINK_UART_NUM == 0;
 
+#ifdef CONFIG_ESP_CONSOLE_UART_BAUDRATE
+constexpr int kConsoleBaud = CONFIG_ESP_CONSOLE_UART_BAUDRATE;
+#else
+constexpr int kConsoleBaud = 0;  // USB Serial/JTAG: not a baud-limited link
+#endif
+
 // Room for a few maximum-size frames plus whatever garbage sits between them.
 // Sized from the frame constants rather than a round number, so a change to
 // samples-per-frame cannot silently make this too small to hold one frame.
@@ -192,8 +198,11 @@ esp_err_t uplinkReaderStart(UplinkFrameHandler handler) {
            "reading the primary's framed stream on UART%d at %d baud%s; "
            "resynchronising by magic + CRC, one byte at a time",
            CONFIG_NATKIT_UPLINK_UART_NUM,
-           kOnConsole ? CONFIG_ESP_CONSOLE_UART_BAUDRATE
-                      : CONFIG_NATKIT_UPLINK_BAUD,
+           // ⚠️ CONFIG_ESP_CONSOLE_UART_BAUDRATE does not exist on a target whose
+           // console is the native USB Serial/JTAG (the ESP32-S3 board), so it
+           // cannot be referenced unconditionally -- it is a build failure there
+           // rather than a zero.
+           kOnConsole ? kConsoleBaud : CONFIG_NATKIT_UPLINK_BAUD,
            kOnConsole ? " (SHARED WITH THE CONSOLE, bring-up mode)" : "");
   return ESP_OK;
 }

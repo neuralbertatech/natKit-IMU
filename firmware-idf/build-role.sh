@@ -9,10 +9,11 @@
 # the other's config.
 #
 # Usage:
-#   ./build-role.sh <leaf|primary|gateway> [esp32|esp32c3] [idf.py args...]
+#   ./build-role.sh <leaf|primary|gateway> [esp32|esp32c3|esp32s3] [idf.py args...]
 #
 #   ./build-role.sh leaf                        # build, default target esp32
 #   ./build-role.sh gateway esp32c3             # build for the C3
+#   ./build-role.sh primary esp32s3             # build for the S3 (Ethernet board)
 #   ./build-role.sh leaf esp32 -p /dev/ttyUSB0 flash monitor
 #   ./build-role.sh primary esp32 menuconfig    # tweak this role's config only
 #
@@ -22,7 +23,7 @@
 set -euo pipefail
 
 usage() {
-  echo "usage: $0 <leaf|primary|gateway|espnow-probe|espnow-probe-receiver> [esp32|esp32c3] [idf.py args...]" >&2
+  echo "usage: $0 <leaf|primary|gateway|espnow-probe|espnow-probe-receiver> [esp32|esp32c3|esp32s3] [idf.py args...]" >&2
 }
 
 # espnow-probe is not a node role -- it is the TEC-NATKIT-23 bench instrument,
@@ -47,7 +48,7 @@ shift
 target="esp32"
 if [[ $# -gt 0 ]]; then
   case "${1}" in
-    esp32 | esp32c3)
+    esp32 | esp32c3 | esp32s3)
       target="${1}"
       shift
       ;;
@@ -55,7 +56,7 @@ if [[ $# -gt 0 ]]; then
       # No target given -- keep the default and treat this as an idf.py arg.
       ;;
     *)
-      echo "$0: unknown target '${1}' (expected esp32 or esp32c3)" >&2
+      echo "$0: unknown target '${1}' (expected esp32, esp32c3 or esp32s3)" >&2
       usage
       exit 2
       ;;
