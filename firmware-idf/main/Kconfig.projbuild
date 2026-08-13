@@ -57,19 +57,31 @@ config NATKIT_ESPNOW_PROBE_RECEIVER
 
 config NATKIT_ESPNOW_CHANNEL
     int "ESP-NOW channel"
-    default 6
+    default 3
     range 1 13
     help
         Both ends must match. A channel mismatch presents as every packet sending
         successfully while nothing is received, which reads as total loss rather
         than as a misconfiguration.
 
-        ⚠️ 6, because BOTH 1 AND 11 ARE TAKEN on this bench. Channel 1 is
-        jammed by something on the ESP Thread Border Router board itself; channel
-        11 is the house access point's channel, which was measured during #373.
-        Moving 11 -> 6 took the hub's view of a leaf from -83 dBm to -21 dBm.
-        Neither number is a property of the firmware -- re-survey before blaming
-        the radio on a new site.
+        ⚠️ 3, CHOSEN BY SWEEPING AND MEASURING, not by reading a chart. A UniFi
+        site survey showed two strong access-point clusters centred on 6 and 11
+        with only a weak wide signal across 1-5, and the hub's view of a leaf
+        agreed:
+
+          channel   hub hears leaf   delivered
+          3         -22 dBm          10 frames/s  <- the full rate
+          6         -21 .. -57 dBm   varies
+          9         -61 dBm          0
+          11        -83 dBm          0
+          13        nothing          0
+          1         -82 dBm          jammed by the Thread BR board itself
+
+        So 1 is unusable for a board reason, 6 and 11 for a site reason, and 3 is
+        what is left. NONE of that is a property of the firmware: re-survey and
+        re-sweep on a new site rather than trusting this number, and compare the
+        two directions' RSSI before blaming the radio -- that comparison found
+        three separate RF faults in one session.
 
         ⚠️ THE ORIGINAL FINDING, 1 vs 11, WAS 66 dB. On the ESP Thread Border
         Router board, channel 1 is unusable: the S3 heard leaves a few
@@ -259,6 +271,7 @@ config NATKIT_RCP_RESET_GPIO
 
 config NATKIT_PRIMARY_ETH_UPLINK
     bool "Primary uplinks over WIRED ETHERNET and publishes to MQTT itself"
+    default y if IDF_TARGET_ESP32S3
     default n
     help
         The primary keeps being the ESP-NOW hub and timing master, and reaches
@@ -271,6 +284,14 @@ config NATKIT_PRIMARY_ETH_UPLINK
         task busy servicing the association. Ethernet is OFF THE RADIO, so
         ESP-NOW keeps a channel we choose and there is no association to inherit
         a channel from.
+
+        ⚠️ DEFAULTS ON FOR THE ESP32-S3, because the only S3 in this project is
+        the board with the Ethernet daughterboard, and losing this setting is
+        silent: the primary comes up with no uplink at all, the console shows no
+        Ethernet or MQTT lines, and the uplink counters happily report frames
+        "sent" down a UART nobody is reading. That cost a debugging cycle twice,
+        both times after deleting a generated sdkconfig to pick up a changed
+        default.
 
         ⚠️ ESP32-S3 ONLY, and not because of a software limit: the S3 has no
         internal Ethernet MAC, so this is a W5500 (MAC+PHY behind SPI) rather
