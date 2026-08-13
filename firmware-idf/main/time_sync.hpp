@@ -167,4 +167,19 @@ void timeSyncFillWire(SyncState &out);
 bool syncStateToPrimary(const SyncState &state, uint64_t local_us,
                         uint64_t &primary_us);
 
+// Rewrites a canonical frame's timestamps from leaf-device time into wall clock,
+// IN PLACE, applying both hops: the leaf's fit to reach primary time, then
+// `primary_to_wall_us` to reach the epoch.
+//
+// Lives here rather than with either caller because BOTH the gateway
+// (TEC-NATKIT-26) and the primary running #373's WiFi uplink need it, and it is
+// a time transformation rather than frame construction. Patched in place: a
+// decode and re-encode round trip would be a third implementation of an encoding
+// that already has two (see imu_frame.hpp).
+//
+// ⚠️ The two fields use DIFFERENT UNITS, which is the easy mistake: the frame
+// header's deviceTsUs is microseconds, each sample's time is milliseconds.
+bool rewriteFrameTimestamps(uint8_t *frame, size_t length, const SyncState &sync,
+                            int64_t primary_to_wall_us);
+
 }  // namespace natkit

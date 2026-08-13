@@ -1,5 +1,6 @@
 #include "uplink.hpp"
 
+#include <cinttypes>
 #include <cstdarg>
 #include <cstdio>
 #include <cstring>
@@ -8,6 +9,7 @@
 #include "driver/uart_vfs.h"
 #include "esp_crc.h"
 #include "esp_log.h"
+#include "gateway_net.hpp"
 #include "freertos/FreeRTOS.h"
 #include "freertos/queue.h"
 #include "freertos/semphr.h"
@@ -70,10 +72,67 @@ size_t writeLe(uint8_t *out, T value) {
   return sizeof(T);
 }
 
+#ifdef CONFIG_NATKIT_PRIMARY_WIFI_UPLINK
+constexpr bool kWifiUplink = true;
+#else
+constexpr bool kWifiUplink = false;
+#endif
+
+// The topic the bridge already listens on -- the same one the gateway publishes,
+// because the whole point of #373 is that nothing server-side can tell which
+// architecture produced the data.
+constexpr char kTopicTemplate[] =
+    "natKit/sending/Data-%" PRIu64 "-Binary-NatImuBulkDataSchema";
+
+char sTopic[96];
+
+// Unwraps one of our own uplink frames and publishes its payload.
+//
+// Only data frames go out: node and primary status are for a gateway that is not
+// in this architecture, and publishing them on the data topic would corrupt the
+// stream. They are still queued and counted, so the counters stay comparable
+// against the two-board runs -- which is the comparison this whole switch exists
+// to make.
+void publishFrame(const uint8_t *frame, size_t length) {
+  if (length < kUplinkHeaderSize + kUplinkCrcSize) {
+    return;
+  }
+  if (static_cast<UplinkType>(frame[3]) != UplinkType::kData) {
+    ++sStats.frames_sent;  // consumed, just not published
+    return;
+  }
+  uint64_t stream_id = 0;
+  uint16_t payload_length = 0;
+  std::memcpy(&stream_id, frame + 4, sizeof(stream_id));
+  std::memcpy(&payload_length, frame + 16, sizeof(payload_length));
+  if (kUplinkHeaderSize + payload_length + kUplinkCrcSize > length) {
+    return;
+  }
+
+  std::snprintf(sTopic, sizeof(sTopic), kTopicTemplate, stream_id);
+  if (gatewayPublish(sTopic, frame + kUplinkHeaderSize, payload_length)) {
+    ++sStats.frames_sent;
+    sStats.bytes_sent += payload_length;
+  } else {
+    ++sStats.write_timeouts;  // the broker refused it; same slot, same meaning
+  }
+}
+
 void drainTask(void *) {
   TxFrame frame{};
   while (true) {
     if (xQueueReceive(sQueue, &frame, portMAX_DELAY) != pdTRUE) {
+      continue;
+    }
+
+    // --- #373: publish instead of writing to a wire -------------------------
+    //
+    // Same queue, same drop-oldest policy, same counters -- only the exit
+    // changes. Publishing HERE rather than from the ESP-NOW receive callback is
+    // deliberate: that callback runs on the WiFi task, and a socket write on it
+    // would stall reception for every node to relieve congestion caused by one.
+    if (kWifiUplink) {
+      publishFrame(frame.bytes, frame.length);
       continue;
     }
 
@@ -128,9 +187,10 @@ esp_err_t uplinkStart() {
   cfg.flow_ctrl = UART_HW_FLOWCTRL_DISABLE;
   cfg.source_clk = UART_SCLK_DEFAULT;
 
-  if (!kOnConsole) {
+  if (!kOnConsole && !kWifiUplink) {
     // Only install a driver and re-pin when this is OUR uart. Doing either to
-    // UART0 would fight the console driver that is already there.
+    // UART0 would fight the console driver that is already there, and under
+    // #373 there is no wire at all -- the exit is the radio.
     ESP_ERROR_CHECK(uart_driver_install(kUartPort,
                                         CONFIG_NATKIT_UPLINK_RX_BUFFER,
                                         CONFIG_NATKIT_UPLINK_TX_BUFFER, 0,

@@ -290,6 +290,11 @@ struct LinkStats {
   // see the reasoning in transmit(). Cleared by the first success.
   bool primary_absent = false;
   uint8_t primary_mac[6] = {};
+  // Channel search (#373). A leaf can no longer assume the configured channel:
+  // once the primary associates with an access point its channel is the AP's,
+  // and a leaf pinned elsewhere hears nothing while every send succeeds locally.
+  uint8_t scan_channel = 0;
+  uint32_t channel_hops = 0;
 };
 
 // Starts the radio and the transmit task. Never associates.

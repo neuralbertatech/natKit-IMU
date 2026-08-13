@@ -49,6 +49,23 @@ struct GatewayNetStats {
 // so the primary is never back-pressured by our network problems.
 esp_err_t gatewayNetStart();
 
+// The same two halves, separately, for the primary running #373's WiFi uplink.
+//
+// That role needs the association brought up BEFORE esp_now_init (one radio,
+// one WiFi driver, and ESP-NOW has to be told to follow the associated channel
+// rather than pin its own), and the services brought up after. Splitting them is
+// what lets one chip do both without two components each trying to own
+// esp_wifi_init.
+esp_err_t gatewayWifiStart();
+esp_err_t gatewayServicesStart();
+
+// The channel the association actually landed on. 0 until associated.
+//
+// This is the number the whole one-chip question turns on: ESP-NOW peers must
+// share a channel, and an associated station does not choose its own -- the AP
+// does. Every leaf has to end up here or it is talking into a different channel.
+uint8_t gatewayWifiChannel();
+
 // True once the clock is real rather than 1970. Everything that stamps a wall
 // time has to check this: publishing a frame timestamped in 1970 is worse than
 // not publishing it, because it silently poisons a recording's time axis.

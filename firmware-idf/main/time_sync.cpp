@@ -4,6 +4,7 @@
 #include <cstring>
 
 #include "esp_log.h"
+#include "imu_frame.hpp"
 
 namespace natkit {
 namespace {
@@ -397,5 +398,80 @@ bool syncStateToPrimary(const SyncState &state, uint64_t local_us,
   primary_us = static_cast<uint64_t>(result);
   return true;
 }
+
+
+namespace {
+
+template <typename T>
+T readLeBytes(const uint8_t *p) {
+  T value = 0;
+  for (size_t i = 0; i < sizeof(T); ++i) {
+    value |= static_cast<T>(p[i]) << (8 * i);
+  }
+  return value;
+}
+
+template <typename T>
+void writeLeBytes(uint8_t *out, T value) {
+  for (size_t i = 0; i < sizeof(T); ++i) {
+    out[i] = static_cast<uint8_t>((value >> (8 * i)) & 0xFF);
+  }
+}
+
+}  // namespace
+
+// Rewrites a canonical frame's timestamps from leaf-device time into wall clock,
+// IN PLACE.
+//
+// Patched in place rather than decoded and re-encoded: the layout is fixed and
+// pinned by static_asserts in imu_frame.hpp, and a decode/re-encode round trip
+// would be a third implementation of an encoding that already has two (see that
+// file's warning). Touching only the timestamp fields cannot disturb the sample
+// data, which is the property that matters.
+//
+// ⚠️ Units differ between the two fields and this is the easy mistake: the frame
+// header's deviceTsUs is MICROseconds, while each sample's time is MILLIseconds.
+bool rewriteFrameTimestamps(uint8_t *frame, size_t length,
+                            const SyncState &sync, int64_t primary_to_wall_us) {
+  if (length < kFrameHeaderSize) {
+    return false;
+  }
+  const uint16_t samples = readLeBytes<uint16_t>(frame + 2);
+  if (length < kFrameHeaderSize + static_cast<size_t>(samples) * kSampleSize) {
+    return false;
+  }
+
+  const auto toWall = [&](uint64_t device_us, uint64_t &wall_us) {
+    uint64_t primary_us = 0;
+    if (!syncStateToPrimary(sync, device_us, primary_us)) {
+      return false;
+    }
+    const int64_t wall =
+        static_cast<int64_t>(primary_us) + primary_to_wall_us;
+    if (wall <= 0) {
+      return false;
+    }
+    wall_us = static_cast<uint64_t>(wall);
+    return true;
+  };
+
+  uint64_t header_wall = 0;
+  if (!toWall(readLeBytes<uint64_t>(frame + 16), header_wall)) {
+    return false;
+  }
+  writeLeBytes<uint64_t>(frame + 16, header_wall);
+
+  for (uint16_t i = 0; i < samples; ++i) {
+    uint8_t *sample = frame + kFrameHeaderSize + static_cast<size_t>(i) * kSampleSize;
+    const uint64_t device_ms = readLeBytes<uint64_t>(sample);
+    uint64_t wall_us = 0;
+    if (!toWall(device_ms * 1000ULL, wall_us)) {
+      return false;
+    }
+    writeLeBytes<uint64_t>(sample, wall_us / 1000ULL);
+  }
+  return true;
+}
+
 
 }  // namespace natkit

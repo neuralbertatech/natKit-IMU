@@ -116,58 +116,6 @@ void writeLe(uint8_t *out, T value) {
   }
 }
 
-// Rewrites a canonical frame's timestamps from leaf-device time into wall clock,
-// IN PLACE.
-//
-// Patched in place rather than decoded and re-encoded: the layout is fixed and
-// pinned by static_asserts in imu_frame.hpp, and a decode/re-encode round trip
-// would be a third implementation of an encoding that already has two (see that
-// file's warning). Touching only the timestamp fields cannot disturb the sample
-// data, which is the property that matters.
-//
-// ⚠️ Units differ between the two fields and this is the easy mistake: the frame
-// header's deviceTsUs is MICROseconds, while each sample's time is MILLIseconds.
-bool rewriteTimestamps(uint8_t *frame, size_t length, const SyncState &sync) {
-  if (length < kFrameHeaderSize) {
-    return false;
-  }
-  const uint16_t samples = readLe<uint16_t>(frame + 2);
-  if (length < kFrameHeaderSize + static_cast<size_t>(samples) * kSampleSize) {
-    return false;
-  }
-
-  const auto toWall = [&](uint64_t device_us, uint64_t &wall_us) {
-    uint64_t primary_us = 0;
-    if (!syncStateToPrimary(sync, device_us, primary_us)) {
-      return false;
-    }
-    const int64_t wall =
-        static_cast<int64_t>(primary_us) + sPrimaryToWallUs;
-    if (wall <= 0) {
-      return false;
-    }
-    wall_us = static_cast<uint64_t>(wall);
-    return true;
-  };
-
-  uint64_t header_wall = 0;
-  if (!toWall(readLe<uint64_t>(frame + 16), header_wall)) {
-    return false;
-  }
-  writeLe<uint64_t>(frame + 16, header_wall);
-
-  for (uint16_t i = 0; i < samples; ++i) {
-    uint8_t *sample = frame + kFrameHeaderSize + static_cast<size_t>(i) * kSampleSize;
-    const uint64_t device_ms = readLe<uint64_t>(sample);
-    uint64_t wall_us = 0;
-    if (!toWall(device_ms * 1000ULL, wall_us)) {
-      return false;
-    }
-    writeLe<uint64_t>(sample, wall_us / 1000ULL);
-  }
-  return true;
-}
-
 // One reusable buffer. Nothing on this path allocates after startup -- the old
 // firmware's std::bad_alloc came from the frame path allocating per copy.
 uint8_t sFrame[kUplinkMaxPayload];
@@ -227,7 +175,8 @@ void onFrame(UplinkType type, uint64_t stream_id, const uint8_t *payload,
       }
 
       std::memcpy(sFrame, payload, length);
-      if (!rewriteTimestamps(sFrame, length, node->sync)) {
+      if (!rewriteFrameTimestamps(sFrame, length, node->sync,
+                                  sPrimaryToWallUs)) {
         ++node->dropped_no_clock;
         return;
       }

@@ -4,6 +4,7 @@
 
 #include "device_id.hpp"
 #include "esp_system.h"
+#include "gateway_net.hpp"
 #include "registry.hpp"
 #include "uplink.hpp"
 #include "esp_log.h"
@@ -45,6 +46,15 @@ namespace natkit {
 namespace {
 
 constexpr char kTag[] = "natkit-primary";
+
+// #373: this image runs ESP-NOW and an associated WiFi station on one radio, and
+// publishes to the broker itself. An unset bool Kconfig emits no symbol, so it is
+// resolved to a constant once rather than read as a value.
+#ifdef CONFIG_NATKIT_PRIMARY_WIFI_UPLINK
+constexpr bool kWifiUplink = true;
+#else
+constexpr bool kWifiUplink = false;
+#endif
 
 const char *accuracyName(uint8_t accuracy) {
   switch (accuracy) {
@@ -128,6 +138,16 @@ void runPrimary() {
   // against the roster rather than admitted because we had not finished loading.
   registryLoad();
 
+  // #373: associate FIRST, before esp_now_init, because the association owns the
+  // radio's channel and ESP-NOW has to follow it. Doing this the other way round
+  // gives an ESP-NOW hub pinned to a channel the AP then moves it off, which is
+  // silent -- sends succeed and nothing arrives.
+  if (kWifiUplink) {
+    if (gatewayWifiStart() != ESP_OK) {
+      ESP_LOGE(kTag, "WiFi did not start; continuing as an ESP-NOW hub only");
+    }
+  }
+
   if (uplinkStart() != ESP_OK) {
     ESP_LOGE(kTag,
              "uplink did not start -- continuing as a hub so the console still "
@@ -137,6 +157,19 @@ void runPrimary() {
   if (espNowPrimaryStart() != ESP_OK) {
     ESP_LOGE(kTag, "ESP-NOW did not start");
     idleStatusLoop("primary (no radio)");
+  }
+
+  if (kWifiUplink) {
+    // Services after ESP-NOW: SNTP and MQTT both need the association, and
+    // neither needs to exist before the radio is hearing nodes.
+    if (gatewayServicesStart() != ESP_OK) {
+      ESP_LOGE(kTag, "MQTT/SNTP did not start; nodes still land on the console");
+    }
+    ESP_LOGW(kTag,
+             "#373 WIFI UPLINK IS ON: this one chip is running ESP-NOW and an "
+             "associated WiFi station at once, and publishing straight to the "
+             "broker. No serial link and no gateway. Watch the ESP-NOW counters "
+             "against the two-board baselines -- that comparison is the point.");
   }
 
   const uint32_t interval_s =
@@ -423,6 +456,25 @@ void runPrimary() {
       fillPrimaryStatus(primary_status);
       uplinkSend(UplinkType::kPrimaryStatus, deviceId(), &primary_status,
                  sizeof(primary_status));
+    }
+
+    // #373's headline line: the one chip's two jobs, side by side. The channel
+    // is the number the whole question turns on -- if it is not the channel the
+    // leaves are on, there is no hub as far as they are concerned.
+    if (kWifiUplink && ticks % 5 == 0) {
+      const GatewayNetStats &net = gatewayNetStats();
+      ESP_LOGI(kTag,
+               "ONE-CHIP UPLINK: wifi %s (rssi %d, CHANNEL %u), mqtt %s, clock "
+               "%s | published %lu (%llu B), refused %lu | wifi drops %lu, mqtt "
+               "drops %lu",
+               net.wifi_connected ? "up" : "DOWN", net.rssi,
+               gatewayWifiChannel(), net.mqtt_connected ? "up" : "DOWN",
+               gatewayTimeValid() ? "synced" : "NOT SYNCED",
+               static_cast<unsigned long>(net.publishes_ok),
+               static_cast<unsigned long long>(net.bytes_published),
+               static_cast<unsigned long>(net.publishes_failed),
+               static_cast<unsigned long>(net.wifi_disconnects),
+               static_cast<unsigned long>(net.mqtt_disconnects));
     }
 
     // The uplink's own health on the console too, since a gateway that is not

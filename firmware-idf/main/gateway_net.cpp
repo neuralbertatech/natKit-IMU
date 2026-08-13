@@ -77,7 +77,19 @@ void sntpSyncCallback(struct timeval *tv) {
 
 }  // namespace
 
-esp_err_t gatewayNetStart() {
+uint8_t gatewayWifiChannel() {
+  if (!sStats.wifi_connected) {
+    return 0;
+  }
+  uint8_t primary = 0;
+  wifi_second_chan_t second = WIFI_SECOND_CHAN_NONE;
+  if (esp_wifi_get_channel(&primary, &second) != ESP_OK) {
+    return 0;
+  }
+  return primary;
+}
+
+esp_err_t gatewayWifiStart() {
   ESP_ERROR_CHECK(esp_netif_init());
   ESP_ERROR_CHECK(esp_event_loop_create_default());
   esp_netif_create_default_wifi_sta();
@@ -108,7 +120,10 @@ esp_err_t gatewayNetStart() {
   // needs it for a plainer reason. It is mains-adjacent, always on, and its
   // entire job is forwarding promptly.
   ESP_ERROR_CHECK(esp_wifi_set_ps(WIFI_PS_NONE));
+  return ESP_OK;
+}
 
+esp_err_t gatewayServicesStart() {
   // esp_netif_sntp, NOT a raw lwIP client. IDF 5.x defaults the lwIP
   // thread-safety assert ON, which is what tripped ESPNtpClient in the current
   // firmware; this wrapper does its work on the right task.
@@ -139,11 +154,19 @@ esp_err_t gatewayNetStart() {
   ESP_ERROR_CHECK(esp_mqtt_client_start(sMqtt));
 
   ESP_LOGI(kTag,
-           "gateway networking started: ssid '%s', broker %s, ntp %s. Not "
-           "waiting for any of them -- the serial side keeps draining so the "
-           "primary is never back-pressured by our network.",
+           "networking started: ssid '%s', broker %s, ntp %s. Not waiting for "
+           "any of them -- the intake side keeps draining so nothing upstream is "
+           "back-pressured by our network.",
            DEV_WIFI_SSID, DEV_MQTT_URI, DEV_NTP_SERVER);
   return ESP_OK;
+}
+
+esp_err_t gatewayNetStart() {
+  const esp_err_t err = gatewayWifiStart();
+  if (err != ESP_OK) {
+    return err;
+  }
+  return gatewayServicesStart();
 }
 
 bool gatewayTimeValid() {

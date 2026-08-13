@@ -188,6 +188,32 @@ config NATKIT_TIME_SYNC_PROBE_MS
         probe's measured arrival against what the leaf's reported fit predicted,
         and the difference is the sync error.
 
+config NATKIT_PRIMARY_WIFI_UPLINK
+    bool "Primary associates with WiFi and publishes to MQTT itself (#373)"
+    default n
+    help
+        A deliberately worse architecture, built to find out whether the better
+        one is necessary (TEC-NATKIT-30).
+
+        The primary keeps being the ESP-NOW hub and the timing master, and ALSO
+        associates with an access point and publishes straight to the broker.
+        No serial link, no second board, no gateway. If this works well enough,
+        the serial mux (TEC-NATKIT-25) and the gateway (TEC-NATKIT-26) are
+        complexity the rig may not need, and TEC-NATKIT-27's adopt-or-discard
+        decision changes shape.
+
+        ⚠️ THE CHANNEL IS THE CATCH. ESP-NOW requires every peer on one channel,
+        and an associated station does not choose its channel -- the AP does. So
+        with this set the primary stops pinning NATKIT_ESPNOW_CHANNEL, adds its
+        peers on channel 0 ("follow the interface"), and leaves hop channels
+        until they find it. A leaf pinned to the wrong channel is a silent
+        failure: every send succeeds locally and nothing is ever received.
+
+        ⚠️ Power save must stay off, which gatewayWifiStart does. An associated
+        station defaults to sleeping between the AP's beacons, and ESP-NOW
+        packets arriving while it sleeps are simply missed -- so a rig that looks
+        like it has a bad radio may only have a dozing one.
+
 config NATKIT_REGISTRY_SEALED
     bool "Seal the primary's node registry at boot"
     default n

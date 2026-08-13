@@ -16,6 +16,7 @@
 #include "freertos/task.h"
 #include "esp_random.h"
 #include "imu_frame.hpp"
+#include "gateway_net.hpp"
 #include "registry.hpp"
 #include "sdkconfig.h"
 #include "time_sync.hpp"
@@ -27,6 +28,27 @@ namespace {
 constexpr char kTag[] = "natkit-link";
 
 constexpr uint8_t kBroadcast[6] = {0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF};
+
+// True when this image drives ESP-NOW on a radio that is ALSO associated with an
+// access point (#373). An unset bool Kconfig emits no symbol, so it is resolved
+// once here rather than read as a value.
+#ifdef CONFIG_NATKIT_PRIMARY_WIFI_UPLINK
+constexpr bool kWifiUplink = true;
+#else
+constexpr bool kWifiUplink = false;
+#endif
+
+// The channel an ESP-NOW peer is added on. ALWAYS 0, which means "whatever
+// channel this interface is currently on".
+//
+// ⚠️ Never the configured channel, even on a node that pins its own. Pinning a
+// peer to a channel the interface is not on is a SILENT failure: every send
+// returns success locally and nothing is ever received. Two things now move the
+// interface out from under a hard-coded value -- a primary that associates takes
+// the AP's channel (#373), and a searching leaf hops -- so the only safe answer
+// is to follow rather than to assert.
+uint8_t peerChannel() { return 0; }
+
 
 // The largest payload we ever queue is a full canonical frame; the envelope rides
 // on top. Sized from the frame constants rather than a round number so a change to
@@ -82,7 +104,7 @@ void learnPrimary(const uint8_t *mac) {
 
   esp_now_peer_info_t peer{};
   std::memcpy(peer.peer_addr, mac, 6);
-  peer.channel = CONFIG_NATKIT_ESPNOW_CHANNEL;
+  peer.channel = peerChannel();
   peer.ifidx = WIFI_IF_STA;
   peer.encrypt = false;
 
@@ -303,7 +325,17 @@ void txTask(void *) {
 // reboot and forget its registry while the leaf is still happily unicasting into a
 // void -- a leaf that only announces once is undiscoverable for the rest of its
 // uptime.
+// How long a leaf listens on one channel before trying the next.
+//
+// Longer than the primary's beacon interval on purpose: dwelling for less than a
+// full beacon period can step past a primary that was about to speak, which
+// presents as "the hub is not there" and is really "we were not listening when
+// it was".
+constexpr uint32_t kChannelDwellMs = 1300;
+constexpr uint8_t kMaxChannel = 13;
+
 void announceTask(void *) {
+  uint8_t channel = CONFIG_NATKIT_ESPNOW_CHANNEL;
   while (true) {
     Announce announce{};
     announce.device_id = deviceId();
@@ -314,7 +346,31 @@ void announceTask(void *) {
     espNowLinkSend(PacketType::kAnnounce, &announce, sizeof(announce));
     ++sStats.announces;
 
-    vTaskDelay(pdMS_TO_TICKS(sPrimaryKnown ? 10000 : 1000));
+    if (sPrimaryKnown) {
+      vTaskDelay(pdMS_TO_TICKS(10000));
+      continue;
+    }
+
+    // --- searching: walk the channels ---------------------------------------
+    //
+    // A leaf cannot assume the configured channel any more. Once the primary
+    // associates with an access point (#373) its channel is the AP's, not ours,
+    // and a leaf pinned to channel 1 while the hub sits on 6 hears nothing at
+    // all -- every send succeeding locally and nothing ever arriving, which
+    // reads exactly like a dead hub.
+    //
+    // So while no primary is known, hop. This makes a leaf find its hub whatever
+    // the site's WiFi is doing, which is the difference between a rig that works
+    // in one room and a rig that works.
+    channel = static_cast<uint8_t>(channel % kMaxChannel + 1);
+    const esp_err_t err = esp_wifi_set_channel(channel, WIFI_SECOND_CHAN_NONE);
+    if (err != ESP_OK) {
+      ESP_LOGW(kTag, "could not move to channel %u: %s", channel,
+               esp_err_to_name(err));
+    }
+    sStats.scan_channel = channel;
+    ++sStats.channel_hops;
+    vTaskDelay(pdMS_TO_TICKS(kChannelDwellMs));
   }
 }
 
@@ -347,6 +403,23 @@ void syncTask(void *) {
 }
 
 esp_err_t startRadio() {
+  if (kWifiUplink) {
+    // The association is brought up FIRST, by gateway_net, because it owns
+    // esp_netif and esp_wifi_init. ESP-NOW is then layered on the same radio and
+    // must not touch the channel. This is the whole experiment: one chip doing
+    // both, instead of the two-board split the epic assumes.
+    ESP_ERROR_CHECK(esp_now_init());
+    uint8_t channel = 0;
+    wifi_second_chan_t second = WIFI_SECOND_CHAN_NONE;
+    esp_wifi_get_channel(&channel, &second);
+    ESP_LOGW(kTag,
+             "ESP-NOW is sharing an ASSOCIATED radio (#373). Channel is the "
+             "AP's (%u) and is NOT ours to set; peers are added on channel 0 so "
+             "they follow it. Every leaf must reach this channel or it is "
+             "shouting into a different one.",
+             channel);
+    return ESP_OK;
+  }
   // No esp_netif_init() and no netif at all: ESP-NOW does not go through lwIP, so
   // a leaf never brings up a network interface. The event loop IS required --
   // esp_wifi_init posts to it.
@@ -380,7 +453,7 @@ esp_err_t startRadio() {
 esp_err_t addBroadcastPeer() {
   esp_now_peer_info_t peer{};
   std::memcpy(peer.peer_addr, kBroadcast, 6);
-  peer.channel = CONFIG_NATKIT_ESPNOW_CHANNEL;
+  peer.channel = peerChannel();
   peer.ifidx = WIFI_IF_STA;
   peer.encrypt = false;
   return esp_now_add_peer(&peer);
@@ -797,7 +870,26 @@ void primaryRecvCallback(const esp_now_recv_info_t *info, const uint8_t *data,
       // and deliberately does not: the fit travels separately in the node-status
       // frame, so raw device time survives to the gateway and the correction
       // stays undoable. Same principle as the leaf not rewriting its own.
-      uplinkSend(UplinkType::kData, node->device_id, payload, payload_size);
+      if (kWifiUplink) {
+        // #373: this chip IS the last hop, so the shift is applied here. The
+        // primary-to-wall half is a LOCAL subtraction on one clock rather than
+        // the gateway's cross-serial estimate, which makes it strictly better
+        // than the two-board path -- worth remembering when comparing them.
+        static uint8_t shifted[kMaxPayload];
+        if (node->sync_seen && payload_size <= sizeof(shifted) &&
+            gatewayTimeValid()) {
+          std::memcpy(shifted, payload, payload_size);
+          const int64_t primary_to_wall =
+              static_cast<int64_t>(gatewayWallClockUs()) -
+              static_cast<int64_t>(arrival_us);
+          if (rewriteFrameTimestamps(shifted, payload_size, node->last_sync,
+                                     primary_to_wall)) {
+            uplinkSend(UplinkType::kData, node->device_id, shifted, payload_size);
+          }
+        }
+      } else {
+        uplinkSend(UplinkType::kData, node->device_id, payload, payload_size);
+      }
 
       if (node->seq_seen) {
         // The expected case is spelled out FIRST and does nothing, rather than
