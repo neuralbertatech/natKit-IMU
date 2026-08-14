@@ -284,7 +284,24 @@ void KafkaTopic::writeStatusRecord(const ConnectionConfig& connectionConfig, Pub
 
 bool KafkaTopic::writeDataRecord(const ConnectionConfig& connectionConfig, const ImuData& imuDatum, PubSubClient& mqttClient) {
 
-        nat::core::NatImuDataSchema data{imuDatum.timestamp, imuDatum.accuracies, imuDatum.has_data, imuDatum.data, 10};
+        // ⚠️ CLAMPED TO WHAT THE LINKED libnatkit-core ACTUALLY ACCEPTS, and that
+        // is not paranoia -- this firmware does NOT build against the sibling
+        // submodule. platformio.ini pins libnatkit-core to a GitHub commit, so
+        // until that pin is bumped past frame version 2 the linked schema still
+        // holds ten floats while ImuData holds thirteen.
+        //
+        // Passing 13 to a ten-float schema trips its assert(size <= ...), which on
+        // a release ESP32 build is compiled out and on any other build aborts at
+        // runtime. Clamping makes this source correct against BOTH: with the old
+        // core it copies ten and emits version 1 frames with no magnetometer,
+        // with the new one it copies thirteen and emits version 2.
+        constexpr int kImuDataFloats = static_cast<int>(sizeof(imuDatum.data) / sizeof(imuDatum.data[0]));
+        const int floatsToCopy =
+            kImuDataFloats < static_cast<int>(nat::core::NatImuDataSchema::NatImuDataSchemaDataArraySize)
+                ? kImuDataFloats
+                : static_cast<int>(nat::core::NatImuDataSchema::NatImuDataSchemaDataArraySize);
+        nat::core::NatImuDataSchema data{imuDatum.timestamp, imuDatum.accuracies, imuDatum.has_data, imuDatum.data,
+                                         floatsToCopy};
         imuDataList[currentImuDataIndex++] = data;
         if (currentImuDataIndex == IMU_SAMPLES_PER_FRAME) {
             DEBUG_SERIAL.println("Bulk Message Is Ready to Send");

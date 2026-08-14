@@ -11,8 +11,13 @@ namespace {
 constexpr uint8_t kHasAccel = 0b100;
 constexpr uint8_t kHasGyro = 0b010;
 constexpr uint8_t kHasRotation = 0b001;
+// Bit 3, unused before frame version 2. libnatkit-core masks this off when it
+// decodes a v1 frame, so an old recording reads as "no magnetometer" rather than
+// as a reading of zero.
+constexpr uint8_t kHasMagnetometer = 0b1000;
 
-// Accuracies are two bits per sensor: accel << 4, gyro << 2, rotation << 0.
+// Accuracies are two bits per sensor: mag << 6, accel << 4, gyro << 2,
+// rotation << 0. Bits 7-6 were the unused pair before version 2.
 constexpr uint8_t kAccuracyMask = 0x03;
 
 // Little-endian writes, done byte by byte rather than by memcpy of a struct.
@@ -45,6 +50,11 @@ size_t writeFloat(uint8_t *out, float value) {
 bool sampleFromReadings(const SensorSet &readings, ImuSample &sample) {
   sample = ImuSample{};
 
+  // ⚠️ THE MAGNETOMETER IS NOT IN THIS TEST, deliberately. A sample carrying
+  // nothing but a magnetic field reading is not an IMU sample, and letting one
+  // through would put frames on the wire during startup -- before the hub has
+  // delivered its first accel or gyro report -- whose timestamps come from the
+  // magnetometer alone. It rides along with the motion sensors instead.
   if (!readings.accelerometer.has_data && !readings.gyroscope.has_data &&
       !readings.rotation.has_data) {
     return false;
@@ -97,6 +107,20 @@ bool sampleFromReadings(const SensorSet &readings, ImuSample &sample) {
     if (readings.rotation.last_us > newest_us) {
       newest_us = readings.rotation.last_us;
     }
+  }
+
+  if (readings.magnetometer.has_data) {
+    sample.values[10] = readings.magnetometer.x;
+    sample.values[11] = readings.magnetometer.y;
+    sample.values[12] = readings.magnetometer.z;
+    sample.accuracies |=
+        static_cast<uint8_t>((readings.magnetometer.accuracy & kAccuracyMask) << 6);
+    sample.has_data |= kHasMagnetometer;
+    // ⚠️ NOT folded into newest_us. The magnetometer is the slowest report at
+    // ~91 Hz, so letting it set the sample's timestamp would make the time axis
+    // lag whenever it happened to be the most recent arrival -- and the
+    // timestamp is what the whole clock-sync path is built on. It contributes
+    // its value, not its clock.
   }
 
   sample.time_ms = newest_us / 1000;

@@ -4,6 +4,7 @@
 #include <cinttypes>
 #include <cstring>
 
+#include "imu_frame.hpp"
 #include "device_id.hpp"
 #include "esp_event.h"
 #include "esp_log.h"
@@ -33,9 +34,12 @@ constexpr char kTag[] = "natkit-espnow";
 constexpr uint8_t kBroadcast[6] = {0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF};
 
 // The real frame this epic has to carry: NatImuBulkDataSchema Binary is
-// 24 + 50 * sampleCount, and the running firmware publishes 10 samples, so 524
-// bytes is not a guess -- it is what the node puts on the wire today.
-constexpr size_t kRealFrameBytes = 524;
+// 24 + sampleSize * sampleCount, and the firmware publishes 10 samples, so this
+// is not a guess -- it is what the node puts on the wire today.
+// ⚠️ DERIVED, not a literal. This was 524 written out by hand, which is the
+// version 1 size; version 2 added the magnetometer and made it 644. A probe that
+// measures the wrong packet size is a probe that answers a question nobody asked.
+constexpr size_t kRealFrameBytes = natkit::kFrameHeaderSize + 10 * natkit::kSampleSize;
 
 // Atomics rather than volatile: these are written from the WiFi task's callbacks
 // and read from the probe task, which is a genuine cross-task handoff. (volatile

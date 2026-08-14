@@ -236,13 +236,15 @@ class ImuReader {
     static constexpr uint64_t SENSOR_BUFFER_MAX_DELAY_US = DELAY_BETWEEN_SAMPLES * 4;
     SensorBuffer<Bno08xEvent::ThreeDimensional> accelerometerBuffer{SENSOR_BUFFER_EXPECTED_DELAY_US, SENSOR_BUFFER_MAX_DELAY_US};
     SensorBuffer<Bno08xEvent::ThreeDimensional> gyroscopeBuffer{SENSOR_BUFFER_EXPECTED_DELAY_US, SENSOR_BUFFER_MAX_DELAY_US};
-    // SensorBuffer<Bno08xEvent::ThreeDimensional> magnetometerBuffer{SENSOR_BUFFER_EXPECTED_DELAY_US, SENSOR_BUFFER_MAX_DELAY_US};
+    SensorBuffer<Bno08xEvent::ThreeDimensional> magnetometerBuffer{SENSOR_BUFFER_EXPECTED_DELAY_US, SENSOR_BUFFER_MAX_DELAY_US};
     SensorBuffer<Bno08xEvent::FourDimensional> rotationBuffer{SENSOR_BUFFER_EXPECTED_DELAY_US, SENSOR_BUFFER_MAX_DELAY_US};
     SensorDataPoint<Bno08xEvent::ThreeDimensional> latestAccelerometerSample{};
     SensorDataPoint<Bno08xEvent::ThreeDimensional> latestGyroscopeSample{};
+    SensorDataPoint<Bno08xEvent::ThreeDimensional> latestMagnetometerSample{};
     SensorDataPoint<Bno08xEvent::FourDimensional> latestRotationSample{};
     bool hasLatestAccelerometerSample = false;
     bool hasLatestGyroscopeSample = false;
+    bool hasLatestMagnetometerSample = false;
     bool hasLatestRotationSample = false;
     Adafruit_NeoPixel statusPixel{STATUS_NEOPIXEL_NUM_PIXELS, STATUS_NEOPIXEL_PIN, NEO_GRB + NEO_KHZ800};
     Adafruit_NeoPixel sourceIndicatorPixel{ONBOARD_NEOPIXEL_NUM_PIXELS, ONBOARD_NEOPIXEL_PIN, NEO_GRB + NEO_KHZ800};
@@ -943,7 +945,17 @@ public:
           }
 
           case Bno08xEvent::EventType::MagneticFieldCalibrated: {
-
+            // ⚠️ THIS CASE USED TO BE EMPTY. The magnetometer report was enabled
+            // and its event delivered here, and then dropped on the floor -- which
+            // is why no recording has ever contained a magnetic field, despite the
+            // sensor producing one the whole time. Frame version 2 has somewhere
+            // to put it.
+            SensorDataPoint<Bno08xEvent::ThreeDimensional> data_point{};
+            currentTimestamp = getTimeNowAsUs();
+            data_point.timestamp = currentTimestamp;
+            data_point.calibration = event.accuracy;
+            data_point.dataMaybe = event.data.three_dimensional;
+            magnetometerBuffer.push(data_point);
             break;
           }
 
@@ -1020,6 +1032,8 @@ public:
         constexpr uint8_t accelerometer_bit = 0b100;
         constexpr uint8_t gyroscopt_bit = 0b010;
         constexpr uint8_t rotation_bit = 0b001;
+        // Bit 3, unused before frame version 2.
+        constexpr uint8_t magnetometer_bit = 0b1000;
         bool hasAnyFreshSample = false;
 
         while (true) {
@@ -1040,6 +1054,20 @@ public:
             latestGyroscopeSample = *gyroscope_sample_maybe;
             hasLatestGyroscopeSample = gyroscope_sample_maybe->dataMaybe.has_value();
             hasAnyFreshSample = true;
+        }
+
+        while (true) {
+            auto magnetometer_sample_maybe = magnetometerBuffer.tryGetNext();
+            if (magnetometer_sample_maybe == nullptr) {
+                break;
+            }
+            latestMagnetometerSample = *magnetometer_sample_maybe;
+            hasLatestMagnetometerSample = magnetometer_sample_maybe->dataMaybe.has_value();
+            // ⚠️ DELIBERATELY DOES NOT SET hasAnyFreshSample. That flag is what
+            // decides a sample is worth emitting, and a frame carrying nothing but
+            // a magnetic field is not an IMU sample -- it would also take its
+            // timestamp from a report that contributes none. The magnetometer
+            // rides along with the motion sensors, same rule as the ESP-IDF fork.
         }
 
         while (true) {
@@ -1086,6 +1114,20 @@ public:
             if (latestGyroscopeSample.timestamp > max_timestamp) {
                 max_timestamp = latestGyroscopeSample.timestamp;
             }
+        }
+        if (hasLatestMagnetometerSample) {
+            // Bits 7-6 of accuracies and bit 3 of has_data, both unused before
+            // frame version 2.
+            data->accuracies |= packAccuracy(latestMagnetometerSample.calibration) << 6;
+            data->has_data |= magnetometer_bit;
+            data->data[10] = latestMagnetometerSample.dataMaybe.value().x;
+            data->data[11] = latestMagnetometerSample.dataMaybe.value().y;
+            data->data[12] = latestMagnetometerSample.dataMaybe.value().z;
+            // ⚠️ NOT folded into max_timestamp. The magnetometer is the slowest
+            // report, so letting it set the sample's time would make the time axis
+            // lag whenever it was the most recent arrival. It contributes its
+            // value, not its clock -- same rule as the ESP-IDF fork's
+            // imu_frame.cpp, which says so at more length.
         }
         if (hasLatestRotationSample) {
             data->accuracies |= packAccuracy(latestRotationSample.calibration);
