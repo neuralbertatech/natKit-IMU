@@ -9,41 +9,53 @@ the same topic names, so knowing which one is on a board is not optional.
 
 | | [`embeded/`](embeded) | [`firmware-idf/`](firmware-idf) |
 |---|---|---|
-| What | the firmware in use — every node is a full WiFi/MQTT/NTP client | a **fork** (EPIC TEC-NATKIT-20): primary/secondary nodes over ESP-NOW, serial uplink to one networked gateway |
+| What | the ORIGINAL firmware, now a rollback path — every node a full WiFi/MQTT/NTP client | **what the rig actually runs** (EPIC TEC-NATKIT-20): leaf/primary/gateway roles, ESP-NOW between nodes, one networked hub |
 | Framework | Arduino via pioarduino (arduino-esp32 3.3.11 / ESP-IDF 5.5.5) | native ESP-IDF (`idf.py`), v5.5.3 |
 | Build | `cd embeded && pio run -e release` | `cd firmware-idf && ./build-role.sh leaf esp32` |
-| Status | **known good on hardware** | scaffold: builds for esp32 + esp32c3, **boots on the real node**, roles stubbed |
+| Status | buildable, not deployed on anything | **in use on every board**, streaming 100 samples/s per leaf |
 
-The fork is **additive and reversible**. No slice of the epic edits `embeded/`,
-which stays buildable and flashable throughout, and the epic ends in an explicit
-adopt-or-discard decision (TEC-NATKIT-27). If the fork is discarded, deleting
-`firmware-idf/` is the whole cleanup.
+The fork is still **additive and reversible** — `embeded/` stays buildable and
+flashable, and the epic ends in an explicit adopt-or-discard decision
+(TEC-NATKIT-27). But "additive" no longer means "unused": the ESP-IDF tree is what
+every board on the bench is running, and has been since 2026-08-12.
+
+⚠️ **THE TWO FIRMWARES ARE NO LONGER WIRE-COMPATIBLE BY DEFAULT.** `firmware-idf/`
+emits IMU frame **version 2** (13 floats, 62-byte samples, 644-byte frames, with
+the magnetometer). `embeded/` emits **version 1** (10 floats, 50-byte samples, 524
+bytes) and will keep doing so until its `platformio.ini` libnatkit-core pin is
+bumped past the version-2 commit — it pins a GitHub commit rather than the sibling
+submodule, so editing `libnatkit/lib/libnatkit-core` does nothing for it. Decoders
+read both, so a rollback still produces valid recordings; they simply have no
+magnetic field in them.
 
 ### Which firmware is on which board
 
 Last recorded state — **update this table when you flash something**, and note
 that it is a record rather than a measurement (nothing is read back off a board):
 
-| Board | Firmware | Recorded |
-|---|---|---|
-| natKit-IMU node — ESP32-PICO-V3-02 rev v3.0, MAC `0c:8b:95:96:b9:f4`, BNO08x | **`embeded/`** @ `trunk`, rebuilt and re-uploaded. Verified streaming. | 2026-08-10 |
+| Board | Port | Firmware | Recorded |
+|---|---|---|---|
+| ESP32-PICO-V3-02, MAC `0c:8b:95:96:b9:f4`, BNO08x | `/dev/ttyACM0` | `firmware-idf/` **leaf** @ `zach/383-magnetometer-on-the-wire`. ⚠️ Delivering 0-22 samples/s — its transmits fail while it hears the primary at −40 dBm (TEC-NATKIT-37). | 2026-08-13 |
+| ESP32-PICO-V3-02, MAC `0c:8b:95:96:bc:4c`, BNO08x | `/dev/ttyACM1` | `firmware-idf/` **leaf** @ same. Streaming 100 samples/s. | 2026-08-13 |
+| ESP32-S3 (ESP Thread Border Router + W5500 Ethernet daughterboard), MAC `b8:f8:62:62:f7:3c` | `/dev/ttyACM2` | `firmware-idf/` **primary** @ same. ⚠️ Opening its USB console RESETS it. | 2026-08-13 |
 
-That board briefly ran `firmware-idf/`'s leaf image on 2026-08-10 to prove the
-fork boots, and was restored with the rollback command below. A pre-flash 4 MB
-dump of the working firmware is kept at
-`~/natkit-verification/598a800/embeded-preflash-backup.bin` (sha256 in
+Both leaves are currently pinned to 8.5 dBm with the transmit-power sweep OFF.
+
+A pre-flash 4 MB dump of the working `embeded/` firmware from board `…b9:f4` is
+kept at `~/natkit-verification/598a800/embeded-preflash-backup.bin` (sha256 in
 `backup.sha256`) if a byte-exact restore is ever wanted:
 `esptool write_flash 0 embeded-preflash-backup.bin`.
 
-### Putting the current firmware back
+### Rolling back to the Arduino firmware
 
-One command, from a checkout of this repo:
+⚠️ This is a ROLLBACK, not a restore of the status quo — the ESP-IDF firmware is
+what is deployed. One command, from a checkout of this repo:
 
 ```bash
 cd embeded && pio run -e release -t upload
 ```
 
-That is the rollback. It rebuilds and flashes the Arduino firmware from whatever
+It rebuilds and flashes the Arduino firmware from whatever
 commit is checked out, so `git -C . checkout trunk` first if the working tree has
 moved on; add `--upload-port /dev/ttyUSB0` if more than one board is attached.
 Nothing needs to be uninstalled or undone on the ESP-IDF side, because the two
