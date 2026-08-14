@@ -109,6 +109,10 @@ void fillNodeStatus(const NodeState &node, UplinkNodeStatus &out) {
   out.last_seen_us = node.last_seen_us;
   out.sync = node.last_sync;
   out.sync_valid = node.sync_seen ? 1 : 0;
+  out.rssi_last = node.rssi_last;
+  out.rssi_best = node.rssi_best;
+  out.rssi_worst = node.rssi_worst;
+  out.rssi_seen = node.rssi_seen ? 1 : 0;
 }
 
 void fillPrimaryStatus(UplinkPrimaryStatus &out) {

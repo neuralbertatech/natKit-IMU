@@ -83,7 +83,19 @@ struct UplinkNodeStatus {
   uint64_t last_seen_us;      // in the PRIMARY's clock
   SyncState sync;             // the leaf's fit; apply with syncStateToPrimary()
   uint8_t sync_valid;
-  uint8_t reserved1[7];
+  // ⚠️ HOW STRONGLY THE HUB HEARS THIS NODE, which it has always tracked and
+  // never published. Without it the only per-node signal leaving the rig is a
+  // frame count, and a node delivering nothing at -30 dBm and one delivering
+  // nothing at -85 dBm need completely different fixes. Diagnosing the leaves
+  // that keep swapping which one works (TEC-NATKIT-37) meant reading it off a
+  // console that resets the board it is printed on.
+  //
+  // Placed in the reserved bytes so the struct's size does not move.
+  int8_t rssi_last;
+  int8_t rssi_best;
+  int8_t rssi_worst;
+  uint8_t rssi_seen;
+  uint8_t reserved1[3];
 };
 
 struct UplinkPrimaryStatus {
