@@ -58,6 +58,10 @@ constexpr char kTag[] = "natkit-gateway";
 // `natKit/receiving/` is the opposite one and is not ours to publish on.
 constexpr char kTopicTemplate[] =
     "natKit/sending/Data-%" PRIu64 "-Binary-NatImuBulkDataSchema";
+// Matches what the primary uses when it publishes directly (uplink.cpp) and what
+// the backend already correlates against.
+constexpr char kCommandLogTopicTemplate[] =
+    "natKit/sending/Log-%" PRIu64 "-Json-NatLogV1";
 
 // Per-node state: the leaf's clock fit, as forwarded by the primary. Without it
 // a data frame's timestamps cannot be turned into anything publishable.
@@ -150,6 +154,20 @@ void onFrame(UplinkType type, uint64_t stream_id, const uint8_t *payload,
       }
       node->sync = status.sync;
       node->sync_valid = status.sync_valid != 0;
+      return;
+    }
+    case UplinkType::kCommandLog: {
+      // A command's answer, already JSON, already addressed. Republished verbatim
+      // and NOT time-corrected: a log record is stamped by the backend that asked
+      // for it and correlated by command_id, so it needs no clock of ours -- and
+      // it must go out even when a node has no valid sync, because "why is this
+      // node not producing data" is exactly what someone would be asking it.
+      if (length > sizeof(sFrame)) {
+        return;
+      }
+      std::memcpy(sFrame, payload, length);
+      std::snprintf(sTopic, sizeof(sTopic), kCommandLogTopicTemplate, stream_id);
+      gatewayPublish(sTopic, sFrame, length);
       return;
     }
     case UplinkType::kData: {

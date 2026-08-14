@@ -15,6 +15,8 @@ idf_component_register(
         "channel_survey.cpp"
         "time_sync.cpp"
         "leaf.cpp"
+        "command_relay.cpp"
+        "commands.cpp"
         "primary.cpp"
         "gateway.cpp"
     INCLUDE_DIRS
@@ -32,6 +34,7 @@ idf_component_register(
         esp_timer
         nvs_flash
         mqtt
+        json
         lwip
         sh2
 )

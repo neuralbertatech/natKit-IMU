@@ -61,6 +61,9 @@ enum class UplinkType : uint8_t {
   // Per-node counters and that node's clock fit. The gateway needs this to turn
   // a kData frame's device-relative timestamps into anything publishable.
   kNodeStatus = 2,
+  // A command's answer, as a JSON document already built by the primary. Goes to
+  // Log-<id>-Json-NatLogV1, the topic the backend already correlates against.
+  kCommandLog = 4,
   // The primary's own health, including what it dropped and the rig's
   // time-coherence metric (#315).
   kPrimaryStatus = 3,
@@ -108,6 +111,24 @@ struct UplinkPrimaryStatus {
   uint8_t coherence_measured;
   uint8_t registry_sealed;
   uint8_t reserved[5];
+  // Command relay (TEC-NATKIT-39). ⚠️ These are here rather than on the console
+  // because THE PRIMARY'S CONSOLE CANNOT BE READ: the ESP32-S3 resets when its
+  // native USB console is opened AND re-enumerates, so the reading process loses
+  // the handle and gets nothing at all. Every command-path fault has to be
+  // diagnosed from this struct.
+  uint32_t commands_received;
+  uint32_t commands_relayed;
+  uint32_t commands_malformed;
+  uint32_t commands_unknown_device;
+  uint32_t commands_send_failed;
+  uint32_t command_subscriptions;
+  // ⚠️ THE ANSWER'S OWN COUNTERS, and they exist because unknown_packets could
+  // not tell "the reply arrived and was handled" from "the reply never arrived":
+  // both leave it at zero. Two counters that CAN be different are worth more than
+  // one that is always right for the wrong reason.
+  uint32_t command_answers_received;   // kCommandLog packets from a leaf
+  uint32_t command_answers_published;  // ... that reached the broker
+  uint32_t command_answers_duplicate;  // ... suppressed as an exact repeat
 };
 
 struct UplinkStats {

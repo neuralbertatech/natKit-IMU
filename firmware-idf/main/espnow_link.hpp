@@ -51,6 +51,41 @@ enum class PacketType : uint8_t {
   kTimeProbeFollowUp = 9,  // leaf -> primary: payload is a TimeProbeFollowUp
   kSyncMarker = 10,        // primary -> broadcast: payload is a SyncMarker
   kMarkerReport = 11,      // leaf -> primary: payload is a MarkerReport
+  kCommand = 12,           // primary -> leaf (unicast): payload is a CommandFrame
+  kCommandLog = 13,        // leaf -> primary: payload is a CommandLogFrame
+};
+
+// --- server -> device commands ---------------------------------------------
+//
+// ⚠️ THE LEAF NEVER SEES JSON. The command arrives at the primary as a JSON
+// document on MQTT, and the primary parses it and relays THIS, a fixed-size POD.
+// That is deliberate: the whole point of this architecture is that a leaf is a
+// sensor and a radio, and linking a JSON parser into it to read a field it could
+// have been handed is exactly the weight the fork exists to avoid. It also means
+// a malformed command is rejected where there is a console and a broker to
+// complain to, rather than on a node nobody can see.
+//
+// Sizes match the old firmware's CommandChannel so the two ends stay comparable;
+// the backend already refuses a command name over 32 characters.
+
+constexpr size_t kCommandIdMax = 40;
+constexpr size_t kCommandNameMax = 33;
+constexpr size_t kCommandArgsMax = 128;
+constexpr size_t kCommandMessageMax = 160;
+
+struct CommandFrame {
+  uint64_t device_id;                 // whom it is for; a leaf ignores others
+  char command_id[kCommandIdMax];     // correlates the answer, NUL-terminated
+  char command[kCommandNameMax];
+  char args[kCommandArgsMax];         // raw JSON of the "args" object, or ""
+};
+
+struct CommandLogFrame {
+  uint64_t device_id;
+  char command_id[kCommandIdMax];
+  uint8_t ok;     // 0 = the command failed; only meaningful when final != 0
+  uint8_t final;  // 1 = the last record for this command
+  char message[kCommandMessageMax];
 };
 
 struct EspNowEnvelope {
@@ -320,6 +355,20 @@ esp_err_t espNowLinkStart();
 // The sample loop must not be able to stall on the radio -- that is the
 // requirement this signature exists to satisfy.
 bool espNowLinkSend(PacketType type, const void *payload, size_t payload_size);
+
+// Primary only: relays a command to one registered node, by device id.
+//
+// Returns false if that node is not in the registry -- which is the honest answer
+// to "command a device that has never been heard from", and is reported back to
+// the caller rather than dropped, because a command that silently goes nowhere is
+// the failure mode this whole channel exists to avoid.
+bool espNowPrimarySendCommand(const CommandFrame &command);
+
+// Answers relayed back up, counted separately from anything else. See
+// UplinkPrimaryStatus for why these are two counters and not one.
+uint32_t espNowPrimaryCommandAnswersReceived();
+uint32_t espNowPrimaryCommandAnswersPublished();
+uint32_t espNowPrimaryCommandAnswersDuplicate();
 
 const LinkStats &espNowLinkStats();
 

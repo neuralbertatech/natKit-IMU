@@ -21,6 +21,29 @@ constexpr char kTag[] = "natkit-gwnet";
 GatewayNetStats sStats{};
 esp_mqtt_client_handle_t sMqtt = nullptr;
 
+// Subscriptions are REMEMBERED, not fire-and-forget. esp-mqtt reconnects by
+// itself and does not restore subscriptions, so one made at startup survives
+// exactly until the first disconnect -- after which commands would vanish with
+// nothing logging that they had.
+constexpr size_t kMaxSubscriptions = 8;
+constexpr size_t kMaxTopicLength = 96;
+char sSubscriptions[kMaxSubscriptions][kMaxTopicLength] = {};
+size_t sSubscriptionCount = 0;
+GatewayMessageHandler sMessageHandler = nullptr;
+
+void resubscribeAll() {
+  for (size_t i = 0; i < sSubscriptionCount; ++i) {
+    const int id = esp_mqtt_client_subscribe(sMqtt, sSubscriptions[i], 0);
+    if (id < 0) {
+      ESP_LOGW(kTag, "could not subscribe to %s", sSubscriptions[i]);
+    }
+  }
+  if (sSubscriptionCount > 0) {
+    ESP_LOGI(kTag, "(re)subscribed to %u topic(s)",
+             static_cast<unsigned>(sSubscriptionCount));
+  }
+}
+
 void wifiEventHandler(void *, esp_event_base_t base, int32_t id, void *data) {
   if (base == WIFI_EVENT && id == WIFI_EVENT_STA_START) {
     esp_wifi_connect();
@@ -48,6 +71,14 @@ void mqttEventHandler(void *, esp_event_base_t, int32_t id, void *data) {
     case MQTT_EVENT_CONNECTED:
       sStats.mqtt_connected = true;
       ESP_LOGI(kTag, "mqtt connected to %s", DEV_MQTT_URI);
+      resubscribeAll();
+      break;
+    case MQTT_EVENT_DATA:
+      if (sMessageHandler != nullptr && event != nullptr) {
+        ++sStats.mqtt_messages_received;
+        sMessageHandler(event->topic, static_cast<size_t>(event->topic_len),
+                        event->data, static_cast<size_t>(event->data_len));
+      }
       break;
     case MQTT_EVENT_DISCONNECTED:
       // Tracked from the EVENT, never inferred from a publish return code. A
@@ -212,6 +243,38 @@ bool gatewayPublish(const char *topic, const void *payload, size_t length) {
   }
   ++sStats.publishes_ok;
   sStats.bytes_published += length;
+  return true;
+}
+
+void gatewaySetMessageHandler(const GatewayMessageHandler handler) {
+  sMessageHandler = handler;
+}
+
+bool gatewaySubscribe(const char *topic) {
+  if (topic == nullptr || sSubscriptionCount >= kMaxSubscriptions) {
+    ESP_LOGE(kTag, "no room to subscribe to %s (%u of %u used)",
+             topic == nullptr ? "(null)" : topic,
+             static_cast<unsigned>(sSubscriptionCount),
+             static_cast<unsigned>(kMaxSubscriptions));
+    return false;
+  }
+  if (std::strlen(topic) >= kMaxTopicLength) {
+    ESP_LOGE(kTag, "topic too long to remember: %s", topic);
+    return false;
+  }
+  // Already subscribed is success, not a duplicate: nodes re-announce, and this
+  // is called per node.
+  for (size_t i = 0; i < sSubscriptionCount; ++i) {
+    if (std::strcmp(sSubscriptions[i], topic) == 0) {
+      return true;
+    }
+  }
+  std::strncpy(sSubscriptions[sSubscriptionCount], topic, kMaxTopicLength - 1);
+  ++sSubscriptionCount;
+  if (sMqtt != nullptr && sStats.mqtt_connected) {
+    return esp_mqtt_client_subscribe(sMqtt, topic, 0) >= 0;
+  }
+  // Not connected yet is fine -- MQTT_EVENT_CONNECTED replays the whole list.
   return true;
 }
 

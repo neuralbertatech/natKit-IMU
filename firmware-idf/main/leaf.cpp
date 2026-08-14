@@ -5,6 +5,7 @@
 #include "esp_log.h"
 #include "esp_system.h"
 #include "esp_timer.h"
+#include "commands.hpp"
 #include "espnow_link.hpp"
 #include "freertos/FreeRTOS.h"
 #include "freertos/task.h"
@@ -224,6 +225,10 @@ void runLeaf() {
     if (have_imu) {
       imu.service();
       imu.enableDynamicCalibrationOnce();
+      // Commands execute HERE rather than on the radio callback that received
+      // them: this loop already owns the sensor, and doing sensor I/O from inside
+      // the WiFi task's callback costs received packets.
+      commandsService();
     }
 
     const uint64_t now = static_cast<uint64_t>(esp_timer_get_time());

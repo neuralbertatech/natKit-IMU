@@ -7,6 +7,7 @@
 #include "esp_system.h"
 #include "ethernet_net.hpp"
 #include "gateway_net.hpp"
+#include "command_relay.hpp"
 #include "registry.hpp"
 #include "uplink.hpp"
 #include "esp_log.h"
@@ -112,6 +113,16 @@ void fillNodeStatus(const NodeState &node, UplinkNodeStatus &out) {
 
 void fillPrimaryStatus(UplinkPrimaryStatus &out) {
   out = UplinkPrimaryStatus{};
+  const CommandRelayStats &commands = commandRelayStats();
+  out.commands_received = commands.received;
+  out.commands_relayed = commands.relayed;
+  out.commands_malformed = commands.malformed;
+  out.commands_unknown_device = commands.unknown_device;
+  out.commands_send_failed = commands.send_failed;
+  out.command_subscriptions = commands.subscriptions;
+  out.command_answers_received = espNowPrimaryCommandAnswersReceived();
+  out.command_answers_published = espNowPrimaryCommandAnswersPublished();
+  out.command_answers_duplicate = espNowPrimaryCommandAnswersDuplicate();
   out.device_id = deviceId();
   out.uptime_us = static_cast<uint64_t>(esp_timer_get_time());
   out.epoch = espNowPrimaryEpoch();
@@ -260,8 +271,14 @@ void runPrimary() {
   uint32_t console_us = 0;
   uint32_t console_worst_us = 0;
 
+  // ⚠️ AFTER the radio, so the registry is loaded and any node that announced
+  // during startup is already subscribable. Refreshed every second below, because
+  // a node that announces later would otherwise be uncommandable until reboot.
+  commandRelayStart();
+
   while (true) {
     vTaskDelay(pdMS_TO_TICKS(1000));
+    commandRelayRefreshSubscriptions();
 
     const uint64_t console_started = static_cast<uint64_t>(esp_timer_get_time());
     const NodeState *nodes = espNowPrimaryNodes();
