@@ -1454,8 +1454,14 @@ void publishCommandLog(const CommandLogFrame &log) {
   char json[kCommandIdMax * 2 + kCommandMessageMax * 2 + 128];
   const int length = std::snprintf(
       json, sizeof(json),
+      // ⚠️ "terminal", NOT "final". The backend's correlation loop waits on
+      // exactly this key and the Arduino firmware has always sent it; emitting a
+      // differently-named field meant every command reported timed_out=true while
+      // carrying a perfectly good answer in its records -- a failure that looks
+      // like a dead device and is actually a spelling disagreement. Found only by
+      // driving the real backend rather than the broker.
       "{\"schema_version\":\"nat.log.v1\",\"command_id\":\"%s\","
-      "\"source\":\"sensor\",\"ok\":%s,\"final\":%s,\"message\":\"%s\"}",
+      "\"source\":\"sensor\",\"ok\":%s,\"terminal\":%s,\"message\":\"%s\"}",
       id, log.ok != 0 ? "true" : "false", log.final != 0 ? "true" : "false",
       message);
   if (length <= 0) {
