@@ -105,6 +105,14 @@ struct UplinkNodeStatus {
   uint32_t leaf_frames_dropped;
   uint32_t leaf_send_failures;
   uint32_t leaf_channel_hops;
+  // ⚠️ FRAMES THE PRIMARY RECEIVED AND THEN THREW AWAY ITSELF, which until now
+  // were counted and never published. They are dropped BEFORE the uplink queue,
+  // so uplink's frames_dropped stays at zero; they arrive in sequence, so the
+  // node's seq_gaps stays at zero; and the primary keeps publishing its own
+  // status throughout. Every counter that was visible said the rig was healthy
+  // while a fifth of a leaf's frames were being discarded here.
+  uint32_t publish_no_sync;   // no clock fit for that node yet
+  uint32_t publish_no_shift;  // fit present but rewriteFrameTimestamps refused
 };
 
 struct UplinkPrimaryStatus {

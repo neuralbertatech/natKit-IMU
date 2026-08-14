@@ -120,6 +120,8 @@ void fillNodeStatus(const NodeState &node, UplinkNodeStatus &out) {
     out.leaf_channel_hops = node.last_heartbeat.channel_hops;
     out.leaf_scan_channel = node.last_heartbeat.scan_channel;
   }
+  out.publish_no_sync = node.publish_no_sync;
+  out.publish_no_shift = node.publish_no_shift;
 }
 
 void fillPrimaryStatus(UplinkPrimaryStatus &out) {
