@@ -513,6 +513,12 @@ esp_err_t Bno08x::setReportMask(const uint8_t mask) {
   return enableReports() ? ESP_OK : ESP_FAIL;
 }
 
+void Bno08x::resetBurstStats() {
+  burst_ = BurstStats{};
+  // last_burst_us_ is deliberately NOT cleared: clearing it would throw away the
+  // gap that straddles the reset, and that gap is a real observation.
+}
+
 void Bno08x::loadReportMask() {
   // ⚠️ EVERY OUTCOME IS LOGGED, including the boring ones. This was written to
   // return quietly when NVS had nothing to say, and when the mask then failed to
@@ -697,10 +703,15 @@ int Bno08x::service() {
   sAppliedThisService = 0;
   for (int pass = 0; pass < 8; ++pass) {
     const uint32_t before = sAppliedThisService;
+    ++burst_.service_calls;
     sh2_service();
     if (sAppliedThisService == before) {
       break;
     }
+  }
+
+  if (sAppliedThisService > 0) {
+    ++burst_.productive_calls;
   }
   return sAppliedThisService;
 }
@@ -712,6 +723,17 @@ void Bno08x::applyEvent(const sh2_SensorValue_t &value) {
   SensorReading *target = nullptr;
   switch (value.sensorId) {
     case SH2_ACCELEROMETER:
+      // Gap since the previous accelerometer report, recorded here rather than at
+      // the poll: this is the hub speaking, not us looking.
+      if (last_burst_us_ != 0) {
+        const uint32_t gap = static_cast<uint32_t>(now - last_burst_us_);
+        ++burst_.gaps;
+        burst_.gap_sum_us += gap;
+        if (gap < burst_.gap_min_us) burst_.gap_min_us = gap;
+        if (gap > burst_.gap_max_us) burst_.gap_max_us = gap;
+        if (gap < 2000) ++burst_.gaps_under_2ms;
+      }
+      last_burst_us_ = now;
       target = &readings_.accelerometer;
       target->x = value.un.accelerometer.x;
       target->y = value.un.accelerometer.y;

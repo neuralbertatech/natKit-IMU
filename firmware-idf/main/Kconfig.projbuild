@@ -256,8 +256,22 @@ config NATKIT_IMU_INTERVAL_GYRO_US
 
 config NATKIT_IMU_INTERVAL_MAG_US
     int "Magnetometer report interval (us, 0 = disabled)"
-    default 10000
+    default 9000
     range 0 1000000
+    help
+        ⚠️ 9000, NOT 10000, AND IT IS NOT ASKING FOR A HIGHER RATE. The hub
+        delivers ~100 Hz either way. What changes is the PHASE: a report arriving
+        at exactly the sample rate beats against the sampler, so some 10 ms slots
+        get two of them and some get none. Measured at a 10 ms request, the
+        magnetometer ran at 100.0 Hz and yet only 82% of samples carried a fresh
+        magnetic field. At 9 ms it still runs at 99.9 Hz and 100% of samples are
+        fresh.
+
+        Only the magnetometer needs this. Accelerometer over-delivers at ~128 Hz
+        and so cannot alias; gyroscope and rotation happen to land clear of it.
+        Asking all three for 9 ms was tried and is much worse -- gyro and rotation
+        snap to ~175 Hz, the total passes the transport ceiling, and accel and mag
+        are starved back to 89 and 81 Hz.
 
 config NATKIT_IMU_INTERVAL_QUAT_US
     int "Rotation vector report interval (us, 0 = disabled)"
@@ -276,8 +290,22 @@ config NATKIT_IMU_INTERVAL_GYRO_US
 
 config NATKIT_IMU_INTERVAL_MAG_US
     int "Magnetometer report interval (us, 0 = disabled)"
-    default 10000
+    default 9000
     range 0 1000000
+    help
+        ⚠️ 9000, NOT 10000, AND IT IS NOT ASKING FOR A HIGHER RATE. The hub
+        delivers ~100 Hz either way. What changes is the PHASE: a report arriving
+        at exactly the sample rate beats against the sampler, so some 10 ms slots
+        get two of them and some get none. Measured at a 10 ms request, the
+        magnetometer ran at 100.0 Hz and yet only 82% of samples carried a fresh
+        magnetic field. At 9 ms it still runs at 99.9 Hz and 100% of samples are
+        fresh.
+
+        Only the magnetometer needs this. Accelerometer over-delivers at ~128 Hz
+        and so cannot alias; gyroscope and rotation happen to land clear of it.
+        Asking all three for 9 ms was tried and is much worse -- gyro and rotation
+        snap to ~175 Hz, the total passes the transport ceiling, and accel and mag
+        are starved back to 89 and 81 Hz.
 
 config NATKIT_IMU_INTERVAL_QUAT_US
     int "Rotation vector report interval (us, 0 = disabled)"

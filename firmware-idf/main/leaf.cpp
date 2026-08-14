@@ -68,6 +68,24 @@ volatile uint32_t sSamplesEmitted = 0;
 volatile uint32_t sFreshCount[4] = {};
 volatile uint32_t sMissedSlots = 0;
 
+// Ingests sensor reports, and nothing else.
+//
+// Separate from BOTH the sampling task and the main loop. The sampler must not be
+// delayed by a slow SPI read; the ingest must not be delayed by console logging.
+// One task each is the only arrangement where neither is true.
+void serviceTask(void *) {
+  while (true) {
+    if (sImu != nullptr) {
+      sImu->service();
+      sImu->enableDynamicCalibrationOnce();
+    }
+    // 1 ms, matching what the main loop used to give it. The hub asserts INT when
+    // it has something, and halRead waits on that, so this is a floor on how
+    // often we ask rather than a throttle on what arrives.
+    vTaskDelay(pdMS_TO_TICKS(1));
+  }
+}
+
 void samplingTask(void *) {
   constexpr size_t kSamplesPerFrame = CONFIG_NATKIT_IMU_SAMPLES_PER_FRAME;
   static ImuSample samples[kMaxSamplesPerFrame]{};
@@ -180,6 +198,22 @@ void runLeaf() {
     // Priority 6: above the main loop (1) so a long service() cannot delay the
     // cadence, and level with the tx task so neither starves the other.
     xTaskCreate(samplingTask, "natkit-sample", 4096, nullptr, 6, nullptr);
+    // ⚠️ REPORT INGESTION GETS ITS OWN TASK TOO, and this is the second half of a
+    // fix whose first half was incomplete. Sampling was moved off the main loop
+    // because imu.service() overrunning cost 15% of sample slots -- but
+    // imu.service() itself stayed on the main loop, which also does the console
+    // logging. So the console still stalled the thing that INGESTS reports, and
+    // the samples were dutifully taken on time with nothing new in them.
+    //
+    // Measured: at a 1 Hz log interval the accelerometer showed gaps of up to
+    // 160 ms once a second and 87% of samples carried fresh data. At a 10 s
+    // interval the same firmware reached 92-99%. That 12% was ours, not the
+    // sensor's -- and it is what was previously written up as an "~88 Hz burst
+    // cadence" of the hub. The hub emits evenly at ~115 Hz; we were not listening.
+    //
+    // Priority 5: above the main loop so logging cannot block it, below sampling
+    // so a slow SPI read cannot push a sample slot late.
+    xTaskCreate(serviceTask, "natkit-imu-svc", 4096, nullptr, 5, nullptr);
   }
 
   if (espNowLinkStart() != ESP_OK) {
@@ -224,11 +258,8 @@ void runLeaf() {
 
   while (true) {
     if (have_imu) {
-      imu.service();
-      imu.enableDynamicCalibrationOnce();
-      // Commands execute HERE rather than on the radio callback that received
-      // them: this loop already owns the sensor, and doing sensor I/O from inside
-      // the WiFi task's callback costs received packets.
+      // ⚠️ imu.service() is NOT called here any more -- see serviceTask. Putting it
+      // back would re-couple report ingestion to this loop's console logging.
       commandsService();
     }
 
@@ -329,6 +360,24 @@ void runLeaf() {
         samples_at_last_log = sSamplesEmitted;
         ESP_LOGI(kTag, "fresh:   %s   (of %lu samples emitted)", freshness,
                  static_cast<unsigned long>(emitted));
+        // ⚠️ SPREAD, NOT JUST THE AVERAGE. A hub emitting on its own clock gives a
+        // tight min/max; our loop only looking occasionally gives a wide one. Both
+        // average the same, so the average alone cannot say which (TEC-NATKIT-41).
+        const auto &burst = imu.burstStats();
+        if (burst.gaps > 0 && elapsed_us > 0) {
+          ESP_LOGI(kTag,
+                   "accel gaps: %lu | avg %lu us, min %lu, max %lu | %lu%% under "
+                   "2 ms (same burst) | sh2_service %.0f/s, %lu productive",
+                   static_cast<unsigned long>(burst.gaps),
+                   static_cast<unsigned long>(burst.gap_sum_us / burst.gaps),
+                   static_cast<unsigned long>(burst.gap_min_us),
+                   static_cast<unsigned long>(burst.gap_max_us),
+                   static_cast<unsigned long>(100UL * burst.gaps_under_2ms /
+                                              burst.gaps),
+                   burst.service_calls * 1e6f / static_cast<float>(elapsed_us),
+                   static_cast<unsigned long>(burst.productive_calls));
+        }
+        imu.resetBurstStats();
         ESP_LOGI(kTag,
                  "reports: %s   (asked %.0f/%.0f/%.0f/%.0f Hz, 0 = off)",
                  breakdown, askedHz(CONFIG_NATKIT_IMU_INTERVAL_ACCEL_US),
