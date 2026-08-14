@@ -53,6 +53,7 @@ enum class PacketType : uint8_t {
   kMarkerReport = 11,      // leaf -> primary: payload is a MarkerReport
   kCommand = 12,           // primary -> leaf (unicast): payload is a CommandFrame
   kCommandLog = 13,        // leaf -> primary: payload is a CommandLogFrame
+  kCommandAck = 14,        // leaf -> primary: payload is a CommandAck
 };
 
 // --- server -> device commands ---------------------------------------------
@@ -78,6 +79,18 @@ struct CommandFrame {
   char command_id[kCommandIdMax];     // correlates the answer, NUL-terminated
   char command[kCommandNameMax];
   char args[kCommandArgsMax];         // raw JSON of the "args" object, or ""
+};
+
+// Receipt, sent the moment a command arrives and BEFORE it is executed.
+//
+// ⚠️ THIS IS NOT THE ANSWER, and the separation is the point. An answer says what
+// a command did and may take a while; an acknowledgement says only "I have it",
+// which is what lets the primary stop retransmitting. Conflating them would mean
+// retrying a command that had already run, and a slow command would be
+// indistinguishable from a lost one.
+struct CommandAck {
+  uint64_t device_id;
+  char command_id[kCommandIdMax];
 };
 
 struct CommandLogFrame {
@@ -363,6 +376,13 @@ bool espNowLinkSend(PacketType type, const void *payload, size_t payload_size);
 // the caller rather than dropped, because a command that silently goes nowhere is
 // the failure mode this whole channel exists to avoid.
 bool espNowPrimarySendCommand(const CommandFrame &command);
+
+// Publishes an answer the primary generated itself -- specifically, the failure
+// record for a command no device ever acknowledged. Goes out on the same topic
+// and in the same shape as a real device answer, because from the server's point
+// of view "the device said it failed" and "the device never got it" both need to
+// end the wait, and only the message distinguishes them.
+void espNowPrimaryPublishAnswer(const CommandLogFrame &log);
 
 // Answers relayed back up, counted separately from anything else. See
 // UplinkPrimaryStatus for why these are two counters and not one.

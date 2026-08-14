@@ -29,6 +29,13 @@ namespace natkit {
 // is counted -- a dropped command is invisible otherwise.
 bool commandsEnqueue(const CommandFrame &frame);
 
+// True if this command id has already been accepted, and records it if not.
+//
+// ⚠️ Called from the RECEIVE CALLBACK, before enqueueing, because the primary
+// retransmits until acknowledged: without this, a lost acknowledgement would run
+// the command again rather than merely re-answering it.
+bool commandsAlreadySeen(const char *command_id);
+
 // Executes at most one pending command. Call from the leaf's main loop.
 //
 // ⚠️ ONE PER CALL, deliberately. A burst of commands should not stall the loop

@@ -32,6 +32,13 @@ constexpr uint32_t kReplyGapMs = 40;
 QueueHandle_t sQueue = nullptr;
 CommandStats sStats{};
 
+// Recently accepted command ids, so a retransmitted command is acknowledged
+// again but executed only once. Small: the primary gives up after a couple of
+// seconds, so nothing older than that can still be in flight.
+constexpr size_t kSeenIds = 8;
+char sSeenIds[kSeenIds][kCommandIdMax] = {};
+size_t sSeenNext = 0;
+
 QueueHandle_t queue() {
   if (sQueue == nullptr) {
     sQueue = xQueueCreate(kQueueDepth, sizeof(CommandFrame));
@@ -104,6 +111,24 @@ bool runVersion(const CommandFrame &request) {
 }
 
 }  // namespace
+
+bool commandsAlreadySeen(const char *command_id) {
+  // A command with no id cannot be de-duplicated, and is let through: the
+  // backend always sends one, so this is a hand-published command and running it
+  // is the more useful failure.
+  if (command_id == nullptr || command_id[0] == '\0') {
+    return false;
+  }
+  for (const auto &seen : sSeenIds) {
+    if (std::strncmp(seen, command_id, kCommandIdMax) == 0) {
+      return true;
+    }
+  }
+  std::strncpy(sSeenIds[sSeenNext], command_id, kCommandIdMax - 1);
+  sSeenIds[sSeenNext][kCommandIdMax - 1] = '\0';
+  sSeenNext = (sSeenNext + 1) % kSeenIds;
+  return false;
+}
 
 bool commandsEnqueue(const CommandFrame &frame) {
   QueueHandle_t q = queue();

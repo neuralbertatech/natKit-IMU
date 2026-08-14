@@ -23,6 +23,7 @@
 #include "registry.hpp"
 #include "sdkconfig.h"
 #include "time_sync.hpp"
+#include "command_relay.hpp"
 #include "commands.hpp"
 #include "uplink.hpp"
 
@@ -204,10 +205,30 @@ void leafRecvCallback(const esp_now_recv_info_t *info, const uint8_t *data,
       }
       CommandFrame frame{};
       std::memcpy(&frame, payload, sizeof(frame));
+      frame.command_id[kCommandIdMax - 1] = '\0';
+      frame.command[kCommandNameMax - 1] = '\0';
+      frame.args[kCommandArgsMax - 1] = '\0';
       // ⚠️ ADDRESSED, AND CHECKED HERE. The primary unicasts, but ESP-NOW peers
       // can and do receive frames meant for others, and a leaf executing another
       // node's command would be both wrong and extremely confusing to debug.
       if (frame.device_id != deviceId()) {
+        break;
+      }
+
+      // ⚠️ ACKNOWLEDGE FIRST, AND ACKNOWLEDGE AGAIN FOR A REPEAT. The primary
+      // retransmits until it hears this, so a command whose ack was lost will
+      // arrive a second time -- and the right answer to that is another ack, not
+      // another execution.
+      CommandAck ack{};
+      ack.device_id = frame.device_id;
+      std::strncpy(ack.command_id, frame.command_id, kCommandIdMax - 1);
+      espNowLinkSend(PacketType::kCommandAck, &ack, sizeof(ack));
+
+      // ⚠️ AND EXECUTE AT MOST ONCE. Retransmission plus no de-duplication would
+      // run a command several times, which for something like "set the report
+      // configuration" is merely wasteful and for anything with a side effect is
+      // a bug. Keyed on command_id, which the backend generates uniquely.
+      if (commandsAlreadySeen(frame.command_id)) {
         break;
       }
       commandsEnqueue(frame);
@@ -1269,6 +1290,17 @@ void primaryRecvCallback(const esp_now_recv_info_t *info, const uint8_t *data,
       }
       break;
     }
+    case PacketType::kCommandAck: {
+      if (payload_size < sizeof(CommandAck)) {
+        ++sUnknownPackets;
+        break;
+      }
+      CommandAck ack{};
+      std::memcpy(&ack, payload, sizeof(ack));
+      ack.command_id[kCommandIdMax - 1] = '\0';
+      commandRelayNoteAck(ack.device_id, ack.command_id);
+      break;
+    }
     case PacketType::kCommandLog: {
       if (payload_size < sizeof(CommandLogFrame)) {
         ++sUnknownPackets;
@@ -1670,6 +1702,10 @@ uint32_t espNowPrimaryCommandAnswersPublished() {
 
 uint32_t espNowPrimaryCommandAnswersDuplicate() {
   return sCommandAnswersDuplicate;
+}
+
+void espNowPrimaryPublishAnswer(const CommandLogFrame &log) {
+  publishCommandLog(log);
 }
 
 bool espNowPrimarySendCommand(const CommandFrame &command) {

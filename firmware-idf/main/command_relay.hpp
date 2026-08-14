@@ -44,6 +44,13 @@ esp_err_t commandRelayStart();
 // silently.
 void commandRelayRefreshSubscriptions();
 
+// A device acknowledged a command. Stops the retransmissions for it.
+void commandRelayNoteAck(uint64_t device_id, const char *command_id);
+
+// Retransmits unacknowledged commands and fails the ones that have run out of
+// attempts. Driven from its own task; exposed for tests.
+void commandRelayService();
+
 struct CommandRelayStats {
   uint32_t received = 0;      // MQTT messages on a command topic
   uint32_t relayed = 0;       // successfully unicast to a node
@@ -51,6 +58,12 @@ struct CommandRelayStats {
   uint32_t unknown_device = 0;// well-formed, but for a device not in the registry
   uint32_t send_failed = 0;   // the radio refused it
   uint32_t subscriptions = 0; // command topics currently subscribed
+  // ⚠️ DELIVERED IS NOT RELAYED. `relayed` means the radio accepted the packet;
+  // `delivered` means a device said it has it. On a rig where nodes are not
+  // expected to be always on, the gap between those two is the whole point.
+  uint32_t delivered = 0;     // acknowledged by the device
+  uint32_t retransmits = 0;
+  uint32_t undelivered = 0;   // gave up: never acknowledged
 };
 
 const CommandRelayStats &commandRelayStats();

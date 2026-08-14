@@ -129,6 +129,17 @@ struct UplinkPrimaryStatus {
   uint32_t command_answers_received;   // kCommandLog packets from a leaf
   uint32_t command_answers_published;  // ... that reached the broker
   uint32_t command_answers_duplicate;  // ... suppressed as an exact repeat
+  // ⚠️ delivered is the one that means anything: relayed says the radio took the
+  // packet, delivered says a device acknowledged it.
+  uint32_t commands_delivered;
+  uint32_t command_retransmits;
+  uint32_t commands_undelivered;
+  // ⚠️ WHY THE HUB LAST RESTARTED, because there is no other way to find out.
+  // Its USB console resets it AND re-enumerates, so a reader gets an empty file
+  // and a fresh boot rather than the panic it was trying to read. esp_reset_reason
+  // survives the restart; without it, "uptime went backwards" is the entire
+  // diagnosis available.
+  uint32_t reset_reason;
 };
 
 struct UplinkStats {

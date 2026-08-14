@@ -123,6 +123,10 @@ void fillPrimaryStatus(UplinkPrimaryStatus &out) {
   out.command_answers_received = espNowPrimaryCommandAnswersReceived();
   out.command_answers_published = espNowPrimaryCommandAnswersPublished();
   out.command_answers_duplicate = espNowPrimaryCommandAnswersDuplicate();
+  out.commands_delivered = commands.delivered;
+  out.command_retransmits = commands.retransmits;
+  out.commands_undelivered = commands.undelivered;
+  out.reset_reason = static_cast<uint32_t>(esp_reset_reason());
   out.device_id = deviceId();
   out.uptime_us = static_cast<uint64_t>(esp_timer_get_time());
   out.epoch = espNowPrimaryEpoch();
