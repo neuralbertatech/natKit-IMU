@@ -514,17 +514,38 @@ esp_err_t Bno08x::setReportMask(const uint8_t mask) {
 }
 
 void Bno08x::loadReportMask() {
+  // ⚠️ EVERY OUTCOME IS LOGGED, including the boring ones. This was written to
+  // return quietly when NVS had nothing to say, and when the mask then failed to
+  // survive a reboot there was no way to tell "never saved" from "saved and not
+  // read" from "read and rejected" -- three different bugs that all look like one
+  // symptom. A configuration that silently reverts is worse than one that refuses
+  // to change, so this end is noisy on purpose.
   nvs_handle_t handle = 0;
-  if (nvs_open(kReportNamespace, NVS_READONLY, &handle) != ESP_OK) {
-    return;  // never written: the compiled-in default stands
+  const esp_err_t opened = nvs_open(kReportNamespace, NVS_READONLY, &handle);
+  if (opened != ESP_OK) {
+    ESP_LOGW(kTag,
+             "report mask not restored: nvs_open(%s) says %s. Using the "
+             "compiled-in default 0x%02x",
+             kReportNamespace, esp_err_to_name(opened), report_mask_);
+    return;
   }
   uint8_t stored = 0;
-  if (nvs_get_u8(handle, kReportMaskKey, &stored) == ESP_OK &&
-      (stored & kReportMotionMask) != 0) {
-    report_mask_ = stored & kReportAll;
-    ESP_LOGI(kTag, "restored report mask 0x%02x from NVS", report_mask_);
-  }
+  const esp_err_t got = nvs_get_u8(handle, kReportMaskKey, &stored);
   nvs_close(handle);
+  if (got != ESP_OK) {
+    ESP_LOGW(kTag, "report mask not restored: nvs_get_u8(%s) says %s",
+             kReportMaskKey, esp_err_to_name(got));
+    return;
+  }
+  if ((stored & kReportMotionMask) == 0) {
+    ESP_LOGE(kTag,
+             "stored report mask 0x%02x has no motion report and was IGNORED; "
+             "this node would produce nothing at all",
+             stored);
+    return;
+  }
+  report_mask_ = stored & kReportAll;
+  ESP_LOGW(kTag, "restored report mask 0x%02x from NVS", report_mask_);
 }
 
 bool Bno08x::enableReports() {

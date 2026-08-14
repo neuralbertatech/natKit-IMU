@@ -70,10 +70,17 @@ void publishUndelivered(const CommandFrame &frame) {
   std::strncpy(log.command_id, frame.command_id, sizeof(log.command_id) - 1);
   log.ok = 0;
   log.final = 1;
+  // ⚠️ "NOT ACKNOWLEDGED" IS NOT "NOT EXECUTED", and the message says so because
+  // the difference has already caused one wrong conclusion. A command whose
+  // acknowledgement was lost on the way back was still received and still ran --
+  // the leaf de-duplicates by command id precisely so the retransmissions do not
+  // run it again. So this record means "no confirmation", not "no effect", and
+  // anything that needs to know what actually happened must ask.
   std::snprintf(log.message, sizeof(log.message),
-                "device %" PRIu64 " did not acknowledge \"%s\" after %u attempts "
-                "-- it is powered down, out of range, or not listening",
-                frame.device_id, frame.command, kMaxAttempts);
+                "no ack for \"%s\" from %" PRIu64 " after %u tries. Node may be "
+                "off or out of range -- but if only the ack was lost it DID run. "
+                "Re-read the state; do not assume either way",
+                frame.command, frame.device_id, kMaxAttempts);
   espNowPrimaryPublishAnswer(log);
 }
 

@@ -72,7 +72,12 @@ enum class PacketType : uint8_t {
 constexpr size_t kCommandIdMax = 40;
 constexpr size_t kCommandNameMax = 33;
 constexpr size_t kCommandArgsMax = 128;
-constexpr size_t kCommandMessageMax = 160;
+// 224, raised from 160 because the useful failure messages did not fit and the
+// compiler said so (-Werror=format-truncation). Worth the bytes: this is the
+// leaf-to-primary log frame, not the IMU wire format, and it is sent once per
+// command rather than ten times a second. A truncated explanation of a failure is
+// most of the way to no explanation.
+constexpr size_t kCommandMessageMax = 224;
 
 struct CommandFrame {
   uint64_t device_id;                 // whom it is for; a leaf ignores others
