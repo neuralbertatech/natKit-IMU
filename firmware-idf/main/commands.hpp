@@ -51,6 +51,14 @@ struct CommandStats {
   uint32_t reply_failed = 0; // the answer could not be sent
 };
 
+// The leaf's IMU, so get_reports/set_reports can reach it. Set once at startup.
+//
+// ⚠️ A POINTER RATHER THAN A CALL INTO leaf.cpp, because commands execute on the
+// leaf's own loop and that is the only task allowed to touch the hub. Handing the
+// object over makes the ownership explicit rather than implied by which file the
+// code happens to sit in.
+void commandsSetImu(class Bno08x *imu);
+
 const CommandStats &commandStats();
 
 }  // namespace natkit

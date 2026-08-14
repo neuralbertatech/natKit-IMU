@@ -103,13 +103,50 @@ class Bno08x {
   static const HalStats &halStats();
   static int intLevel();
 
+  // --- runtime report configuration (TEC-NATKIT-40) --------------------------
+  //
+  // Which reports the hub is asked for, as a bit mask. ⚠️ THE BITS ARE THE SAME
+  // ONES has_data USES on the wire -- accel 0b100, gyro 0b010, rotation 0b001,
+  // magnetometer 0b1000 -- so a mask and a sample's presence byte can be compared
+  // directly, and neither has to be translated to read the other.
+  static constexpr uint8_t kReportAccel = 0b0100;
+  static constexpr uint8_t kReportGyro = 0b0010;
+  static constexpr uint8_t kReportRotation = 0b0001;
+  static constexpr uint8_t kReportMagnetometer = 0b1000;
+  static constexpr uint8_t kReportAll = 0b1111;
+
+  // ⚠️ AT LEAST ONE MOTION REPORT IS REQUIRED. sampleFromReadings emits nothing
+  // unless the accelerometer, gyroscope or rotation vector has data, so a node
+  // with only the magnetometer enabled goes silent -- correctly, but
+  // indistinguishably from a fault.
+  static constexpr uint8_t kReportMotionMask =
+      kReportAccel | kReportGyro | kReportRotation;
+
+  uint8_t reportMask() const { return report_mask_; }
+
+  // Applies a mask, persists it, and re-configures the hub. Returns an error
+  // without changing anything if no motion report would be left.
+  //
+  // ⚠️ DISABLING CLEARS THAT SENSOR'S READING. Without it the frame builder keeps
+  // copying the last value it saw into every subsequent sample forever -- a
+  // plausible-looking number from a sensor that was switched off, which is worse
+  // than a zero because nothing about it looks wrong.
+  esp_err_t setReportMask(uint8_t mask);
+
+  // ⚠️ Called from begin(), BEFORE the first enableReports(), so a restored mask
+  // is what the hub is first configured with rather than something applied a
+  // moment later -- which would put one round of unwanted reports on the wire.
+  void loadReportMask();
+
  private:
   bool enableReports();
+
 
   SensorSet readings_{};
   uint64_t first_report_us_ = 0;
   uint32_t total_reports_ = 0;
   uint32_t reset_count_ = 0;
+  uint8_t report_mask_ = kReportAll;
 
   bool calibration_settled_ = false;
   bool calibration_enabled_ = false;

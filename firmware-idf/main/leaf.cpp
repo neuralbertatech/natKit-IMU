@@ -166,6 +166,7 @@ void runLeaf() {
   // which is how TEC-NATKIT-4 measures node-to-node coherence.
   Bno08x imu;
   const bool have_imu = imu.begin() == ESP_OK;
+  commandsSetImu(&imu);
   if (!have_imu) {
     ESP_LOGE(kTag,
              "IMU did not start -- continuing as a SENSORLESS leaf: no data "

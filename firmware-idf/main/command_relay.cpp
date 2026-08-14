@@ -8,6 +8,7 @@
 #include "cJSON.h"
 #include "esp_timer.h"
 #include "freertos/FreeRTOS.h"
+#include "freertos/queue.h"
 #include "freertos/task.h"
 #include "esp_log.h"
 #include "espnow_link.hpp"
@@ -41,6 +42,9 @@ CommandRelayStats sStats{};
 // it does, and explicitly FAILED if it never does. The failure is published as an
 // ordinary answer, because the server is waiting for one either way and silence
 // would just become a timeout with no explanation attached.
+
+// The MQTT payload copy. ⚠️ Not on any callback's stack -- see onMessage.
+constexpr size_t kMaxDocument = 512;
 
 constexpr size_t kMaxInFlight = 4;
 constexpr uint8_t kMaxAttempts = 6;
@@ -108,6 +112,20 @@ bool deviceIdFromTopic(const char *topic, size_t topic_len, uint64_t &out) {
   return true;
 }
 
+// ⚠️ THE MQTT TASK ONLY COPIES. Parsing used to happen here, on esp-mqtt's own
+// task, with a 512-byte document buffer and cJSON both on its stack -- and the
+// primary panicked (ESP_RST_PANIC, found only because the reset reason is
+// published; its console cannot be read). The same discipline the leaf already
+// follows for its radio callback: copy out, return, do the work on a task that
+// owns a stack sized for it.
+struct InboundMessage {
+  uint64_t device_id;
+  uint16_t length;
+  char document[kMaxDocument];
+};
+
+QueueHandle_t sInbound = nullptr;
+
 void onMessage(const char *topic, size_t topic_len, const char *payload,
                size_t payload_len) {
   ++sStats.received;
@@ -115,25 +133,29 @@ void onMessage(const char *topic, size_t topic_len, const char *payload,
   uint64_t device_id = 0;
   if (!deviceIdFromTopic(topic, topic_len, device_id)) {
     ++sStats.malformed;
-    ESP_LOGW(kTag, "message on an unrecognised topic (%.*s)",
-             static_cast<int>(topic_len), topic);
     return;
   }
-
-  // ⚠️ THE PAYLOAD IS NOT NUL-TERMINATED. esp-mqtt hands out a pointer into its
-  // own receive buffer with a separate length, and cJSON_Parse would read past
-  // the end of it. Copied into a bounded buffer rather than parsed in place.
-  char document[512];
-  if (payload_len == 0 || payload_len >= sizeof(document)) {
+  if (payload_len == 0 || payload_len >= kMaxDocument || sInbound == nullptr) {
     ++sStats.malformed;
-    ESP_LOGW(kTag, "command payload is %u bytes, which does not fit %u",
-             static_cast<unsigned>(payload_len),
-             static_cast<unsigned>(sizeof(document)));
     return;
   }
-  std::memcpy(document, payload, payload_len);
-  document[payload_len] = '\0';
+  // Allocated from the heap rather than this task's stack for the same reason.
+  auto *message = static_cast<InboundMessage *>(malloc(sizeof(InboundMessage)));
+  if (message == nullptr) {
+    ++sStats.malformed;
+    return;
+  }
+  message->device_id = device_id;
+  message->length = static_cast<uint16_t>(payload_len);
+  std::memcpy(message->document, payload, payload_len);
+  message->document[payload_len] = '\0';
+  if (xQueueSend(sInbound, &message, 0) != pdTRUE) {
+    ++sStats.malformed;
+    free(message);
+  }
+}
 
+void handleMessage(const uint64_t device_id, char *document) {
   cJSON *root = cJSON_Parse(document);
   if (root == nullptr) {
     ++sStats.malformed;
@@ -267,9 +289,19 @@ void commandRelayService() {
   }
 }
 
-void retryTask(void *) {
+// Owns both the parsing and the retransmissions, so all command work happens on
+// one task with one stack, and neither the MQTT task nor the radio callback does
+// anything but hand something over.
+void relayTask(void *) {
+  InboundMessage *message = nullptr;
   while (true) {
-    vTaskDelay(pdMS_TO_TICKS(kServiceIntervalMs));
+    if (sInbound != nullptr &&
+        xQueueReceive(sInbound, &message, pdMS_TO_TICKS(kServiceIntervalMs)) ==
+            pdTRUE) {
+      handleMessage(message->device_id, message->document);
+      free(message);
+      message = nullptr;
+    }
     commandRelayService();
   }
 }
@@ -280,11 +312,11 @@ esp_err_t commandRelayStart() {
   // Its own task rather than the primary's 1 Hz console loop: a retry interval
   // measured in seconds would make a command that needed one arrive after the
   // server had already stopped waiting.
-  // 4096, not 3072: this task formats 64-bit values into log lines when it
-  // retransmits or gives up, and printf with PRIu64 on a small stack is a
-  // reliable way to produce a crash that only happens under the exact conditions
-  // you were trying to observe.
-  xTaskCreate(retryTask, "cmd-retry", 4096, nullptr, 4, nullptr);
+  // 6144, and generously: this task parses JSON, formats 64-bit values into log
+  // lines, and holds a CommandFrame or two. It is the only place command work
+  // happens, so it is the only stack that has to be right.
+  sInbound = xQueueCreate(4, sizeof(InboundMessage *));
+  xTaskCreate(relayTask, "cmd-relay", 6144, nullptr, 4, nullptr);
   return ESP_OK;
 }
 

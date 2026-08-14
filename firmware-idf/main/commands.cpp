@@ -4,6 +4,8 @@
 #include <cstdio>
 #include <cstring>
 
+#include "bno08x.hpp"
+#include "cJSON.h"
 #include "device_id.hpp"
 #include "esp_app_desc.h"
 #include "esp_log.h"
@@ -29,6 +31,7 @@ constexpr size_t kQueueDepth = 4;
 constexpr int kReplyAttempts = 3;
 constexpr uint32_t kReplyGapMs = 40;
 
+Bno08x *sImu = nullptr;
 QueueHandle_t sQueue = nullptr;
 CommandStats sStats{};
 
@@ -110,7 +113,80 @@ bool runVersion(const CommandFrame &request) {
   return true;
 }
 
+// Renders the current configuration the same way for both commands, so a
+// set_reports answer and a get_reports answer are the same shape and the frontend
+// has one thing to parse.
+void describeReports(char *out, size_t out_size, uint8_t mask) {
+  std::snprintf(out, out_size, "accel=%d gyro=%d mag=%d rotation=%d",
+                (mask & Bno08x::kReportAccel) ? 1 : 0,
+                (mask & Bno08x::kReportGyro) ? 1 : 0,
+                (mask & Bno08x::kReportMagnetometer) ? 1 : 0,
+                (mask & Bno08x::kReportRotation) ? 1 : 0);
+}
+
+bool runGetReports(const CommandFrame &request) {
+  if (sImu == nullptr) {
+    reply(request, false, true, "no IMU on this node");
+    return false;
+  }
+  char described[96];
+  describeReports(described, sizeof(described), sImu->reportMask());
+  reply(request, true, true, "%s", described);
+  return true;
+}
+
+bool runSetReports(const CommandFrame &request) {
+  if (sImu == nullptr) {
+    reply(request, false, true, "no IMU on this node");
+    return false;
+  }
+  cJSON *args = cJSON_Parse(request.args);
+  if (args == nullptr) {
+    reply(request, false, true,
+          "set_reports needs args like {\"accel\":true,\"gyro\":true,"
+          "\"mag\":true,\"rotation\":false}");
+    return false;
+  }
+
+  // ⚠️ STARTS FROM THE CURRENT MASK, so a caller may send one field. Starting
+  // from zero would make {"mag":false} silently turn everything else off too,
+  // which is the kind of thing that looks like a radio fault.
+  uint8_t mask = sImu->reportMask();
+  const auto apply = [&](const char *name, uint8_t bit) {
+    const cJSON *item = cJSON_GetObjectItemCaseSensitive(args, name);
+    if (cJSON_IsBool(item)) {
+      mask = cJSON_IsTrue(item) ? static_cast<uint8_t>(mask | bit)
+                                : static_cast<uint8_t>(mask & ~bit);
+    }
+  };
+  apply("accel", Bno08x::kReportAccel);
+  apply("gyro", Bno08x::kReportGyro);
+  apply("mag", Bno08x::kReportMagnetometer);
+  apply("rotation", Bno08x::kReportRotation);
+  cJSON_Delete(args);
+
+  const esp_err_t err = sImu->setReportMask(mask);
+  char described[96];
+  describeReports(described, sizeof(described), sImu->reportMask());
+  if (err == ESP_ERR_INVALID_ARG) {
+    reply(request, false, true,
+          "refused: that leaves no motion report and the node would stop "
+          "producing samples. Still %s",
+          described);
+    return false;
+  }
+  if (err != ESP_OK) {
+    reply(request, false, true, "could not apply: %s. Now %s",
+          esp_err_to_name(err), described);
+    return false;
+  }
+  reply(request, true, true, "%s", described);
+  return true;
+}
+
 }  // namespace
+
+void commandsSetImu(Bno08x *imu) { sImu = imu; }
 
 bool commandsAlreadySeen(const char *command_id) {
   // A command with no id cannot be de-duplicated, and is let through: the
@@ -165,6 +241,10 @@ void commandsService() {
     runPing(request);
   } else if (std::strcmp(request.command, "version") == 0) {
     runVersion(request);
+  } else if (std::strcmp(request.command, "get_reports") == 0) {
+    runGetReports(request);
+  } else if (std::strcmp(request.command, "set_reports") == 0) {
+    runSetReports(request);
   } else {
     // ⚠️ AN UNKNOWN COMMAND IS ANSWERED, not ignored. Silence is
     // indistinguishable from a node that never received it, from a radio that

@@ -7,6 +7,7 @@
 #include "driver/spi_master.h"
 #include "esp_attr.h"
 #include "esp_log.h"
+#include "nvs.h"
 #include "esp_timer.h"
 #include "freertos/FreeRTOS.h"
 #include "freertos/task.h"
@@ -436,12 +437,94 @@ esp_err_t Bno08x::begin() {
     ESP_LOGW(kTag, "sh2_getCalConfig failed with %d", read_back);
   }
 
+  // BEFORE the first enableReports, so a mask restored from NVS is what the hub
+  // is first configured with -- applying it a moment later would put one round of
+  // unwanted reports on the wire, and on a recording that is a real artefact.
+  loadReportMask();
   if (!enableReports()) {
     return ESP_FAIL;
   }
 
   ESP_LOGI(kTag, "BNO08x started");
   return ESP_OK;
+}
+
+namespace {
+constexpr char kReportNamespace[] = "natkit-imu";
+constexpr char kReportMaskKey[] = "reports";
+}  // namespace
+
+esp_err_t Bno08x::setReportMask(const uint8_t mask) {
+  // ⚠️ REFUSED, not clamped. Silently substituting a working mask would leave the
+  // frontend showing a state the device is not in, and the caller has an answer
+  // channel to be told on.
+  if ((mask & kReportMotionMask) == 0) {
+    ESP_LOGE(kTag,
+             "refusing report mask 0x%02x: it leaves no motion report, and this "
+             "node would stop producing samples entirely",
+             mask);
+    return ESP_ERR_INVALID_ARG;
+  }
+
+  const uint8_t previous = report_mask_;
+  report_mask_ = mask & kReportAll;
+
+  // ⚠️ CLEAR WHAT WAS TURNED OFF. The frame builder copies each sensor's last
+  // value into every sample and marks freshness separately, so a disabled sensor
+  // would otherwise keep contributing the last number it produced, forever. A
+  // plausible reading from a switched-off sensor is worse than a zero, because
+  // nothing about it looks wrong.
+  const uint8_t turned_off = static_cast<uint8_t>(previous & ~report_mask_);
+  if ((turned_off & kReportAccel) != 0) {
+    readings_.accelerometer = SensorReading{};
+  }
+  if ((turned_off & kReportGyro) != 0) {
+    readings_.gyroscope = SensorReading{};
+  }
+  if ((turned_off & kReportMagnetometer) != 0) {
+    readings_.magnetometer = SensorReading{};
+  }
+  if ((turned_off & kReportRotation) != 0) {
+    readings_.rotation = SensorReading{};
+  }
+
+  nvs_handle_t handle = 0;
+  esp_err_t err = nvs_open(kReportNamespace, NVS_READWRITE, &handle);
+  if (err == ESP_OK) {
+    err = nvs_set_u8(handle, kReportMaskKey, report_mask_);
+    if (err == ESP_OK) {
+      err = nvs_commit(handle);
+    }
+    nvs_close(handle);
+  }
+  if (err != ESP_OK) {
+    // The mask still applies for this boot; only its persistence failed, and
+    // saying which is the difference between "it did not work" and "it will not
+    // survive a reboot".
+    ESP_LOGE(kTag, "report mask 0x%02x applied but NOT saved: %s", report_mask_,
+             esp_err_to_name(err));
+  }
+
+  ESP_LOGW(kTag, "reports now: accel %s, gyro %s, mag %s, rotation %s",
+           (report_mask_ & kReportAccel) ? "on" : "OFF",
+           (report_mask_ & kReportGyro) ? "on" : "OFF",
+           (report_mask_ & kReportMagnetometer) ? "on" : "OFF",
+           (report_mask_ & kReportRotation) ? "on" : "OFF");
+  return enableReports() ? ESP_OK : ESP_FAIL;
+}
+
+void Bno08x::loadReportMask() {
+  nvs_handle_t handle = 0;
+  if (nvs_open(kReportNamespace, NVS_READONLY, &handle) != ESP_OK) {
+    return;  // never written: the compiled-in default stands
+  }
+  uint8_t stored = 0;
+  if (nvs_get_u8(handle, kReportMaskKey, &stored) == ESP_OK &&
+      (stored & kReportMotionMask) != 0) {
+    report_mask_ = stored & kReportAll;
+    ESP_LOGI(kTag, "restored report mask 0x%02x from NVS", report_mask_);
+  }
+  nvs_close(handle);
 }
 
 bool Bno08x::enableReports() {
@@ -521,16 +604,24 @@ bool Bno08x::enableReports() {
   // also already absent from the transform/Parquet path, so it would only leave
   // the JSON and viewer paths.
 
-  struct ReportSpec {
+  // Kconfig sets each report's RATE; the runtime mask decides which are on. An
+  // interval of 0 still means "compiled off" and the mask cannot resurrect it,
+  // because there would be no rate to ask for.
+  struct MaskedSpec {
     sh2_SensorId_t id;
     const char *name;
-    uint32_t interval_us;  // 0 disables
+    uint32_t interval_us;
+    uint8_t bit;
   };
-  static const ReportSpec kReports[] = {
-      {SH2_ACCELEROMETER, "accelerometer", CONFIG_NATKIT_IMU_INTERVAL_ACCEL_US},
-      {SH2_GYROSCOPE_CALIBRATED, "gyroscope", CONFIG_NATKIT_IMU_INTERVAL_GYRO_US},
-      {SH2_MAGNETIC_FIELD_CALIBRATED, "magnetometer", CONFIG_NATKIT_IMU_INTERVAL_MAG_US},
-      {SH2_ROTATION_VECTOR, "rotation vector", CONFIG_NATKIT_IMU_INTERVAL_QUAT_US},
+  const MaskedSpec kReports[] = {
+      {SH2_ACCELEROMETER, "accelerometer", CONFIG_NATKIT_IMU_INTERVAL_ACCEL_US,
+       kReportAccel},
+      {SH2_GYROSCOPE_CALIBRATED, "gyroscope", CONFIG_NATKIT_IMU_INTERVAL_GYRO_US,
+       kReportGyro},
+      {SH2_MAGNETIC_FIELD_CALIBRATED, "magnetometer",
+       CONFIG_NATKIT_IMU_INTERVAL_MAG_US, kReportMagnetometer},
+      {SH2_ROTATION_VECTOR, "rotation vector",
+       CONFIG_NATKIT_IMU_INTERVAL_QUAT_US, kReportRotation},
   };
 
   sh2_SensorConfig_t config{};
@@ -543,8 +634,8 @@ bool Bno08x::enableReports() {
   config.sensorSpecific = 0;
 
   bool all_ok = true;
-  for (const ReportSpec &report : kReports) {
-    if (report.interval_us == 0) {
+  for (const MaskedSpec &report : kReports) {
+    if (report.interval_us == 0 || (report_mask_ & report.bit) == 0) {
       // Explicitly disable rather than just not enabling: the hub remembers its
       // configuration across a soft reset, so a report left over from a previous
       // firmware would keep arriving and keep spending the ceiling.
@@ -567,8 +658,12 @@ int Bno08x::service() {
   if (sResetOccurred) {
     sResetOccurred = false;
     ++reset_count_;
-    ESP_LOGW(kTag, "hub reset (#%lu); re-enabling reports",
-             static_cast<unsigned long>(reset_count_));
+    // ⚠️ Re-enables from report_mask_, which lives in RAM on OUR side and is
+    // untouched by the hub resetting itself. That is what stops a hub reset
+    // silently reverting a runtime configuration to the compiled-in default while
+    // the frontend goes on showing the old one.
+    ESP_LOGW(kTag, "hub reset (#%lu); re-enabling reports (mask 0x%02x)",
+             static_cast<unsigned long>(reset_count_), report_mask_);
     enableReports();
   }
 
