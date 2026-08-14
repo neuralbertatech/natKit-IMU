@@ -445,61 +445,72 @@ esp_err_t Bno08x::begin() {
 }
 
 bool Bno08x::enableReports() {
-  // ⚠️ EVERY INTERVAL IS THE SAME HERE, AND THAT IS THE MEASURED OPTIMUM, not an
-  // oversight. The per-report structure is kept because the intervals ARE
-  // independent knobs and the obvious tuning is wrong; this is the record of it.
+  // ⚠️ THE HUB DOES NOT DELIVER WHAT IT IS ASKED FOR, and not uniformly, so no
+  // single interval lands four reports on one rate. Every number below is
+  // measured on hardware (tools/sweep_report_rates.sh reproduces the table).
   //
-  // The hub does not deliver what it is asked for. At a uniform 100 Hz request:
-  // accel 117, gyro 95, mag 91, quat 95 Hz -- the total is about right (398 of
-  // 400) but the accelerometer takes a fifth more than it asked for and the
-  // other three go short.
+  // Read it against 100 Hz as a FLOOR, not a target: the frame builder takes a
+  // 100 Hz snapshot of each sensor's latest value, so a report above 100 Hz is
+  // merely wasted while one below leaves stale values in samples.
   //
-  // Asking for more does not fix it, it inverts it. Uniform requests, delivered:
+  // Uniform requests -- asking for MORE inverts the problem rather than fixing it:
   //
-  //     request   accel  gyro   mag  quat   total
-  //     100 Hz      117    95    91    95     398
+  //     asked     accel  gyro   mag  quat   total
+  //     100 Hz      114    95    91    95     395
   //     125 Hz       83   155    78   155     471
   //     150 Hz       65   175    63   175     478
   //     200 Hz       63   174    62   177     476
   //
-  // Two things fall out. There is a CEILING near 475 reports/s; and under
-  // contention the hub feeds gyro and rotation at the expense of accel and mag.
-  // Note also that gyro and quat have no rate between ~95 and ~160 -- anything
-  // below a 10 ms request snaps them to ~160 Hz.
+  // So there is a CEILING near 475 reports/s, and under contention the hub feeds
+  // gyro and rotation at the expense of accel and mag.
   //
-  // ⚠️ SO THE OBVIOUS TUNE BACKFIRES. Asking gyro and rotation for 9 ms to lift
-  // them over 100 does lift them, to ~160 -- and the total pins at the ceiling,
-  // dragging accel to 80 and mag to 75, BELOW 100, where they had been fine.
-  // Measured, not predicted. Uniform 10 ms sits at 398/s with headroom and is
-  // the best allocation available.
+  // ⚠️ BUT THE 95 Hz AT A 100 Hz REQUEST IS NOT CONTENTION. 395 is well under the
+  // ceiling, and freeing budget does almost nothing -- dropping a whole report
+  // returns only ~1-2 Hz to the others:
   //
-  // ⚠️ AND ABOVE 100 Hz IS NOT A PROBLEM, BELOW IT IS. The frame builder takes a
-  // 100 Hz snapshot of each sensor's latest value, so a report arriving at 160 Hz
-  // merely wastes it, while one arriving at 95 Hz leaves ~5% of samples carrying
-  // the previous value. Judge these numbers against 100 as a FLOOR.
+  //     all four                    114 /  95 /  91 /  95
+  //     rotation dropped            118 /  96 /  92 /   -
+  //     gyroscope dropped           116 /   - /  92 /  95
+  //     accel + mag only            121 /   - /  94 /   -
   //
-  // The ceiling is the hub's, not ours. Three things were tried and none moved
-  // it: 3 MHz SPI instead of 1 MHz (identical numbers), draining sh2_service
-  // rather than calling it once per pump (+2 Hz), and disabling the magnetometer
-  // to free 91 Hz of budget (+2 Hz on the others -- so mag is very nearly free).
+  // What DOES work is asking faster: gyro and rotation have no rate between ~95
+  // and ~185, and anything below a 10 ms request snaps them to the high one. That
+  // only fits under the ceiling if something else is dropped:
+  //
+  //     drop rotation, gyro+mag asked 111 Hz    120 / 188 / 96.5 /   -
+  //     drop gyroscope, quat asked 111 Hz       114 /   - / 94   / 182
+  //     KEEP all four, gyro asked 111 Hz        100 / 172 / 83   /  86   <- worse
+  //     KEEP all four, accel throttled to 71 Hz  81 / 154 / 78   / 154   <- worse
+  //
+  // ⚠️ AND THE MAGNETOMETER CANNOT REACH 100 Hz AT ALL. Its ceiling is ~96.5, and
+  // asking for more makes it worse, not better (200 Hz requested -> 91.5). Even
+  // alone with just the accelerometer it manages 93.5. That is the sensor, not
+  // the schedule -- its datasheet maximum is 100 Hz.
+  //
+  // ⚠️ SO THE DEFAULT BELOW IS UNIFORM 10 ms, WHICH IS THE BEST CONFIGURATION
+  // THAT KEEPS ALL FOUR REPORTS. Every attempt to beat it while keeping four was
+  // measured and was worse. Getting gyro or rotation genuinely above 100 Hz means
+  // giving one of them up, which is a decision about what a recording contains
+  // rather than a tuning question -- so it is left to whoever makes that call, and
+  // the intervals are per-report Kconfig knobs (0 = off) so it is one edit.
+  //
+  // If that call gets made: DROP ROTATION, not gyro. The rotation vector is the
+  // hub's FUSION of the other three, so accel + gyro + mag at >=96 Hz still
+  // contains what it was computed from, while the gyroscope is a primary
+  // measurement nothing else can reconstruct. Rotation is also already absent
+  // from the transform/Parquet path (NatImuBulkDataSchemaDescriptor), so dropping
+  // it costs less than it looks -- it would only leave the JSON and viewer paths.
+
   struct ReportSpec {
     sh2_SensorId_t id;
     const char *name;
-    uint32_t interval_us;
+    uint32_t interval_us;  // 0 disables
   };
-  static constexpr uint32_t kBase = CONFIG_NATKIT_IMU_REPORT_INTERVAL_US;
   static const ReportSpec kReports[] = {
-      // The accelerometer over-delivers on this hub, so it is asked for LESS
-      // than the target rather than more.
-      {SH2_ACCELEROMETER, "accelerometer", kBase},
-      {SH2_GYROSCOPE_CALIBRATED, "gyroscope", kBase},
-#if CONFIG_NATKIT_IMU_ENABLE_MAGNETOMETER
-      // ⚠️ The magnetometer is NOT asked for more. It is the one report whose
-      // datasheet maximum is 100 Hz, and it peaked at 90 Hz on a 100 Hz request
-      // while every faster request made it WORSE (78 Hz at 125, 63 at 150).
-      {SH2_MAGNETIC_FIELD_CALIBRATED, "magnetometer", kBase},
-#endif
-      {SH2_ROTATION_VECTOR, "rotation vector", kBase},
+      {SH2_ACCELEROMETER, "accelerometer", CONFIG_NATKIT_IMU_INTERVAL_ACCEL_US},
+      {SH2_GYROSCOPE_CALIBRATED, "gyroscope", CONFIG_NATKIT_IMU_INTERVAL_GYRO_US},
+      {SH2_MAGNETIC_FIELD_CALIBRATED, "magnetometer", CONFIG_NATKIT_IMU_INTERVAL_MAG_US},
+      {SH2_ROTATION_VECTOR, "rotation vector", CONFIG_NATKIT_IMU_INTERVAL_QUAT_US},
   };
 
   sh2_SensorConfig_t config{};
@@ -513,6 +524,15 @@ bool Bno08x::enableReports() {
 
   bool all_ok = true;
   for (const ReportSpec &report : kReports) {
+    if (report.interval_us == 0) {
+      // Explicitly disable rather than just not enabling: the hub remembers its
+      // configuration across a soft reset, so a report left over from a previous
+      // firmware would keep arriving and keep spending the ceiling.
+      config.reportInterval_us = 0;
+      sh2_setSensorConfig(report.id, &config);
+      ESP_LOGI(kTag, "%s disabled", report.name);
+      continue;
+    }
     config.reportInterval_us = report.interval_us;
     const int status = sh2_setSensorConfig(report.id, &config);
     if (status != SH2_OK) {

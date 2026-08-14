@@ -291,8 +291,13 @@ void runLeaf() {
                               "%s%s %.1f Hz", i ? " | " : "", names[i], hz);
           per_report_at_last_log[i] = per_report[i];
         }
-        ESP_LOGI(kTag, "reports: %s   (configured %.1f Hz each)", breakdown,
-                 1'000'000.0 / CONFIG_NATKIT_IMU_REPORT_INTERVAL_US);
+        const auto askedHz = [](int us) { return us > 0 ? 1'000'000.0 / us : 0.0; };
+        ESP_LOGI(kTag,
+                 "reports: %s   (asked %.0f/%.0f/%.0f/%.0f Hz, 0 = off)",
+                 breakdown, askedHz(CONFIG_NATKIT_IMU_INTERVAL_ACCEL_US),
+                 askedHz(CONFIG_NATKIT_IMU_INTERVAL_GYRO_US),
+                 askedHz(CONFIG_NATKIT_IMU_INTERVAL_MAG_US),
+                 askedHz(CONFIG_NATKIT_IMU_INTERVAL_QUAT_US));
       }
       ESP_LOGI(kTag,
                "sensor: %lu reports @ %.1f Hz | resets %lu | cal %s | heap "

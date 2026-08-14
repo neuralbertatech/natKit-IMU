@@ -234,6 +234,56 @@ config NATKIT_ESPNOW_CHANNEL
         this scope". The receiver switch above survives its dependency only
         because it is read with #if, where an absent symbol is a legal 0.
 
+# Per-report intervals, in microseconds. 0 DISABLES that report entirely.
+#
+# These exist because the hub does not deliver what it is asked for, and does not
+# do so differently per report -- so one shared number cannot land four reports on
+# one rate. See enableReports() in bno08x.cpp for the measured tables.
+#
+# Rule for reading the numbers: the frame builder takes a 100 Hz snapshot of each
+# sensor's latest value, so ABOVE 100 Hz is merely wasted and BELOW 100 Hz leaves
+# stale values in samples. 100 is a floor, not a target.
+
+config NATKIT_IMU_INTERVAL_ACCEL_US
+    int "Accelerometer report interval (us, 0 = disabled)"
+    default 10000
+    range 0 1000000
+
+config NATKIT_IMU_INTERVAL_GYRO_US
+    int "Gyroscope report interval (us, 0 = disabled)"
+    default 10000
+    range 0 1000000
+
+config NATKIT_IMU_INTERVAL_MAG_US
+    int "Magnetometer report interval (us, 0 = disabled)"
+    default 10000
+    range 0 1000000
+
+config NATKIT_IMU_INTERVAL_QUAT_US
+    int "Rotation vector report interval (us, 0 = disabled)"
+    default 10000
+    range 0 1000000
+
+config NATKIT_IMU_INTERVAL_ACCEL_US
+    int "Accelerometer report interval (us, 0 = disabled)"
+    default 10000
+    range 0 1000000
+
+config NATKIT_IMU_INTERVAL_GYRO_US
+    int "Gyroscope report interval (us, 0 = disabled)"
+    default 10000
+    range 0 1000000
+
+config NATKIT_IMU_INTERVAL_MAG_US
+    int "Magnetometer report interval (us, 0 = disabled)"
+    default 10000
+    range 0 1000000
+
+config NATKIT_IMU_INTERVAL_QUAT_US
+    int "Rotation vector report interval (us, 0 = disabled)"
+    default 10000
+    range 0 1000000
+
 config NATKIT_IMU_ENABLE_MAGNETOMETER
     bool "Enable the magnetometer report"
     default y
@@ -251,11 +301,14 @@ config NATKIT_IMU_ENABLE_MAGNETOMETER
         Not the SPI clock: 3 MHz produced numbers identical to 1 MHz.
 
 config NATKIT_IMU_REPORT_INTERVAL_US
-    int "BNO08x report interval (microseconds)"
+    int "Nominal report interval (microseconds) -- REFERENCE ONLY"
     default 10000
     range 2500 1000000
     help
-        How often the hub is asked to produce each enabled report.
+        The rate the system is nominally built around. ⚠️ It does NOT configure
+        anything any more -- the four NATKIT_IMU_INTERVAL_*_US options do, because
+        one shared number cannot land four reports on one rate. Kept because other
+        code compares against "the intended rate".
 
         ⚠️ 10000 us (100 Hz) since #380. It was 18000 to match ../embeded, and
         that "compatibility" was preserving a bug: the frame header has always
