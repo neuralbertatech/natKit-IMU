@@ -58,6 +58,13 @@ constexpr char kTag[] = "natkit-leaf";
 // the cadence, which is the whole problem being fixed.
 Bno08x *sImu = nullptr;
 volatile uint32_t sFramesBuilt = 0;
+// Samples emitted, and how many of them carried a FRESH reading of each sensor.
+// ⚠️ These exist as a cross-check, not as decoration: fresh/emitted must come out
+// at the sensor's delivered rate divided by 100, so they confirm the per-report
+// rates from a completely independent count. If the two disagree, one of them is
+// lying and it matters which.
+volatile uint32_t sSamplesEmitted = 0;
+volatile uint32_t sFreshCount[4] = {};
 volatile uint32_t sMissedSlots = 0;
 
 void samplingTask(void *) {
@@ -78,10 +85,16 @@ void samplingTask(void *) {
     }
 
     ImuSample sample{};
-    if (!sampleFromReadings(sImu->readings(), sample)) {
+    static SampleCursor cursor{};
+    if (!sampleFromReadings(sImu->readings(), cursor, sample)) {
       ++sMissedSlots;  // nothing decoded yet: a real slot with no reading in it
       continue;
     }
+    ++sSamplesEmitted;
+    if (sample.has_data & 0b0100) ++sFreshCount[0];  // accel
+    if (sample.has_data & 0b0010) ++sFreshCount[1];  // gyro
+    if (sample.has_data & 0b1000) ++sFreshCount[2];  // mag
+    if (sample.has_data & 0b0001) ++sFreshCount[3];  // rotation
     samples[sample_count++] = sample;
     if (sample_count < kSamplesPerFrame) {
       continue;
@@ -202,6 +215,8 @@ void runLeaf() {
   // Per-report, not just the total: the aggregate cannot tell "all four at 100 Hz"
   // from "three at 133 Hz and one dead", and those need different fixes.
   uint32_t per_report_at_last_log[4] = {};
+  uint32_t fresh_at_last_log[4] = {};
+  uint32_t samples_at_last_log = 0;
   uint32_t frames_at_last_log = 0;
   uint64_t last_log_us = 0;
 
@@ -292,6 +307,22 @@ void runLeaf() {
           per_report_at_last_log[i] = per_report[i];
         }
         const auto askedHz = [](int us) { return us > 0 ? 1'000'000.0 / us : 0.0; };
+        // The same four sensors seen from the OTHER end: what fraction of emitted
+        // samples carried a fresh reading. Should equal the delivered rate above
+        // divided by the 100 Hz sample rate, computed from a separate counter.
+        const uint32_t emitted = sSamplesEmitted - samples_at_last_log;
+        char freshness[128];
+        int fw = 0;
+        for (int i = 0; i < 4; ++i) {
+          const uint32_t f = sFreshCount[i] - fresh_at_last_log[i];
+          fw += snprintf(freshness + fw, sizeof(freshness) - fw, "%s%s %.0f%%",
+                         i ? " | " : "", names[i],
+                         emitted > 0 ? 100.0 * f / emitted : 0.0);
+          fresh_at_last_log[i] = sFreshCount[i];
+        }
+        samples_at_last_log = sSamplesEmitted;
+        ESP_LOGI(kTag, "fresh:   %s   (of %lu samples emitted)", freshness,
+                 static_cast<unsigned long>(emitted));
         ESP_LOGI(kTag,
                  "reports: %s   (asked %.0f/%.0f/%.0f/%.0f Hz, 0 = off)",
                  breakdown, askedHz(CONFIG_NATKIT_IMU_INTERVAL_ACCEL_US),

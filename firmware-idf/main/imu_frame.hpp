@@ -43,6 +43,27 @@ namespace natkit {
 //   accuracies: bits 7-6 mag, 5-4 accel, 3-2 gyro, 1-0 rotation (0 unreliable .. 3 high)
 //   has_data:   bit 3 mag, bit 2 accel, bit 1 gyro, bit 0 rotation
 //
+// ⚠️ has_data MEANS "A FRESH REPORT ARRIVED FOR THIS SAMPLE", NOT "this sensor
+// exists". Version 1 used it stickily -- true from a sensor's first report until
+// reboot, so it was true on essentially every sample and said nothing. Version 2
+// makes it per-sample, which is the only place the sensors' real rates become
+// visible in the DATA rather than in a comment: the hub delivers accel at ~114 Hz
+// but gyro and rotation at ~95 and the magnetometer at ~91, against a 100 Hz
+// sampler, so roughly 5% of samples carry no fresh gyro or quaternion and ~9% no
+// fresh magnetic field.
+//
+// ⚠️ AND THE FLOATS STILL HOLD THE PREVIOUS VALUE when the bit is clear, rather
+// than being zeroed. Sample-and-hold with a freshness flag serves both readers: a
+// consumer that checks the bit can reconstruct the sensor's true ~95 Hz series
+// with gaps, and one that ignores it gets a sensible held value instead of a
+// spike to zero. Zeroing would corrupt the second reader to no benefit for the
+// first.
+//
+// This is NOT the same as the magnetometer being absent from a version 1 frame.
+// That is STRUCTURAL absence -- the field does not exist -- and it reads as zeroed
+// floats with the bit clear. Temporal staleness reads as a held value with the bit
+// clear. A consumer that needs to tell them apart uses the frame version.
+//
 // ⚠️ THIS IS FRAME VERSION 2, AND VERSION 1 IS 50-BYTE SAMPLES OF TEN FLOATS.
 // The leaf only ever WRITES the current version, so there is no v1 path here --
 // but libnatkit-core still reads both, and that is what keeps every recording
@@ -84,6 +105,22 @@ static_assert(sizeof(float) == 4, "the wire format is IEEE-754 binary32");
 // quaternion, and ~9% the previous magnetometer. has_data says a sensor has
 // EVER reported, not that this sample is fresh -- there is no per-sample
 // staleness flag, and adding one would change the wire format again.
+// Per-sensor report counts as of the previous sample, owned by the CALLER.
+//
+// ⚠️ Freshness is computed by comparing counters rather than by setting and
+// clearing a flag, and that is deliberate. Reports are applied on the service
+// task while samples are built on the sampling task, on a dual-core part, so a
+// flag cleared by the sampler could lose a report the service task set at the
+// same moment -- and the failure would be silent and would over-report staleness,
+// which is the direction that looks like a real finding. Comparing a counter the
+// sampler never writes has no such race.
+struct SampleCursor {
+  uint32_t accelerometer = 0;
+  uint32_t gyroscope = 0;
+  uint32_t magnetometer = 0;
+  uint32_t rotation = 0;
+};
+
 struct ImuSample {
   uint64_t time_ms = 0;  // milliseconds, matching the schema's own unit
   float values[kFrameFloats] = {};
@@ -94,7 +131,8 @@ struct ImuSample {
 // Fills `sample` from the sensor's current readings. Returns false when no sensor
 // has produced anything yet, so a frame is never padded with zeroed samples that
 // would be indistinguishable from a real reading of zero.
-bool sampleFromReadings(const SensorSet &readings, ImuSample &sample);
+bool sampleFromReadings(const SensorSet &readings, SampleCursor &cursor,
+                        ImuSample &sample);
 
 // Encodes `count` samples into `out`, which must hold at least
 // kFrameHeaderSize + count * kSampleSize bytes. Returns the number of bytes

@@ -2,6 +2,8 @@
 
 #include <cstring>
 
+#include "esp_timer.h"
+
 namespace natkit {
 namespace {
 
@@ -47,9 +49,28 @@ size_t writeFloat(uint8_t *out, float value) {
 
 }  // namespace
 
-bool sampleFromReadings(const SensorSet &readings, ImuSample &sample) {
+bool sampleFromReadings(const SensorSet &readings, SampleCursor &cursor,
+                        ImuSample &sample) {
   sample = ImuSample{};
 
+  // Freshness is "has this sensor reported since the last sample", read from its
+  // counter. See SampleCursor for why this is not a flag.
+  const bool accel_fresh = readings.accelerometer.count != cursor.accelerometer;
+  const bool gyro_fresh = readings.gyroscope.count != cursor.gyroscope;
+  const bool mag_fresh = readings.magnetometer.count != cursor.magnetometer;
+  const bool rotation_fresh = readings.rotation.count != cursor.rotation;
+  cursor.accelerometer = readings.accelerometer.count;
+  cursor.gyroscope = readings.gyroscope.count;
+  cursor.magnetometer = readings.magnetometer.count;
+  cursor.rotation = readings.rotation.count;
+
+  // ⚠️ THIS GUARD USES has_data (EVER REPORTED), NOT FRESHNESS. It exists to stop
+  // frames going out before the hub has said anything at all; a running node whose
+  // gyro simply missed this 10 ms slot must still emit a sample, with the bit
+  // clear, because that IS the observation. Gating emission on freshness would
+  // punch holes in the 100 Hz cadence and destroy the very signal the per-sample
+  // bit was added to carry.
+  //
   // ⚠️ THE MAGNETOMETER IS NOT IN THIS TEST, deliberately. A sample carrying
   // nothing but a magnetic field reading is not an IMU sample, and letting one
   // through would put frames on the wire during startup -- before the hub has
@@ -74,8 +95,10 @@ bool sampleFromReadings(const SensorSet &readings, ImuSample &sample) {
     sample.values[2] = readings.accelerometer.z;
     sample.accuracies |=
         static_cast<uint8_t>((readings.accelerometer.accuracy & kAccuracyMask) << 4);
-    sample.has_data |= kHasAccel;
-    if (readings.accelerometer.last_us > newest_us) {
+    if (accel_fresh) {
+      sample.has_data |= kHasAccel;
+    }
+    if (accel_fresh && readings.accelerometer.last_us > newest_us) {
       newest_us = readings.accelerometer.last_us;
     }
   }
@@ -86,8 +109,10 @@ bool sampleFromReadings(const SensorSet &readings, ImuSample &sample) {
     sample.values[5] = readings.gyroscope.z;
     sample.accuracies |=
         static_cast<uint8_t>((readings.gyroscope.accuracy & kAccuracyMask) << 2);
-    sample.has_data |= kHasGyro;
-    if (readings.gyroscope.last_us > newest_us) {
+    if (gyro_fresh) {
+      sample.has_data |= kHasGyro;
+    }
+    if (gyro_fresh && readings.gyroscope.last_us > newest_us) {
       newest_us = readings.gyroscope.last_us;
     }
   }
@@ -103,8 +128,10 @@ bool sampleFromReadings(const SensorSet &readings, ImuSample &sample) {
     sample.values[9] = readings.rotation.w;  // k
     sample.accuracies |=
         static_cast<uint8_t>(readings.rotation.accuracy & kAccuracyMask);
-    sample.has_data |= kHasRotation;
-    if (readings.rotation.last_us > newest_us) {
+    if (rotation_fresh) {
+      sample.has_data |= kHasRotation;
+    }
+    if (rotation_fresh && readings.rotation.last_us > newest_us) {
       newest_us = readings.rotation.last_us;
     }
   }
@@ -115,7 +142,9 @@ bool sampleFromReadings(const SensorSet &readings, ImuSample &sample) {
     sample.values[12] = readings.magnetometer.z;
     sample.accuracies |=
         static_cast<uint8_t>((readings.magnetometer.accuracy & kAccuracyMask) << 6);
-    sample.has_data |= kHasMagnetometer;
+    if (mag_fresh) {
+      sample.has_data |= kHasMagnetometer;
+    }
     // ⚠️ NOT folded into newest_us. The magnetometer is the slowest report at
     // ~91 Hz, so letting it set the sample's timestamp would make the time axis
     // lag whenever it happened to be the most recent arrival -- and the
@@ -123,7 +152,26 @@ bool sampleFromReadings(const SensorSet &readings, ImuSample &sample) {
     // its value, not its clock.
   }
 
-  sample.time_ms = newest_us / 1000;
+  // ⚠️ FRESH reports only, above. A held value's timestamp is from a previous
+  // sample, so folding it in would drag this sample's time backwards -- and the
+  // timestamp is what the clock-sync path is built on.
+  //
+  // ⚠️ AND IF NOTHING WAS FRESH THE SAMPLE IS STILL EMITTED, stamped from the
+  // clock, with every has_data bit clear. That is not a fudge, it is the
+  // observation: "at this time, the hub had produced nothing new". It happens on
+  // about 10% of slots, because the BNO08x delivers its reports in bursts rather
+  // than evenly -- which is invisible in the per-report rates and was invisible in
+  // the data too, until this bit stopped being sticky.
+  //
+  // Refusing these was tried and is worse: it drops the delivered rate from 100 to
+  // ~90 samples/s, punching holes in a cadence the whole pipeline is built around,
+  // to remove samples that already say they carry nothing. Emitting them keeps the
+  // regular grid for consumers that resample and costs nothing for consumers that
+  // filter on has_data -- and only THOSE samples take a pack-time timestamp, which
+  // is the jitter this function otherwise exists to keep out.
+  sample.time_ms =
+      newest_us > 0 ? newest_us / 1000
+                    : static_cast<uint64_t>(esp_timer_get_time()) / 1000;
   return true;
 }
 

@@ -487,6 +487,24 @@ bool Bno08x::enableReports() {
   // alone with just the accelerometer it manages 93.5. That is the sensor, not
   // the schedule -- its datasheet maximum is 100 Hz.
   //
+  // ⚠️⚠️ AND NONE OF THE ABOVE REACHES A SAMPLE. Every rate in these tables is
+  // counted at the sh2 callback, and the hub does not deliver reports evenly -- it
+  // delivers them in BURSTS at about 88 Hz. A "116 Hz" accelerometer is ~1.3
+  // reports per burst, not a 116 Hz stream, and the extra one is overwritten
+  // before the 100 Hz sampler ever sees it.
+  //
+  // Measured from the other end, as the fraction of emitted samples carrying a
+  // fresh reading of each sensor (the "fresh:" console line): accel 88%, gyro 88%,
+  // mag 88%, quat 88% -- all four identical, because they arrive together.
+  //
+  // ⚠️ THE PROOF THAT THIS IS THE BINDING LIMIT: asking the gyroscope for 111 Hz
+  // and dropping rotation to fund it takes its delivered rate to 183 Hz, and its
+  // sample-visible freshness stays at 88%. DOUBLE the reports, no change whatever
+  // in what reaches the data. So tuning these intervals -- including giving a
+  // report up to fund another -- cannot raise the rate of distinct observations.
+  // What sets the ~88 Hz burst cadence is the open question, and it is the only
+  // lever that would matter (TEC-NATKIT-41).
+  //
   // ⚠️ SO THE DEFAULT BELOW IS UNIFORM 10 ms, WHICH IS THE BEST CONFIGURATION
   // THAT KEEPS ALL FOUR REPORTS. Every attempt to beat it while keeping four was
   // measured and was worse. Getting gyro or rotation genuinely above 100 Hz means
@@ -494,12 +512,14 @@ bool Bno08x::enableReports() {
   // rather than a tuning question -- so it is left to whoever makes that call, and
   // the intervals are per-report Kconfig knobs (0 = off) so it is one edit.
   //
-  // If that call gets made: DROP ROTATION, not gyro. The rotation vector is the
-  // hub's FUSION of the other three, so accel + gyro + mag at >=96 Hz still
-  // contains what it was computed from, while the gyroscope is a primary
-  // measurement nothing else can reconstruct. Rotation is also already absent
-  // from the transform/Parquet path (NatImuBulkDataSchemaDescriptor), so dropping
-  // it costs less than it looks -- it would only leave the JSON and viewer paths.
+  // If that call gets made, it should be made for a reason OTHER than rate --
+  // airtime, power, or simply not wanting the channel -- because the freshness
+  // measurement above shows it will not buy rate. Should it be made anyway: drop
+  // rotation, not gyro. The rotation vector is the hub's FUSION of the other
+  // three, so accel + gyro + mag still contains what it was computed from, while
+  // the gyroscope is a primary measurement nothing else reconstructs. Rotation is
+  // also already absent from the transform/Parquet path, so it would only leave
+  // the JSON and viewer paths.
 
   struct ReportSpec {
     sh2_SensorId_t id;
