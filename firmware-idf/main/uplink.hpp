@@ -95,7 +95,16 @@ struct UplinkNodeStatus {
   int8_t rssi_best;
   int8_t rssi_worst;
   uint8_t rssi_seen;
-  uint8_t reserved1[3];
+  uint8_t leaf_scan_channel;   // non-zero while that leaf is hopping channels
+  uint8_t reserved1[2];
+  // The LEAF's own counters, relayed from its heartbeat. These separate the three
+  // ways a stall can happen and which the primary alone cannot tell apart:
+  // the leaf stopped BUILDING frames, its send queue OVERFLOWED because the radio
+  // was blocked, or its sends were REFUSED on air.
+  uint32_t leaf_frames_built;
+  uint32_t leaf_frames_dropped;
+  uint32_t leaf_send_failures;
+  uint32_t leaf_channel_hops;
 };
 
 struct UplinkPrimaryStatus {

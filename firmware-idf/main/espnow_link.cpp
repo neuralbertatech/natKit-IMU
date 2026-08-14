@@ -318,10 +318,28 @@ bool transmit(const TxItem &item) {
   return false;
 }
 
-// How many consecutive on-air failures mean "the hub is gone" rather than "the air
-// was busy". Five at 5 frames/s is a second of silence, which is far longer than
-// any contention this link sees and far shorter than a reboot.
-constexpr uint32_t kAbsentAfterFailures = 5;
+// ⚠️ BEACON SILENCE, NOT SEND FAILURES -- the same correction a91f943 already made
+// to channel rescanning, which was left unapplied here.
+//
+// This used to presume the hub gone after five consecutive on-air failures, on
+// the reasoning that five at 5 frames/s is a second of silence. Two things make
+// that wrong on this rig. The frame rate is 10/s plus heartbeats and sync
+// probes, so five failures is a fraction of a second; and an "on-air failure"
+// here means no MAC-layer ACK came back, which HAPPENS CONSTANTLY WHILE THE
+// FRAMES ARRIVE -- measured at 399 tx failures against a hub that was receiving
+// ~10 frames/s and forwarding every one of them.
+//
+// So a routine run of five spurious failures flipped the leaf to one-try-no-retry
+// mode, and THAT caused real loss: frames that a retry would have delivered were
+// sent once into a busy channel and dropped. It recovered when one send happened
+// to be acknowledged, then repeated. That feedback loop is the ~2 s stall in
+// TEC-NATKIT-42 -- self-inflicted, and invisible because the counter it keyed on
+// was measuring something real that simply did not mean what it was read to mean.
+//
+// Beacon silence is the authoritative signal for the same reason it is when
+// rescanning: the primary broadcasts every second, broadcasts need no ACK, so
+// hearing them proves the hub is there no matter what the transmit path thinks.
+constexpr uint64_t kAbsentAfterBeaconSilenceUs = 3ULL * 1000000ULL;
 
 void txTask(void *) {
   TxItem item{};
@@ -369,17 +387,21 @@ void txTask(void *) {
     } else {
       ++sStats.send_failures;
       ++sStats.consecutive_failures;
-      if (!sStats.primary_absent &&
-          sStats.consecutive_failures >= kAbsentAfterFailures) {
+      // Failures are COUNTED but no longer decide anything: see
+      // kAbsentAfterBeaconSilenceUs. What decides is whether beacons have stopped.
+      const uint64_t last_beacon = timeSyncStatus().last_beacon_local_us;
+      const uint64_t now_us = static_cast<uint64_t>(esp_timer_get_time());
+      const bool beacons_silent =
+          last_beacon != 0 && now_us - last_beacon > kAbsentAfterBeaconSilenceUs;
+      if (!sStats.primary_absent && beacons_silent) {
         sStats.primary_absent = true;
         // Logged once, on the transition. A line per failed frame would be the
         // loudest thing in the console for the whole outage and would say nothing
         // the counters do not.
         ESP_LOGW(kTag,
-                 "primary has not answered %lu times: presuming it is gone, "
-                 "sending once per frame until it returns (the queue now decides "
-                 "what to drop)",
-                 static_cast<unsigned long>(sStats.consecutive_failures));
+                 "no beacon for %llu ms and sends are failing: presuming the "
+                 "primary is gone, sending once per frame until it returns",
+                 static_cast<unsigned long long>((now_us - last_beacon) / 1000));
       }
     }
   }

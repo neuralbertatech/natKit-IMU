@@ -285,6 +285,8 @@ void runLeaf() {
       beat.accuracy_gyro = r.gyroscope.accuracy;
       beat.accuracy_mag = r.magnetometer.accuracy;
       beat.accuracy_rotation = r.rotation.accuracy;
+      beat.channel_hops = link.channel_hops;
+      beat.scan_channel = link.scan_channel;
       espNowLinkSend(PacketType::kHeartbeat, &beat, sizeof(beat));
     }
 

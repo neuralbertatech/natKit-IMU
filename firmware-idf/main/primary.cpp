@@ -113,6 +113,13 @@ void fillNodeStatus(const NodeState &node, UplinkNodeStatus &out) {
   out.rssi_best = node.rssi_best;
   out.rssi_worst = node.rssi_worst;
   out.rssi_seen = node.rssi_seen ? 1 : 0;
+  if (node.heartbeat_seen) {
+    out.leaf_frames_built = node.last_heartbeat.frames_built;
+    out.leaf_frames_dropped = node.last_heartbeat.frames_dropped;
+    out.leaf_send_failures = node.last_heartbeat.send_failures;
+    out.leaf_channel_hops = node.last_heartbeat.channel_hops;
+    out.leaf_scan_channel = node.last_heartbeat.scan_channel;
+  }
 }
 
 void fillPrimaryStatus(UplinkPrimaryStatus &out) {

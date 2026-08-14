@@ -146,6 +146,14 @@ struct Heartbeat {
   uint8_t accuracy_gyro;
   uint8_t accuracy_mag;
   uint8_t accuracy_rotation;
+  // ⚠️ ADDED TO CHASE A PERIODIC 2 s STALL (TEC-NATKIT-42). The leaf's own view
+  // of its radio cannot be read from its console -- opening one disturbs the
+  // board badly enough to change the thing being measured -- so the counters that
+  // distinguish the candidate causes have to travel to the primary and out over
+  // MQTT like everything else on this rig.
+  uint32_t channel_hops;   // rises if the leaf is rescanning channels
+  uint8_t scan_channel;    // 0 when locked; non-zero while hopping
+  uint8_t reserved_hb[3];
 };
 
 // --- Timing broadcast (#340 / TEC-NATKIT-17) --------------------------------
