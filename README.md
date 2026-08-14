@@ -19,6 +19,19 @@ flashable, and the epic ends in an explicit adopt-or-discard decision
 (TEC-NATKIT-27). But "additive" no longer means "unused": the ESP-IDF tree is what
 every board on the bench is running, and has been since 2026-08-12.
 
+**So new work goes in `firmware-idf/`. Do not edit `embeded/` unless the change
+actually requires it** — a change there cannot be verified, because no board runs
+it, and it does not even build against the sibling submodule (see the wire-format
+warning below). If a fix would be needed after a rollback, file a ticket saying so
+rather than porting it pre-emptively.
+
+⚠️ **The reverse is not a preference but a hazard: fixes made to `embeded/` before
+the migration were not all carried across.** The EXECUTION_COMMAND / LOGGING_LOG
+channel (`embeded/include/CommandChannel.hpp`) has no counterpart in
+`firmware-idf/` at all, and it was verified on hardware a week before the switch.
+Nothing errors — the backend half still works, so a command is published and
+simply goes unsubscribed. TEC-NATKIT-39.
+
 ⚠️ **THE TWO FIRMWARES ARE NO LONGER WIRE-COMPATIBLE BY DEFAULT.** `firmware-idf/`
 emits IMU frame **version 2** (13 floats, 62-byte samples, 644-byte frames, with
 the magnetometer). `embeded/` emits **version 1** (10 floats, 50-byte samples, 524
