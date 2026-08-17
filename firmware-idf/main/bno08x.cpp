@@ -7,6 +7,7 @@
 #include "driver/spi_master.h"
 #include "esp_attr.h"
 #include "esp_log.h"
+#include "nvs.h"
 #include "esp_timer.h"
 #include "freertos/FreeRTOS.h"
 #include "freertos/task.h"
@@ -436,6 +437,10 @@ esp_err_t Bno08x::begin() {
     ESP_LOGW(kTag, "sh2_getCalConfig failed with %d", read_back);
   }
 
+  // BEFORE the first enableReports, so a mask restored from NVS is what the hub
+  // is first configured with -- applying it a moment later would put one round of
+  // unwanted reports on the wire, and on a recording that is a real artefact.
+  loadReportMask();
   if (!enableReports()) {
     return ESP_FAIL;
   }
@@ -444,62 +449,206 @@ esp_err_t Bno08x::begin() {
   return ESP_OK;
 }
 
+namespace {
+constexpr char kReportNamespace[] = "natkit-imu";
+constexpr char kReportMaskKey[] = "reports";
+}  // namespace
+
+esp_err_t Bno08x::setReportMask(const uint8_t mask) {
+  // ⚠️ REFUSED, not clamped. Silently substituting a working mask would leave the
+  // frontend showing a state the device is not in, and the caller has an answer
+  // channel to be told on.
+  if ((mask & kReportMotionMask) == 0) {
+    ESP_LOGE(kTag,
+             "refusing report mask 0x%02x: it leaves no motion report, and this "
+             "node would stop producing samples entirely",
+             mask);
+    return ESP_ERR_INVALID_ARG;
+  }
+
+  const uint8_t previous = report_mask_;
+  report_mask_ = mask & kReportAll;
+
+  // ⚠️ CLEAR WHAT WAS TURNED OFF. The frame builder copies each sensor's last
+  // value into every sample and marks freshness separately, so a disabled sensor
+  // would otherwise keep contributing the last number it produced, forever. A
+  // plausible reading from a switched-off sensor is worse than a zero, because
+  // nothing about it looks wrong.
+  const uint8_t turned_off = static_cast<uint8_t>(previous & ~report_mask_);
+  if ((turned_off & kReportAccel) != 0) {
+    readings_.accelerometer = SensorReading{};
+  }
+  if ((turned_off & kReportGyro) != 0) {
+    readings_.gyroscope = SensorReading{};
+  }
+  if ((turned_off & kReportMagnetometer) != 0) {
+    readings_.magnetometer = SensorReading{};
+  }
+  if ((turned_off & kReportRotation) != 0) {
+    readings_.rotation = SensorReading{};
+  }
+
+  nvs_handle_t handle = 0;
+  esp_err_t err = nvs_open(kReportNamespace, NVS_READWRITE, &handle);
+  if (err == ESP_OK) {
+    err = nvs_set_u8(handle, kReportMaskKey, report_mask_);
+    if (err == ESP_OK) {
+      err = nvs_commit(handle);
+    }
+    nvs_close(handle);
+  }
+  if (err != ESP_OK) {
+    // The mask still applies for this boot; only its persistence failed, and
+    // saying which is the difference between "it did not work" and "it will not
+    // survive a reboot".
+    ESP_LOGE(kTag, "report mask 0x%02x applied but NOT saved: %s", report_mask_,
+             esp_err_to_name(err));
+  }
+
+  ESP_LOGW(kTag, "reports now: accel %s, gyro %s, mag %s, rotation %s",
+           (report_mask_ & kReportAccel) ? "on" : "OFF",
+           (report_mask_ & kReportGyro) ? "on" : "OFF",
+           (report_mask_ & kReportMagnetometer) ? "on" : "OFF",
+           (report_mask_ & kReportRotation) ? "on" : "OFF");
+  return enableReports() ? ESP_OK : ESP_FAIL;
+}
+
+void Bno08x::resetBurstStats() {
+  burst_ = BurstStats{};
+  // last_burst_us_ is deliberately NOT cleared: clearing it would throw away the
+  // gap that straddles the reset, and that gap is a real observation.
+}
+
+void Bno08x::loadReportMask() {
+  // ⚠️ EVERY OUTCOME IS LOGGED, including the boring ones. This was written to
+  // return quietly when NVS had nothing to say, and when the mask then failed to
+  // survive a reboot there was no way to tell "never saved" from "saved and not
+  // read" from "read and rejected" -- three different bugs that all look like one
+  // symptom. A configuration that silently reverts is worse than one that refuses
+  // to change, so this end is noisy on purpose.
+  nvs_handle_t handle = 0;
+  const esp_err_t opened = nvs_open(kReportNamespace, NVS_READONLY, &handle);
+  if (opened != ESP_OK) {
+    ESP_LOGW(kTag,
+             "report mask not restored: nvs_open(%s) says %s. Using the "
+             "compiled-in default 0x%02x",
+             kReportNamespace, esp_err_to_name(opened), report_mask_);
+    return;
+  }
+  uint8_t stored = 0;
+  const esp_err_t got = nvs_get_u8(handle, kReportMaskKey, &stored);
+  nvs_close(handle);
+  if (got != ESP_OK) {
+    ESP_LOGW(kTag, "report mask not restored: nvs_get_u8(%s) says %s",
+             kReportMaskKey, esp_err_to_name(got));
+    return;
+  }
+  if ((stored & kReportMotionMask) == 0) {
+    ESP_LOGE(kTag,
+             "stored report mask 0x%02x has no motion report and was IGNORED; "
+             "this node would produce nothing at all",
+             stored);
+    return;
+  }
+  report_mask_ = stored & kReportAll;
+  ESP_LOGW(kTag, "restored report mask 0x%02x from NVS", report_mask_);
+}
+
 bool Bno08x::enableReports() {
-  // ⚠️ EVERY INTERVAL IS THE SAME HERE, AND THAT IS THE MEASURED OPTIMUM, not an
-  // oversight. The per-report structure is kept because the intervals ARE
-  // independent knobs and the obvious tuning is wrong; this is the record of it.
+  // ⚠️ THE HUB DOES NOT DELIVER WHAT IT IS ASKED FOR, and not uniformly, so no
+  // single interval lands four reports on one rate. Every number below is
+  // measured on hardware (tools/sweep_report_rates.sh reproduces the table).
   //
-  // The hub does not deliver what it is asked for. At a uniform 100 Hz request:
-  // accel 117, gyro 95, mag 91, quat 95 Hz -- the total is about right (398 of
-  // 400) but the accelerometer takes a fifth more than it asked for and the
-  // other three go short.
+  // Read it against 100 Hz as a FLOOR, not a target: the frame builder takes a
+  // 100 Hz snapshot of each sensor's latest value, so a report above 100 Hz is
+  // merely wasted while one below leaves stale values in samples.
   //
-  // Asking for more does not fix it, it inverts it. Uniform requests, delivered:
+  // Uniform requests -- asking for MORE inverts the problem rather than fixing it:
   //
-  //     request   accel  gyro   mag  quat   total
-  //     100 Hz      117    95    91    95     398
+  //     asked     accel  gyro   mag  quat   total
+  //     100 Hz      114    95    91    95     395
   //     125 Hz       83   155    78   155     471
   //     150 Hz       65   175    63   175     478
   //     200 Hz       63   174    62   177     476
   //
-  // Two things fall out. There is a CEILING near 475 reports/s; and under
-  // contention the hub feeds gyro and rotation at the expense of accel and mag.
-  // Note also that gyro and quat have no rate between ~95 and ~160 -- anything
-  // below a 10 ms request snaps them to ~160 Hz.
+  // So there is a CEILING near 475 reports/s, and under contention the hub feeds
+  // gyro and rotation at the expense of accel and mag.
   //
-  // ⚠️ SO THE OBVIOUS TUNE BACKFIRES. Asking gyro and rotation for 9 ms to lift
-  // them over 100 does lift them, to ~160 -- and the total pins at the ceiling,
-  // dragging accel to 80 and mag to 75, BELOW 100, where they had been fine.
-  // Measured, not predicted. Uniform 10 ms sits at 398/s with headroom and is
-  // the best allocation available.
+  // ⚠️ BUT THE 95 Hz AT A 100 Hz REQUEST IS NOT CONTENTION. 395 is well under the
+  // ceiling, and freeing budget does almost nothing -- dropping a whole report
+  // returns only ~1-2 Hz to the others:
   //
-  // ⚠️ AND ABOVE 100 Hz IS NOT A PROBLEM, BELOW IT IS. The frame builder takes a
-  // 100 Hz snapshot of each sensor's latest value, so a report arriving at 160 Hz
-  // merely wastes it, while one arriving at 95 Hz leaves ~5% of samples carrying
-  // the previous value. Judge these numbers against 100 as a FLOOR.
+  //     all four                    114 /  95 /  91 /  95
+  //     rotation dropped            118 /  96 /  92 /   -
+  //     gyroscope dropped           116 /   - /  92 /  95
+  //     accel + mag only            121 /   - /  94 /   -
   //
-  // The ceiling is the hub's, not ours. Three things were tried and none moved
-  // it: 3 MHz SPI instead of 1 MHz (identical numbers), draining sh2_service
-  // rather than calling it once per pump (+2 Hz), and disabling the magnetometer
-  // to free 91 Hz of budget (+2 Hz on the others -- so mag is very nearly free).
-  struct ReportSpec {
+  // What DOES work is asking faster: gyro and rotation have no rate between ~95
+  // and ~185, and anything below a 10 ms request snaps them to the high one. That
+  // only fits under the ceiling if something else is dropped:
+  //
+  //     drop rotation, gyro+mag asked 111 Hz    120 / 188 / 96.5 /   -
+  //     drop gyroscope, quat asked 111 Hz       114 /   - / 94   / 182
+  //     KEEP all four, gyro asked 111 Hz        100 / 172 / 83   /  86   <- worse
+  //     KEEP all four, accel throttled to 71 Hz  81 / 154 / 78   / 154   <- worse
+  //
+  // ⚠️ AND THE MAGNETOMETER CANNOT REACH 100 Hz AT ALL. Its ceiling is ~96.5, and
+  // asking for more makes it worse, not better (200 Hz requested -> 91.5). Even
+  // alone with just the accelerometer it manages 93.5. That is the sensor, not
+  // the schedule -- its datasheet maximum is 100 Hz.
+  //
+  // ⚠️⚠️ AND NONE OF THE ABOVE REACHES A SAMPLE. Every rate in these tables is
+  // counted at the sh2 callback, and the hub does not deliver reports evenly -- it
+  // delivers them in BURSTS at about 88 Hz. A "116 Hz" accelerometer is ~1.3
+  // reports per burst, not a 116 Hz stream, and the extra one is overwritten
+  // before the 100 Hz sampler ever sees it.
+  //
+  // Measured from the other end, as the fraction of emitted samples carrying a
+  // fresh reading of each sensor (the "fresh:" console line): accel 88%, gyro 88%,
+  // mag 88%, quat 88% -- all four identical, because they arrive together.
+  //
+  // ⚠️ THE PROOF THAT THIS IS THE BINDING LIMIT: asking the gyroscope for 111 Hz
+  // and dropping rotation to fund it takes its delivered rate to 183 Hz, and its
+  // sample-visible freshness stays at 88%. DOUBLE the reports, no change whatever
+  // in what reaches the data. So tuning these intervals -- including giving a
+  // report up to fund another -- cannot raise the rate of distinct observations.
+  // What sets the ~88 Hz burst cadence is the open question, and it is the only
+  // lever that would matter (TEC-NATKIT-41).
+  //
+  // ⚠️ SO THE DEFAULT BELOW IS UNIFORM 10 ms, WHICH IS THE BEST CONFIGURATION
+  // THAT KEEPS ALL FOUR REPORTS. Every attempt to beat it while keeping four was
+  // measured and was worse. Getting gyro or rotation genuinely above 100 Hz means
+  // giving one of them up, which is a decision about what a recording contains
+  // rather than a tuning question -- so it is left to whoever makes that call, and
+  // the intervals are per-report Kconfig knobs (0 = off) so it is one edit.
+  //
+  // If that call gets made, it should be made for a reason OTHER than rate --
+  // airtime, power, or simply not wanting the channel -- because the freshness
+  // measurement above shows it will not buy rate. Should it be made anyway: drop
+  // rotation, not gyro. The rotation vector is the hub's FUSION of the other
+  // three, so accel + gyro + mag still contains what it was computed from, while
+  // the gyroscope is a primary measurement nothing else reconstructs. Rotation is
+  // also already absent from the transform/Parquet path, so it would only leave
+  // the JSON and viewer paths.
+
+  // Kconfig sets each report's RATE; the runtime mask decides which are on. An
+  // interval of 0 still means "compiled off" and the mask cannot resurrect it,
+  // because there would be no rate to ask for.
+  struct MaskedSpec {
     sh2_SensorId_t id;
     const char *name;
     uint32_t interval_us;
+    uint8_t bit;
   };
-  static constexpr uint32_t kBase = CONFIG_NATKIT_IMU_REPORT_INTERVAL_US;
-  static const ReportSpec kReports[] = {
-      // The accelerometer over-delivers on this hub, so it is asked for LESS
-      // than the target rather than more.
-      {SH2_ACCELEROMETER, "accelerometer", kBase},
-      {SH2_GYROSCOPE_CALIBRATED, "gyroscope", kBase},
-#if CONFIG_NATKIT_IMU_ENABLE_MAGNETOMETER
-      // ⚠️ The magnetometer is NOT asked for more. It is the one report whose
-      // datasheet maximum is 100 Hz, and it peaked at 90 Hz on a 100 Hz request
-      // while every faster request made it WORSE (78 Hz at 125, 63 at 150).
-      {SH2_MAGNETIC_FIELD_CALIBRATED, "magnetometer", kBase},
-#endif
-      {SH2_ROTATION_VECTOR, "rotation vector", kBase},
+  const MaskedSpec kReports[] = {
+      {SH2_ACCELEROMETER, "accelerometer", CONFIG_NATKIT_IMU_INTERVAL_ACCEL_US,
+       kReportAccel},
+      {SH2_GYROSCOPE_CALIBRATED, "gyroscope", CONFIG_NATKIT_IMU_INTERVAL_GYRO_US,
+       kReportGyro},
+      {SH2_MAGNETIC_FIELD_CALIBRATED, "magnetometer",
+       CONFIG_NATKIT_IMU_INTERVAL_MAG_US, kReportMagnetometer},
+      {SH2_ROTATION_VECTOR, "rotation vector",
+       CONFIG_NATKIT_IMU_INTERVAL_QUAT_US, kReportRotation},
   };
 
   sh2_SensorConfig_t config{};
@@ -512,7 +661,16 @@ bool Bno08x::enableReports() {
   config.sensorSpecific = 0;
 
   bool all_ok = true;
-  for (const ReportSpec &report : kReports) {
+  for (const MaskedSpec &report : kReports) {
+    if (report.interval_us == 0 || (report_mask_ & report.bit) == 0) {
+      // Explicitly disable rather than just not enabling: the hub remembers its
+      // configuration across a soft reset, so a report left over from a previous
+      // firmware would keep arriving and keep spending the ceiling.
+      config.reportInterval_us = 0;
+      sh2_setSensorConfig(report.id, &config);
+      ESP_LOGI(kTag, "%s disabled", report.name);
+      continue;
+    }
     config.reportInterval_us = report.interval_us;
     const int status = sh2_setSensorConfig(report.id, &config);
     if (status != SH2_OK) {
@@ -527,8 +685,12 @@ int Bno08x::service() {
   if (sResetOccurred) {
     sResetOccurred = false;
     ++reset_count_;
-    ESP_LOGW(kTag, "hub reset (#%lu); re-enabling reports",
-             static_cast<unsigned long>(reset_count_));
+    // ⚠️ Re-enables from report_mask_, which lives in RAM on OUR side and is
+    // untouched by the hub resetting itself. That is what stops a hub reset
+    // silently reverting a runtime configuration to the compiled-in default while
+    // the frontend goes on showing the old one.
+    ESP_LOGW(kTag, "hub reset (#%lu); re-enabling reports (mask 0x%02x)",
+             static_cast<unsigned long>(reset_count_), report_mask_);
     enableReports();
   }
 
@@ -541,10 +703,15 @@ int Bno08x::service() {
   sAppliedThisService = 0;
   for (int pass = 0; pass < 8; ++pass) {
     const uint32_t before = sAppliedThisService;
+    ++burst_.service_calls;
     sh2_service();
     if (sAppliedThisService == before) {
       break;
     }
+  }
+
+  if (sAppliedThisService > 0) {
+    ++burst_.productive_calls;
   }
   return sAppliedThisService;
 }
@@ -556,6 +723,17 @@ void Bno08x::applyEvent(const sh2_SensorValue_t &value) {
   SensorReading *target = nullptr;
   switch (value.sensorId) {
     case SH2_ACCELEROMETER:
+      // Gap since the previous accelerometer report, recorded here rather than at
+      // the poll: this is the hub speaking, not us looking.
+      if (last_burst_us_ != 0) {
+        const uint32_t gap = static_cast<uint32_t>(now - last_burst_us_);
+        ++burst_.gaps;
+        burst_.gap_sum_us += gap;
+        if (gap < burst_.gap_min_us) burst_.gap_min_us = gap;
+        if (gap > burst_.gap_max_us) burst_.gap_max_us = gap;
+        if (gap < 2000) ++burst_.gaps_under_2ms;
+      }
+      last_burst_us_ = now;
       target = &readings_.accelerometer;
       target->x = value.un.accelerometer.x;
       target->y = value.un.accelerometer.y;

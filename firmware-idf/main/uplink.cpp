@@ -104,6 +104,13 @@ constexpr char kNodeStatusTopic[] =
     "natKit/sending/Log-%" PRIu64 "-Binary-NatKitNodeStatusV1";
 constexpr char kPrimaryStatusTopic[] =
     "natKit/sending/Log-%" PRIu64 "-Binary-NatKitPrimaryStatusV1";
+// The answer to a command. ⚠️ The name and JSON encoding are not ours to choose:
+// StreamViewerWebSocket::handleSendDeviceCommand already waits on exactly this
+// topic and correlates by command_id, and it was verified against the Arduino
+// firmware in 2026-08. Matching it is what makes the existing backend and the
+// existing frontend buttons work with no server-side change at all.
+constexpr char kCommandLogTopic[] =
+    "natKit/sending/Log-%" PRIu64 "-Json-NatLogV1";
 
 char sTopic[96];
 
@@ -133,6 +140,9 @@ void publishFrame(const uint8_t *frame, size_t length) {
       break;
     case UplinkType::kPrimaryStatus:
       topic = kPrimaryStatusTopic;
+      break;
+    case UplinkType::kCommandLog:
+      topic = kCommandLogTopic;
       break;
     default:
       break;

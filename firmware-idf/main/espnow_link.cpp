@@ -2,10 +2,12 @@
 
 #include <cinttypes>
 #include <cmath>
+#include <cstdio>
 #include <cstring>
 
 #include "device_id.hpp"
 #include "esp_event.h"
+#include "esp_crc.h"
 #include "esp_log.h"
 #include "esp_now.h"
 #include "esp_timer.h"
@@ -21,6 +23,8 @@
 #include "registry.hpp"
 #include "sdkconfig.h"
 #include "time_sync.hpp"
+#include "command_relay.hpp"
+#include "commands.hpp"
 #include "uplink.hpp"
 
 namespace natkit {
@@ -195,6 +199,41 @@ void leafRecvCallback(const esp_now_recv_info_t *info, const uint8_t *data,
       }
       break;
     }
+    case PacketType::kCommand: {
+      if (payload_size < sizeof(CommandFrame)) {
+        break;
+      }
+      CommandFrame frame{};
+      std::memcpy(&frame, payload, sizeof(frame));
+      frame.command_id[kCommandIdMax - 1] = '\0';
+      frame.command[kCommandNameMax - 1] = '\0';
+      frame.args[kCommandArgsMax - 1] = '\0';
+      // ⚠️ ADDRESSED, AND CHECKED HERE. The primary unicasts, but ESP-NOW peers
+      // can and do receive frames meant for others, and a leaf executing another
+      // node's command would be both wrong and extremely confusing to debug.
+      if (frame.device_id != deviceId()) {
+        break;
+      }
+
+      // ⚠️ ACKNOWLEDGE FIRST, AND ACKNOWLEDGE AGAIN FOR A REPEAT. The primary
+      // retransmits until it hears this, so a command whose ack was lost will
+      // arrive a second time -- and the right answer to that is another ack, not
+      // another execution.
+      CommandAck ack{};
+      ack.device_id = frame.device_id;
+      std::strncpy(ack.command_id, frame.command_id, kCommandIdMax - 1);
+      espNowLinkSend(PacketType::kCommandAck, &ack, sizeof(ack));
+
+      // ⚠️ AND EXECUTE AT MOST ONCE. Retransmission plus no de-duplication would
+      // run a command several times, which for something like "set the report
+      // configuration" is merely wasteful and for anything with a side effect is
+      // a bug. Keyed on command_id, which the backend generates uniquely.
+      if (commandsAlreadySeen(frame.command_id)) {
+        break;
+      }
+      commandsEnqueue(frame);
+      break;
+    }
     case PacketType::kSyncMarker: {
       // A held-out sample: converted with the fit, never fed INTO it. Answering
       // from the callback rather than from a task is deliberate -- the answer is
@@ -279,10 +318,28 @@ bool transmit(const TxItem &item) {
   return false;
 }
 
-// How many consecutive on-air failures mean "the hub is gone" rather than "the air
-// was busy". Five at 5 frames/s is a second of silence, which is far longer than
-// any contention this link sees and far shorter than a reboot.
-constexpr uint32_t kAbsentAfterFailures = 5;
+// ⚠️ BEACON SILENCE, NOT SEND FAILURES -- the same correction a91f943 already made
+// to channel rescanning, which was left unapplied here.
+//
+// This used to presume the hub gone after five consecutive on-air failures, on
+// the reasoning that five at 5 frames/s is a second of silence. Two things make
+// that wrong on this rig. The frame rate is 10/s plus heartbeats and sync
+// probes, so five failures is a fraction of a second; and an "on-air failure"
+// here means no MAC-layer ACK came back, which HAPPENS CONSTANTLY WHILE THE
+// FRAMES ARRIVE -- measured at 399 tx failures against a hub that was receiving
+// ~10 frames/s and forwarding every one of them.
+//
+// So a routine run of five spurious failures flipped the leaf to one-try-no-retry
+// mode, and THAT caused real loss: frames that a retry would have delivered were
+// sent once into a busy channel and dropped. It recovered when one send happened
+// to be acknowledged, then repeated. That feedback loop is the ~2 s stall in
+// TEC-NATKIT-42 -- self-inflicted, and invisible because the counter it keyed on
+// was measuring something real that simply did not mean what it was read to mean.
+//
+// Beacon silence is the authoritative signal for the same reason it is when
+// rescanning: the primary broadcasts every second, broadcasts need no ACK, so
+// hearing them proves the hub is there no matter what the transmit path thinks.
+constexpr uint64_t kAbsentAfterBeaconSilenceUs = 3ULL * 1000000ULL;
 
 void txTask(void *) {
   TxItem item{};
@@ -330,17 +387,21 @@ void txTask(void *) {
     } else {
       ++sStats.send_failures;
       ++sStats.consecutive_failures;
-      if (!sStats.primary_absent &&
-          sStats.consecutive_failures >= kAbsentAfterFailures) {
+      // Failures are COUNTED but no longer decide anything: see
+      // kAbsentAfterBeaconSilenceUs. What decides is whether beacons have stopped.
+      const uint64_t last_beacon = timeSyncStatus().last_beacon_local_us;
+      const uint64_t now_us = static_cast<uint64_t>(esp_timer_get_time());
+      const bool beacons_silent =
+          last_beacon != 0 && now_us - last_beacon > kAbsentAfterBeaconSilenceUs;
+      if (!sStats.primary_absent && beacons_silent) {
         sStats.primary_absent = true;
         // Logged once, on the transition. A line per failed frame would be the
         // loudest thing in the console for the whole outage and would say nothing
         // the counters do not.
         ESP_LOGW(kTag,
-                 "primary has not answered %lu times: presuming it is gone, "
-                 "sending once per frame until it returns (the queue now decides "
-                 "what to drop)",
-                 static_cast<unsigned long>(sStats.consecutive_failures));
+                 "no beacon for %llu ms and sends are failing: presuming the "
+                 "primary is gone, sending once per frame until it returns",
+                 static_cast<unsigned long long>((now_us - last_beacon) / 1000));
       }
     }
   }
@@ -1014,6 +1075,9 @@ void pairMarker(NodeState &node) {
 
 // Kept short on purpose: this runs on the WiFi task, so it updates counters and
 // gets out. All logging happens in the primary's own loop.
+// Defined below, next to the unicast helper it pairs with.
+void publishCommandLog(const CommandLogFrame &log);
+
 void primaryRecvCallback(const esp_now_recv_info_t *info, const uint8_t *data,
                          int len) {
   if (info == nullptr || data == nullptr || len < static_cast<int>(kEnvelopeSize)) {
@@ -1248,6 +1312,29 @@ void primaryRecvCallback(const esp_now_recv_info_t *info, const uint8_t *data,
       }
       break;
     }
+    case PacketType::kCommandAck: {
+      if (payload_size < sizeof(CommandAck)) {
+        ++sUnknownPackets;
+        break;
+      }
+      CommandAck ack{};
+      std::memcpy(&ack, payload, sizeof(ack));
+      ack.command_id[kCommandIdMax - 1] = '\0';
+      commandRelayNoteAck(ack.device_id, ack.command_id);
+      break;
+    }
+    case PacketType::kCommandLog: {
+      if (payload_size < sizeof(CommandLogFrame)) {
+        ++sUnknownPackets;
+        break;
+      }
+      CommandLogFrame log{};
+      std::memcpy(&log, payload, sizeof(log));
+      log.command_id[kCommandIdMax - 1] = '\0';
+      log.message[kCommandMessageMax - 1] = '\0';
+      publishCommandLog(log);
+      break;
+    }
     case PacketType::kTimeBeacon:
     case PacketType::kTimeFollowUp:
       // Another primary's timing broadcast on our channel. Counted, not acted on:
@@ -1306,6 +1393,124 @@ void primarySendCallback(const wifi_tx_info_t *, esp_now_send_status_t) {
   if (sBeaconSent != nullptr) {
     xSemaphoreGive(sBeaconSent);
   }
+}
+
+// Unicast, and with a buffer big enough for a CommandFrame. Kept separate from
+// broadcastPacket rather than parameterising it: broadcast's 64-byte buffer is a
+// deliberate bound on the timing traffic, and widening it to fit a command would
+// quietly allow an oversized beacon.
+// Builds the JSON the backend is already waiting for and hands it to the uplink.
+//
+// ⚠️ BUILT BY HAND, not with a JSON library, and the escaping below is the reason
+// this is safe: every field that reaches it is either generated by the backend
+// (command_id) or produced by our own firmware (message), and the only characters
+// either can contain that would break the document are quotes and backslashes.
+// A device log line is not attacker-controlled text.
+uint32_t sCommandAnswersReceived = 0;
+uint32_t sCommandAnswersPublished = 0;
+uint32_t sCommandAnswersDuplicate = 0;
+
+// ⚠️ ANSWERS ARRIVE MORE THAN ONCE, MEASURED: ten pings produced twenty-one
+// answers. The leaf sends each one exactly once -- what duplicates them is the
+// 802.11 MAC retransmitting below ESP-NOW when its acknowledgement does not come
+// back in time, the same mechanism that put ~50% duplicates on the data path
+// before the transmit power came down. The data path dedupes by frame sequence
+// number; a command answer has no sequence, so it needs its own.
+//
+// Keyed on the CONTENT as well as the id, because one command may legitimately
+// produce several records (progress, then a final): only an exact repeat is a
+// duplicate.
+constexpr size_t kAnswerHistory = 8;
+struct AnswerKey {
+  uint64_t device_id;
+  uint32_t message_crc;
+  char command_id[kCommandIdMax];
+};
+AnswerKey sRecentAnswers[kAnswerHistory] = {};
+size_t sRecentAnswerNext = 0;
+
+bool answerAlreadySeen(const CommandLogFrame &log) {
+  const uint32_t crc = esp_crc32_le(
+      0, reinterpret_cast<const uint8_t *>(log.message),
+      static_cast<uint32_t>(std::strlen(log.message)));
+  for (const AnswerKey &seen : sRecentAnswers) {
+    if (seen.device_id == log.device_id && seen.message_crc == crc &&
+        std::strncmp(seen.command_id, log.command_id, kCommandIdMax) == 0) {
+      return true;
+    }
+  }
+  AnswerKey &slot = sRecentAnswers[sRecentAnswerNext];
+  slot.device_id = log.device_id;
+  slot.message_crc = crc;
+  std::strncpy(slot.command_id, log.command_id, kCommandIdMax - 1);
+  slot.command_id[kCommandIdMax - 1] = '\0';
+  sRecentAnswerNext = (sRecentAnswerNext + 1) % kAnswerHistory;
+  return false;
+}
+
+void publishCommandLog(const CommandLogFrame &log) {
+  ++sCommandAnswersReceived;
+  if (answerAlreadySeen(log)) {
+    ++sCommandAnswersDuplicate;
+    return;
+  }
+  const auto escapeInto = [](char *out, size_t out_size, const char *in) {
+    size_t j = 0;
+    for (size_t i = 0; in[i] != '\0' && j + 2 < out_size; ++i) {
+      const char c = in[i];
+      if (c == '"' || c == '\\') {
+        out[j++] = '\\';
+      } else if (static_cast<unsigned char>(c) < 0x20) {
+        continue;  // control characters would make the document unparseable
+      }
+      out[j++] = c;
+    }
+    out[j] = '\0';
+  };
+
+  char id[kCommandIdMax * 2];
+  char message[kCommandMessageMax * 2];
+  escapeInto(id, sizeof(id), log.command_id);
+  escapeInto(message, sizeof(message), log.message);
+
+  char json[kCommandIdMax * 2 + kCommandMessageMax * 2 + 128];
+  const int length = std::snprintf(
+      json, sizeof(json),
+      // ⚠️ "terminal", NOT "final". The backend's correlation loop waits on
+      // exactly this key and the Arduino firmware has always sent it; emitting a
+      // differently-named field meant every command reported timed_out=true while
+      // carrying a perfectly good answer in its records -- a failure that looks
+      // like a dead device and is actually a spelling disagreement. Found only by
+      // driving the real backend rather than the broker.
+      "{\"schema_version\":\"nat.log.v1\",\"command_id\":\"%s\","
+      "\"source\":\"sensor\",\"ok\":%s,\"terminal\":%s,\"message\":\"%s\"}",
+      id, log.ok != 0 ? "true" : "false", log.final != 0 ? "true" : "false",
+      message);
+  if (length <= 0) {
+    return;
+  }
+  if (uplinkSend(UplinkType::kCommandLog, log.device_id, json,
+                 static_cast<size_t>(length))) {
+    ++sCommandAnswersPublished;
+  }
+  ESP_LOGI(kTag, "answer for %s from device %" PRIu64 ": %s", log.command_id,
+           log.device_id, log.message);
+}
+
+bool unicastPacket(const uint8_t *mac, PacketType type, const void *payload,
+                   size_t payload_size) {
+  uint8_t packet[kEnvelopeSize + sizeof(CommandFrame)];
+  if (payload_size > sizeof(packet) - kEnvelopeSize) {
+    return false;
+  }
+  packet[0] = kEspNowMagic0;
+  packet[1] = kEspNowMagic1;
+  packet[2] = kEspNowProtocolVersion;
+  packet[3] = static_cast<uint8_t>(type);
+  if (payload != nullptr && payload_size > 0) {
+    std::memcpy(packet + kEnvelopeSize, payload, payload_size);
+  }
+  return esp_now_send(mac, packet, kEnvelopeSize + payload_size) == ESP_OK;
 }
 
 bool broadcastPacket(PacketType type, const void *payload, size_t payload_size) {
@@ -1517,5 +1722,55 @@ uint32_t espNowPrimaryBeaconSeq() { return sBeaconSeq; }
 uint32_t espNowPrimaryBeaconsWithoutTxStamp() { return sBeaconsWithoutTxStamp; }
 
 uint64_t espNowPrimaryLastTxTsf() { return sBeaconTxTsfUs; }
+
+uint32_t espNowPrimaryCommandAnswersReceived() { return sCommandAnswersReceived; }
+uint32_t espNowPrimaryCommandAnswersPublished() {
+  return sCommandAnswersPublished;
+}
+
+uint32_t espNowPrimaryCommandAnswersDuplicate() {
+  return sCommandAnswersDuplicate;
+}
+
+void espNowPrimaryPublishAnswer(const CommandLogFrame &log) {
+  publishCommandLog(log);
+}
+
+bool espNowPrimarySendCommand(const CommandFrame &command) {
+  const RegistryEntry *entries = registryEntries();
+  for (size_t i = 0; i < kRegistryMaxNodes; ++i) {
+    if (!entries[i].in_use || entries[i].device_id != command.device_id) {
+      continue;
+    }
+    // ⚠️ THE PEER MUST EXIST BEFORE esp_now_send WILL UNICAST TO IT. The primary
+    // only ever broadcast before this, so nothing had added leaves as peers, and
+    // esp_now_send to an unknown MAC fails with ESP_ERR_ESPNOW_NOT_FOUND -- which
+    // would have read as "the node is not there" rather than "we never introduced
+    // ourselves".
+    if (!esp_now_is_peer_exist(entries[i].mac)) {
+      esp_now_peer_info_t peer{};
+      std::memcpy(peer.peer_addr, entries[i].mac, 6);
+      peer.channel = peerChannel();
+      peer.ifidx = WIFI_IF_STA;
+      peer.encrypt = false;
+      const esp_err_t err = esp_now_add_peer(&peer);
+      if (err != ESP_OK) {
+        ESP_LOGE(kTag, "could not add peer for device %" PRIu64 ": %s",
+                 command.device_id, esp_err_to_name(err));
+        return false;
+      }
+    }
+    const bool sent = unicastPacket(entries[i].mac, PacketType::kCommand,
+                                    &command, sizeof(command));
+    ESP_LOGI(kTag, "command \"%s\" -> device %" PRIu64 " (%s)", command.command,
+             command.device_id, sent ? "sent" : "SEND FAILED");
+    return sent;
+  }
+  ESP_LOGW(kTag,
+           "command \"%s\" is for device %" PRIu64
+           ", which is not in the registry -- refusing rather than dropping it",
+           command.command, command.device_id);
+  return false;
+}
 
 }  // namespace natkit

@@ -9,41 +9,119 @@ the same topic names, so knowing which one is on a board is not optional.
 
 | | [`embeded/`](embeded) | [`firmware-idf/`](firmware-idf) |
 |---|---|---|
-| What | the firmware in use — every node is a full WiFi/MQTT/NTP client | a **fork** (EPIC TEC-NATKIT-20): primary/secondary nodes over ESP-NOW, serial uplink to one networked gateway |
+| What | the ORIGINAL firmware, now a rollback path — every node a full WiFi/MQTT/NTP client | **what the rig actually runs** (EPIC TEC-NATKIT-20): leaf/primary/gateway roles, ESP-NOW between nodes, one networked hub |
 | Framework | Arduino via pioarduino (arduino-esp32 3.3.11 / ESP-IDF 5.5.5) | native ESP-IDF (`idf.py`), v5.5.3 |
 | Build | `cd embeded && pio run -e release` | `cd firmware-idf && ./build-role.sh leaf esp32` |
-| Status | **known good on hardware** | scaffold: builds for esp32 + esp32c3, **boots on the real node**, roles stubbed |
+| Status | buildable, kept as the rollback path; **benched head-to-head on 2026-08-17 (TEC-NATKIT-27)** | **in use on every board**, streaming 100 samples/s per leaf |
 
-The fork is **additive and reversible**. No slice of the epic edits `embeded/`,
-which stays buildable and flashable throughout, and the epic ends in an explicit
-adopt-or-discard decision (TEC-NATKIT-27). If the fork is discarded, deleting
-`firmware-idf/` is the whole cleanup.
+✅ **THE DECISION IS MADE: the fork was ADOPTED on 2026-08-17** (TEC-NATKIT-27), on
+a head-to-head bench of both firmwares on the same two boards, the same broker and
+the same three hours. Per node, two nodes: **98 fresh samples/s against 56–80, in
+half the bandwidth, with 1.4 ms of inter-arrival jitter against 17 ms and
+node-to-node clock agreement of 0.1–0.2 ms against 2.7–5.5** — plus the magnetometer,
+which `embeded/` cannot carry.
+
+`embeded/` is **kept as a rollback path, not retired**, and reviewed on
+**2026-09-15**. For it to stay a real rollback rather than a tree that merely
+compiles, its libnatkit-core pin has to be bumped when the core moves, and **it has
+to be flashed onto a board and measured once per review cycle** — 2026-08-17 was the
+first time in months, and it immediately turned out to be incapable of running two
+nodes at once (see below).
+
+**So new work goes in `firmware-idf/`. Do not edit `embeded/` unless the change
+actually requires it** — a change there cannot be verified, because no board runs
+it, and it does not even build against the sibling submodule (see the wire-format
+warning below). If a fix would be needed after a rollback, file a ticket saying so
+rather than porting it pre-emptively.
+
+⚠️ **The reverse is not a preference but a hazard: fixes made to `embeded/` before
+the migration were not all carried across.** The EXECUTION_COMMAND / LOGGING_LOG
+channel (`embeded/include/CommandChannel.hpp`) has no counterpart in
+`firmware-idf/` at all, and it was verified on hardware a week before the switch.
+Nothing errors — the backend half still works, so a command is published and
+simply goes unsubscribed. TEC-NATKIT-39.
+
+⚠️ **`embeded/` COULD NEVER RUN TWO NODES AT ONCE UNTIL 2026-08-17.** All three of
+its `connect()` calls passed the literal MQTT client id `"natKit-IMU"`, and a broker
+must evict an existing session when a second client presents the same id — so two of
+these nodes took turns kicking each other off ~700 times a minute and **lost 41% of
+their frames**. Fixed (`natkitMqttClientId()`); if you are on a checkout older than
+that, do not benchmark two of them. Measured on TEC-NATKIT-27.
+
+⚠️ **THE TWO FIRMWARES ARE NO LONGER WIRE-COMPATIBLE BY DEFAULT.** `firmware-idf/`
+emits IMU frame **version 2** (13 floats, 62-byte samples, 644-byte frames, with
+the magnetometer). `embeded/` emits **version 1** (10 floats, 50-byte samples, 524
+bytes) and will keep doing so until its `platformio.ini` libnatkit-core pin is
+bumped past the version-2 commit — it pins a GitHub commit rather than the sibling
+submodule, so editing `libnatkit/lib/libnatkit-core` does nothing for it. Decoders
+read both, so a rollback still produces valid recordings; they simply have no
+magnetic field in them.
 
 ### Which firmware is on which board
 
 Last recorded state — **update this table when you flash something**, and note
 that it is a record rather than a measurement (nothing is read back off a board):
 
-| Board | Firmware | Recorded |
-|---|---|---|
-| natKit-IMU node — ESP32-PICO-V3-02 rev v3.0, MAC `0c:8b:95:96:b9:f4`, BNO08x | **`embeded/`** @ `trunk`, rebuilt and re-uploaded. Verified streaming. | 2026-08-10 |
+| Board | Port | Firmware | Recorded |
+|---|---|---|---|
+| ESP32-S3 (ESP Thread Border Router + W5500 Ethernet), MAC `b8:f8:62:62:f7:3c` | `/dev/ttyACM0` | `firmware-idf/` **primary**. ⚠️ Opening its USB console RESETS it *and re-enumerates*, so `capture.py` returns an empty file — diagnose it from the published status. | 2026-08-14 |
+| ESP32-PICO-V3-02, MAC `0c:8b:95:96:bc:4c`, BNO08x | `/dev/ttyACM1` (serial `5185026888`) | `firmware-idf/` **leaf**. Flashed to `embeded/` and back on 2026-08-17 for TEC-NATKIT-27. | 2026-08-17 |
+| ESP32, MAC `4c:75:25:a4:45:3c`, BNO08x | `/dev/ttyACM2` (serial `5185027828`) | `firmware-idf/` **leaf**. Flashed to `embeded/` and back on 2026-08-17 for TEC-NATKIT-27. | 2026-08-17 |
 
-That board briefly ran `firmware-idf/`'s leaf image on 2026-08-10 to prove the
-fork boots, and was restored with the rollback command below. A pre-flash 4 MB
-dump of the working firmware is kept at
-`~/natkit-verification/598a800/embeded-preflash-backup.bin` (sha256 in
+⚠️ **PORT NUMBERS MOVE WHEN BOARDS ARE SWAPPED, AND THE PRIMARY IS NOT ALWAYS
+ttyACM2.** Two flashes were aimed at the wrong board before this was noticed; esptool
+refused them ("This chip is ESP32, not ESP32-S3") rather than bricking a leaf, which
+is the only reason it was cheap. Identify a port before flashing it, without touching
+the board:
+
+```sh
+udevadm info -q property -n /dev/ttyACM0 | grep -E 'ID_MODEL=|ID_SERIAL_SHORT='
+```
+
+The S3 primary reports `Espressif / USB_JTAG_serial_debug_unit` and **its MAC as the
+USB serial number**, so it is unambiguous. The ESP32 leaves report a `1a86` CH340
+bridge with an opaque serial — but the serials are **distinct and stable**, so the
+two leaves can be told apart without flashing anything after all. Mapped on
+2026-08-17 by flashing one and watching which device id changed firmware:
+
+| `ID_SERIAL_SHORT` | board | device id |
+|---|---|---|
+| `5185026888` | ESP32-PICO-V3-02, `0c:8b:95:96:bc:4c` | 13793649671244 |
+| `5185027828` | ESP32, `4c:75:25:a4:45:3c` | 84066026407228 |
+
+⚠️ **A LEAF PUBLISHES AGAIN LONG BEFORE IT IS AT FULL RATE.** Measured 2026-08-17:
+first frame at **18.7 s**, still 174 sequence gaps in a 420 s window seven minutes
+later, and one leaf still at 6.7% loss **40 minutes** after its reset. "It is
+publishing again" is not "it has recovered", and a rate measured in between reads as
+a fault that is not there. `embeded/` by contrast was back at full rate in ~8 s.
+
+⚠️ **When a leaf is not delivering, read `beacons_missed` and `leaf_send_failures`
+from its `NatKitNodeStatusV1`** — the bad node was missing 616 of 913 beacons with
+1800 send failures, while the healthy one missed 22 and failed 4. The clock-fit
+figures say nothing about it: both nodes had a fully saturated `residual_rms_ns` and
+one of them was delivering perfectly.
+
+⚠️ Board `0c:8b:95:96:b9:f4` was REMOVED on 2026-08-14 — physically damaged, and it
+had been delivering 0-22 samples/s with 274 sequence gaps against the other leaf's
+clean 10/s. It is still in the primary's NVS registry, so the hub publishes a
+`NatKitNodeStatusV1` for a node that no longer exists.
+Both leaves are currently pinned to 8.5 dBm with the transmit-power sweep OFF.
+
+A pre-flash 4 MB dump of the working `embeded/` firmware from board `…b9:f4` is
+kept at `~/natkit-verification/598a800/embeded-preflash-backup.bin` (sha256 in
 `backup.sha256`) if a byte-exact restore is ever wanted:
 `esptool write_flash 0 embeded-preflash-backup.bin`.
 
-### Putting the current firmware back
+### Rolling back to the Arduino firmware
 
-One command, from a checkout of this repo:
+⚠️ This is a ROLLBACK, not a restore of the status quo — the ESP-IDF firmware is
+what is deployed. One command, from a checkout of this repo:
 
 ```bash
 cd embeded && pio run -e release -t upload
 ```
 
-That is the rollback. It rebuilds and flashes the Arduino firmware from whatever
+It rebuilds and flashes the Arduino firmware from whatever
 commit is checked out, so `git -C . checkout trunk` first if the working tree has
 moved on; add `--upload-port /dev/ttyUSB0` if more than one board is attached.
 Nothing needs to be uninstalled or undone on the ESP-IDF side, because the two

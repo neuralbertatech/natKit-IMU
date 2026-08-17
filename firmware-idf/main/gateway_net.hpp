@@ -39,6 +39,7 @@ struct GatewayNetStats {
   uint32_t mqtt_errors = 0;
   uint32_t publishes_ok = 0;
   uint32_t publishes_failed = 0;   // enqueue refused: the one that matters
+  uint32_t mqtt_messages_received = 0;
   uint64_t bytes_published = 0;
   int8_t rssi = 0;
 };
@@ -79,6 +80,26 @@ uint64_t gatewayWallClockUs();
 // away is a heap leak with extra steps. Returns false when the client refused it,
 // which is counted rather than swallowed.
 bool gatewayPublish(const char *topic, const void *payload, size_t length);
+
+// --- inbound (server -> device) --------------------------------------------
+//
+// The primary is the only node with an IP, so every command for every leaf
+// arrives here and is relayed over ESP-NOW. See espnow_link.hpp's kCommand.
+
+// Called from the MQTT task for each message on a subscribed topic. ⚠️ THE
+// PAYLOAD IS NOT NUL-TERMINATED and does not outlive the call, so anything kept
+// must be copied. Keep the handler short: it runs on the MQTT task, and blocking
+// here stalls publishing, which is the data path.
+using GatewayMessageHandler = void (*)(const char *topic, size_t topic_len,
+                                       const char *payload, size_t payload_len);
+
+void gatewaySetMessageHandler(GatewayMessageHandler handler);
+
+// Subscribes at QoS 0. Safe to call before the broker connects: the topic is
+// remembered and re-subscribed on every MQTT_EVENT_CONNECTED, which matters
+// because the client reconnects on its own and a subscription made once would be
+// silently lost by the first disconnect.
+bool gatewaySubscribe(const char *topic);
 
 const GatewayNetStats &gatewayNetStats();
 

@@ -51,6 +51,59 @@ enum class PacketType : uint8_t {
   kTimeProbeFollowUp = 9,  // leaf -> primary: payload is a TimeProbeFollowUp
   kSyncMarker = 10,        // primary -> broadcast: payload is a SyncMarker
   kMarkerReport = 11,      // leaf -> primary: payload is a MarkerReport
+  kCommand = 12,           // primary -> leaf (unicast): payload is a CommandFrame
+  kCommandLog = 13,        // leaf -> primary: payload is a CommandLogFrame
+  kCommandAck = 14,        // leaf -> primary: payload is a CommandAck
+};
+
+// --- server -> device commands ---------------------------------------------
+//
+// ⚠️ THE LEAF NEVER SEES JSON. The command arrives at the primary as a JSON
+// document on MQTT, and the primary parses it and relays THIS, a fixed-size POD.
+// That is deliberate: the whole point of this architecture is that a leaf is a
+// sensor and a radio, and linking a JSON parser into it to read a field it could
+// have been handed is exactly the weight the fork exists to avoid. It also means
+// a malformed command is rejected where there is a console and a broker to
+// complain to, rather than on a node nobody can see.
+//
+// Sizes match the old firmware's CommandChannel so the two ends stay comparable;
+// the backend already refuses a command name over 32 characters.
+
+constexpr size_t kCommandIdMax = 40;
+constexpr size_t kCommandNameMax = 33;
+constexpr size_t kCommandArgsMax = 128;
+// 224, raised from 160 because the useful failure messages did not fit and the
+// compiler said so (-Werror=format-truncation). Worth the bytes: this is the
+// leaf-to-primary log frame, not the IMU wire format, and it is sent once per
+// command rather than ten times a second. A truncated explanation of a failure is
+// most of the way to no explanation.
+constexpr size_t kCommandMessageMax = 224;
+
+struct CommandFrame {
+  uint64_t device_id;                 // whom it is for; a leaf ignores others
+  char command_id[kCommandIdMax];     // correlates the answer, NUL-terminated
+  char command[kCommandNameMax];
+  char args[kCommandArgsMax];         // raw JSON of the "args" object, or ""
+};
+
+// Receipt, sent the moment a command arrives and BEFORE it is executed.
+//
+// ⚠️ THIS IS NOT THE ANSWER, and the separation is the point. An answer says what
+// a command did and may take a while; an acknowledgement says only "I have it",
+// which is what lets the primary stop retransmitting. Conflating them would mean
+// retrying a command that had already run, and a slow command would be
+// indistinguishable from a lost one.
+struct CommandAck {
+  uint64_t device_id;
+  char command_id[kCommandIdMax];
+};
+
+struct CommandLogFrame {
+  uint64_t device_id;
+  char command_id[kCommandIdMax];
+  uint8_t ok;     // 0 = the command failed; only meaningful when final != 0
+  uint8_t final;  // 1 = the last record for this command
+  char message[kCommandMessageMax];
 };
 
 struct EspNowEnvelope {
@@ -93,6 +146,14 @@ struct Heartbeat {
   uint8_t accuracy_gyro;
   uint8_t accuracy_mag;
   uint8_t accuracy_rotation;
+  // ⚠️ ADDED TO CHASE A PERIODIC 2 s STALL (TEC-NATKIT-42). The leaf's own view
+  // of its radio cannot be read from its console -- opening one disturbs the
+  // board badly enough to change the thing being measured -- so the counters that
+  // distinguish the candidate causes have to travel to the primary and out over
+  // MQTT like everything else on this rig.
+  uint32_t channel_hops;   // rises if the leaf is rescanning channels
+  uint8_t scan_channel;    // 0 when locked; non-zero while hopping
+  uint8_t reserved_hb[3];
 };
 
 // --- Timing broadcast (#340 / TEC-NATKIT-17) --------------------------------
@@ -320,6 +381,27 @@ esp_err_t espNowLinkStart();
 // The sample loop must not be able to stall on the radio -- that is the
 // requirement this signature exists to satisfy.
 bool espNowLinkSend(PacketType type, const void *payload, size_t payload_size);
+
+// Primary only: relays a command to one registered node, by device id.
+//
+// Returns false if that node is not in the registry -- which is the honest answer
+// to "command a device that has never been heard from", and is reported back to
+// the caller rather than dropped, because a command that silently goes nowhere is
+// the failure mode this whole channel exists to avoid.
+bool espNowPrimarySendCommand(const CommandFrame &command);
+
+// Publishes an answer the primary generated itself -- specifically, the failure
+// record for a command no device ever acknowledged. Goes out on the same topic
+// and in the same shape as a real device answer, because from the server's point
+// of view "the device said it failed" and "the device never got it" both need to
+// end the wait, and only the message distinguishes them.
+void espNowPrimaryPublishAnswer(const CommandLogFrame &log);
+
+// Answers relayed back up, counted separately from anything else. See
+// UplinkPrimaryStatus for why these are two counters and not one.
+uint32_t espNowPrimaryCommandAnswersReceived();
+uint32_t espNowPrimaryCommandAnswersPublished();
+uint32_t espNowPrimaryCommandAnswersDuplicate();
 
 const LinkStats &espNowLinkStats();
 

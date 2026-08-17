@@ -61,6 +61,9 @@ enum class UplinkType : uint8_t {
   // Per-node counters and that node's clock fit. The gateway needs this to turn
   // a kData frame's device-relative timestamps into anything publishable.
   kNodeStatus = 2,
+  // A command's answer, as a JSON document already built by the primary. Goes to
+  // Log-<id>-Json-NatLogV1, the topic the backend already correlates against.
+  kCommandLog = 4,
   // The primary's own health, including what it dropped and the rig's
   // time-coherence metric (#315).
   kPrimaryStatus = 3,
@@ -80,7 +83,36 @@ struct UplinkNodeStatus {
   uint64_t last_seen_us;      // in the PRIMARY's clock
   SyncState sync;             // the leaf's fit; apply with syncStateToPrimary()
   uint8_t sync_valid;
-  uint8_t reserved1[7];
+  // ⚠️ HOW STRONGLY THE HUB HEARS THIS NODE, which it has always tracked and
+  // never published. Without it the only per-node signal leaving the rig is a
+  // frame count, and a node delivering nothing at -30 dBm and one delivering
+  // nothing at -85 dBm need completely different fixes. Diagnosing the leaves
+  // that keep swapping which one works (TEC-NATKIT-37) meant reading it off a
+  // console that resets the board it is printed on.
+  //
+  // Placed in the reserved bytes so the struct's size does not move.
+  int8_t rssi_last;
+  int8_t rssi_best;
+  int8_t rssi_worst;
+  uint8_t rssi_seen;
+  uint8_t leaf_scan_channel;   // non-zero while that leaf is hopping channels
+  uint8_t reserved1[2];
+  // The LEAF's own counters, relayed from its heartbeat. These separate the three
+  // ways a stall can happen and which the primary alone cannot tell apart:
+  // the leaf stopped BUILDING frames, its send queue OVERFLOWED because the radio
+  // was blocked, or its sends were REFUSED on air.
+  uint32_t leaf_frames_built;
+  uint32_t leaf_frames_dropped;
+  uint32_t leaf_send_failures;
+  uint32_t leaf_channel_hops;
+  // ⚠️ FRAMES THE PRIMARY RECEIVED AND THEN THREW AWAY ITSELF, which until now
+  // were counted and never published. They are dropped BEFORE the uplink queue,
+  // so uplink's frames_dropped stays at zero; they arrive in sequence, so the
+  // node's seq_gaps stays at zero; and the primary keeps publishing its own
+  // status throughout. Every counter that was visible said the rig was healthy
+  // while a fifth of a leaf's frames were being discarded here.
+  uint32_t publish_no_sync;   // no clock fit for that node yet
+  uint32_t publish_no_shift;  // fit present but rewriteFrameTimestamps refused
 };
 
 struct UplinkPrimaryStatus {
@@ -108,6 +140,35 @@ struct UplinkPrimaryStatus {
   uint8_t coherence_measured;
   uint8_t registry_sealed;
   uint8_t reserved[5];
+  // Command relay (TEC-NATKIT-39). ⚠️ These are here rather than on the console
+  // because THE PRIMARY'S CONSOLE CANNOT BE READ: the ESP32-S3 resets when its
+  // native USB console is opened AND re-enumerates, so the reading process loses
+  // the handle and gets nothing at all. Every command-path fault has to be
+  // diagnosed from this struct.
+  uint32_t commands_received;
+  uint32_t commands_relayed;
+  uint32_t commands_malformed;
+  uint32_t commands_unknown_device;
+  uint32_t commands_send_failed;
+  uint32_t command_subscriptions;
+  // ⚠️ THE ANSWER'S OWN COUNTERS, and they exist because unknown_packets could
+  // not tell "the reply arrived and was handled" from "the reply never arrived":
+  // both leave it at zero. Two counters that CAN be different are worth more than
+  // one that is always right for the wrong reason.
+  uint32_t command_answers_received;   // kCommandLog packets from a leaf
+  uint32_t command_answers_published;  // ... that reached the broker
+  uint32_t command_answers_duplicate;  // ... suppressed as an exact repeat
+  // ⚠️ delivered is the one that means anything: relayed says the radio took the
+  // packet, delivered says a device acknowledged it.
+  uint32_t commands_delivered;
+  uint32_t command_retransmits;
+  uint32_t commands_undelivered;
+  // ⚠️ WHY THE HUB LAST RESTARTED, because there is no other way to find out.
+  // Its USB console resets it AND re-enumerates, so a reader gets an empty file
+  // and a fresh boot rather than the panic it was trying to read. esp_reset_reason
+  // survives the restart; without it, "uptime went backwards" is the entire
+  // diagnosis available.
+  uint32_t reset_reason;
 };
 
 struct UplinkStats {

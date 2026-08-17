@@ -7,6 +7,7 @@
 #include "esp_system.h"
 #include "ethernet_net.hpp"
 #include "gateway_net.hpp"
+#include "command_relay.hpp"
 #include "registry.hpp"
 #include "uplink.hpp"
 #include "esp_log.h"
@@ -108,10 +109,37 @@ void fillNodeStatus(const NodeState &node, UplinkNodeStatus &out) {
   out.last_seen_us = node.last_seen_us;
   out.sync = node.last_sync;
   out.sync_valid = node.sync_seen ? 1 : 0;
+  out.rssi_last = node.rssi_last;
+  out.rssi_best = node.rssi_best;
+  out.rssi_worst = node.rssi_worst;
+  out.rssi_seen = node.rssi_seen ? 1 : 0;
+  if (node.heartbeat_seen) {
+    out.leaf_frames_built = node.last_heartbeat.frames_built;
+    out.leaf_frames_dropped = node.last_heartbeat.frames_dropped;
+    out.leaf_send_failures = node.last_heartbeat.send_failures;
+    out.leaf_channel_hops = node.last_heartbeat.channel_hops;
+    out.leaf_scan_channel = node.last_heartbeat.scan_channel;
+  }
+  out.publish_no_sync = node.publish_no_sync;
+  out.publish_no_shift = node.publish_no_shift;
 }
 
 void fillPrimaryStatus(UplinkPrimaryStatus &out) {
   out = UplinkPrimaryStatus{};
+  const CommandRelayStats &commands = commandRelayStats();
+  out.commands_received = commands.received;
+  out.commands_relayed = commands.relayed;
+  out.commands_malformed = commands.malformed;
+  out.commands_unknown_device = commands.unknown_device;
+  out.commands_send_failed = commands.send_failed;
+  out.command_subscriptions = commands.subscriptions;
+  out.command_answers_received = espNowPrimaryCommandAnswersReceived();
+  out.command_answers_published = espNowPrimaryCommandAnswersPublished();
+  out.command_answers_duplicate = espNowPrimaryCommandAnswersDuplicate();
+  out.commands_delivered = commands.delivered;
+  out.command_retransmits = commands.retransmits;
+  out.commands_undelivered = commands.undelivered;
+  out.reset_reason = static_cast<uint32_t>(esp_reset_reason());
   out.device_id = deviceId();
   out.uptime_us = static_cast<uint64_t>(esp_timer_get_time());
   out.epoch = espNowPrimaryEpoch();
@@ -260,8 +288,14 @@ void runPrimary() {
   uint32_t console_us = 0;
   uint32_t console_worst_us = 0;
 
+  // ⚠️ AFTER the radio, so the registry is loaded and any node that announced
+  // during startup is already subscribable. Refreshed every second below, because
+  // a node that announces later would otherwise be uncommandable until reboot.
+  commandRelayStart();
+
   while (true) {
     vTaskDelay(pdMS_TO_TICKS(1000));
+    commandRelayRefreshSubscriptions();
 
     const uint64_t console_started = static_cast<uint64_t>(esp_timer_get_time());
     const NodeState *nodes = espNowPrimaryNodes();

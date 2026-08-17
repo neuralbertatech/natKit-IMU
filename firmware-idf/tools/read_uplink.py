@@ -72,6 +72,17 @@ def parse_frame(buf, i):
     }, total
 
 
+def _sample_size(frame_version):
+    """Bytes per sample, which depends on the frame version.
+
+    ⚠️ Version 2 added the magnetometer: 13 floats instead of 10, so 62 bytes
+    instead of 50. This used to be a bare 50 here, which would have reported a
+    length mismatch on every v2 frame and pointed the blame at the transport.
+    """
+    floats = 13 if frame_version >= 2 else 10
+    return 8 + floats * 4 + 2
+
+
 def decode_data(payload):
     """The canonical NatImuBulkDataSchema header, as imu_frame.hpp lays it out."""
     if len(payload) < 24:
@@ -84,7 +95,7 @@ def decode_data(payload):
         "rate": rate,
         "seq_no": seq_no,
         "device_ts_us": device_ts,
-        "expected_len": 24 + 50 * samples,
+        "expected_len": 24 + _sample_size(schema) * samples,
     }
 
 

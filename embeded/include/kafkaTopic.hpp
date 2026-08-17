@@ -9,6 +9,7 @@
 #include <ImuData.hpp>
 #include <libnatkit-core.hpp>
 #include <PubSubClient.h>
+#include <esp_mac.h>       // esp_efuse_mac_get_default, for the MQTT client id
 // #include "mqtt_client.h"
 
 #ifdef USE_FREE_RTOS_LOCKS
@@ -35,6 +36,30 @@
 
 // NTP-adjusted wall-clock time in microseconds; defined in main.cpp.
 int64_t getAdjustedLocalTimeUs();
+
+// ⚠️⚠️ THE MQTT CLIENT ID MUST BE UNIQUE PER DEVICE, and for a long time it was
+// not: all three connect() calls passed the literal "natKit-IMU". MQTT REQUIRES a
+// broker to evict the existing session when a second client presents an id that is
+// already connected, so two natKit-IMU nodes on one broker do not share it — they
+// take turns kicking each other off, forever, and every frame built while a node
+// is between sessions is dropped with nothing counting it.
+//
+// Measured on TEC-NATKIT-27 (2026-08-17), two nodes, quiet build:
+//   mosquitto: "Client natKit-IMU already connected, closing old connection."
+//              699 times in 60 s
+//   delivery:  41% of frames lost with two nodes, 0% with one
+//
+// It stayed hidden because the bench has only ever run ONE of these at a time.
+inline const char* natkitMqttClientId() {
+    static char id[32] = {0};
+    if (id[0] == '\0') {
+        uint8_t mac[6] = {0};
+        esp_efuse_mac_get_default(mac);
+        snprintf(id, sizeof(id), "natKit-IMU-%02x%02x%02x%02x%02x%02x",
+                 mac[0], mac[1], mac[2], mac[3], mac[4], mac[5]);
+    }
+    return id;
+}
 
 char kafkaUrlBuffer[256];
 byte kafkaRecordDataBuffer[6200];
@@ -238,7 +263,7 @@ void KafkaTopic::writeMetaRecord(const ConnectionConfig& connectionConfig, PubSu
     static const auto delay = 10 / portTICK_PERIOD_MS; // 10ms
     if (WiFi.status() == WL_CONNECTED) {
 
-        while (!mqttClient.connect("natKit-IMU")) vTaskDelay(delay);
+        while (!mqttClient.connect(natkitMqttClientId())) vTaskDelay(delay);
         sprintf(kafkaUrlBuffer, mqttUrlTemplate.c_str(), metaTopicString.c_str());
         const auto bytes = meta.encodeToBytes(nat::core::SerializationType::Json);
         for (int i = 0; i < bytes->size(); ++i)
@@ -284,7 +309,24 @@ void KafkaTopic::writeStatusRecord(const ConnectionConfig& connectionConfig, Pub
 
 bool KafkaTopic::writeDataRecord(const ConnectionConfig& connectionConfig, const ImuData& imuDatum, PubSubClient& mqttClient) {
 
-        nat::core::NatImuDataSchema data{imuDatum.timestamp, imuDatum.accuracies, imuDatum.has_data, imuDatum.data, 10};
+        // ⚠️ CLAMPED TO WHAT THE LINKED libnatkit-core ACTUALLY ACCEPTS, and that
+        // is not paranoia -- this firmware does NOT build against the sibling
+        // submodule. platformio.ini pins libnatkit-core to a GitHub commit, so
+        // until that pin is bumped past frame version 2 the linked schema still
+        // holds ten floats while ImuData holds thirteen.
+        //
+        // Passing 13 to a ten-float schema trips its assert(size <= ...), which on
+        // a release ESP32 build is compiled out and on any other build aborts at
+        // runtime. Clamping makes this source correct against BOTH: with the old
+        // core it copies ten and emits version 1 frames with no magnetometer,
+        // with the new one it copies thirteen and emits version 2.
+        constexpr int kImuDataFloats = static_cast<int>(sizeof(imuDatum.data) / sizeof(imuDatum.data[0]));
+        const int floatsToCopy =
+            kImuDataFloats < static_cast<int>(nat::core::NatImuDataSchema::NatImuDataSchemaDataArraySize)
+                ? kImuDataFloats
+                : static_cast<int>(nat::core::NatImuDataSchema::NatImuDataSchemaDataArraySize);
+        nat::core::NatImuDataSchema data{imuDatum.timestamp, imuDatum.accuracies, imuDatum.has_data, imuDatum.data,
+                                         floatsToCopy};
         imuDataList[currentImuDataIndex++] = data;
         if (currentImuDataIndex == IMU_SAMPLES_PER_FRAME) {
             DEBUG_SERIAL.println("Bulk Message Is Ready to Send");
@@ -328,7 +370,7 @@ void KafkaTopic::serviceConnection(const ConnectionConfig& connectionConfig, Pub
     if (!mqttClient.connected()) {
         // Broker dropped us (or first connect). Attempt one non-blocking
         // reconnect per tick; if it fails we retry on the next service call.
-        if (mqttClient.connect("natKit-IMU")) {
+        if (mqttClient.connect(natkitMqttClientId())) {
             DEBUG_SERIAL.println("MQTT (re)connected");
             // The old session's subscriptions died with it.
             subscribedToCommands = false;

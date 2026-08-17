@@ -99,6 +99,9 @@ void dispatch(size_t at) {
     case UplinkType::kPrimaryStatus:
       ++sStats.frames_primary_status;
       break;
+    case UplinkType::kCommandLog:
+      ++sStats.frames_command_log;
+      break;
   }
 
   // The uplink's own sequence, which answers a different question from the radio

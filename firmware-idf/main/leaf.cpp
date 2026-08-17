@@ -5,6 +5,7 @@
 #include "esp_log.h"
 #include "esp_system.h"
 #include "esp_timer.h"
+#include "commands.hpp"
 #include "espnow_link.hpp"
 #include "freertos/FreeRTOS.h"
 #include "freertos/task.h"
@@ -58,7 +59,32 @@ constexpr char kTag[] = "natkit-leaf";
 // the cadence, which is the whole problem being fixed.
 Bno08x *sImu = nullptr;
 volatile uint32_t sFramesBuilt = 0;
+// Samples emitted, and how many of them carried a FRESH reading of each sensor.
+// ⚠️ These exist as a cross-check, not as decoration: fresh/emitted must come out
+// at the sensor's delivered rate divided by 100, so they confirm the per-report
+// rates from a completely independent count. If the two disagree, one of them is
+// lying and it matters which.
+volatile uint32_t sSamplesEmitted = 0;
+volatile uint32_t sFreshCount[4] = {};
 volatile uint32_t sMissedSlots = 0;
+
+// Ingests sensor reports, and nothing else.
+//
+// Separate from BOTH the sampling task and the main loop. The sampler must not be
+// delayed by a slow SPI read; the ingest must not be delayed by console logging.
+// One task each is the only arrangement where neither is true.
+void serviceTask(void *) {
+  while (true) {
+    if (sImu != nullptr) {
+      sImu->service();
+      sImu->enableDynamicCalibrationOnce();
+    }
+    // 1 ms, matching what the main loop used to give it. The hub asserts INT when
+    // it has something, and halRead waits on that, so this is a floor on how
+    // often we ask rather than a throttle on what arrives.
+    vTaskDelay(pdMS_TO_TICKS(1));
+  }
+}
 
 void samplingTask(void *) {
   constexpr size_t kSamplesPerFrame = CONFIG_NATKIT_IMU_SAMPLES_PER_FRAME;
@@ -78,10 +104,16 @@ void samplingTask(void *) {
     }
 
     ImuSample sample{};
-    if (!sampleFromReadings(sImu->readings(), sample)) {
+    static SampleCursor cursor{};
+    if (!sampleFromReadings(sImu->readings(), cursor, sample)) {
       ++sMissedSlots;  // nothing decoded yet: a real slot with no reading in it
       continue;
     }
+    ++sSamplesEmitted;
+    if (sample.has_data & 0b0100) ++sFreshCount[0];  // accel
+    if (sample.has_data & 0b0010) ++sFreshCount[1];  // gyro
+    if (sample.has_data & 0b1000) ++sFreshCount[2];  // mag
+    if (sample.has_data & 0b0001) ++sFreshCount[3];  // rotation
     samples[sample_count++] = sample;
     if (sample_count < kSamplesPerFrame) {
       continue;
@@ -152,6 +184,7 @@ void runLeaf() {
   // which is how TEC-NATKIT-4 measures node-to-node coherence.
   Bno08x imu;
   const bool have_imu = imu.begin() == ESP_OK;
+  commandsSetImu(&imu);
   if (!have_imu) {
     ESP_LOGE(kTag,
              "IMU did not start -- continuing as a SENSORLESS leaf: no data "
@@ -165,6 +198,22 @@ void runLeaf() {
     // Priority 6: above the main loop (1) so a long service() cannot delay the
     // cadence, and level with the tx task so neither starves the other.
     xTaskCreate(samplingTask, "natkit-sample", 4096, nullptr, 6, nullptr);
+    // ⚠️ REPORT INGESTION GETS ITS OWN TASK TOO, and this is the second half of a
+    // fix whose first half was incomplete. Sampling was moved off the main loop
+    // because imu.service() overrunning cost 15% of sample slots -- but
+    // imu.service() itself stayed on the main loop, which also does the console
+    // logging. So the console still stalled the thing that INGESTS reports, and
+    // the samples were dutifully taken on time with nothing new in them.
+    //
+    // Measured: at a 1 Hz log interval the accelerometer showed gaps of up to
+    // 160 ms once a second and 87% of samples carried fresh data. At a 10 s
+    // interval the same firmware reached 92-99%. That 12% was ours, not the
+    // sensor's -- and it is what was previously written up as an "~88 Hz burst
+    // cadence" of the hub. The hub emits evenly at ~115 Hz; we were not listening.
+    //
+    // Priority 5: above the main loop so logging cannot block it, below sampling
+    // so a slow SPI read cannot push a sample slot late.
+    xTaskCreate(serviceTask, "natkit-imu-svc", 4096, nullptr, 5, nullptr);
   }
 
   if (espNowLinkStart() != ESP_OK) {
@@ -202,13 +251,16 @@ void runLeaf() {
   // Per-report, not just the total: the aggregate cannot tell "all four at 100 Hz"
   // from "three at 133 Hz and one dead", and those need different fixes.
   uint32_t per_report_at_last_log[4] = {};
+  uint32_t fresh_at_last_log[4] = {};
+  uint32_t samples_at_last_log = 0;
   uint32_t frames_at_last_log = 0;
   uint64_t last_log_us = 0;
 
   while (true) {
     if (have_imu) {
-      imu.service();
-      imu.enableDynamicCalibrationOnce();
+      // ⚠️ imu.service() is NOT called here any more -- see serviceTask. Putting it
+      // back would re-couple report ingestion to this loop's console logging.
+      commandsService();
     }
 
     const uint64_t now = static_cast<uint64_t>(esp_timer_get_time());
@@ -233,6 +285,8 @@ void runLeaf() {
       beat.accuracy_gyro = r.gyroscope.accuracy;
       beat.accuracy_mag = r.magnetometer.accuracy;
       beat.accuracy_rotation = r.rotation.accuracy;
+      beat.channel_hops = link.channel_hops;
+      beat.scan_channel = link.scan_channel;
       espNowLinkSend(PacketType::kHeartbeat, &beat, sizeof(beat));
     }
 
@@ -291,8 +345,47 @@ void runLeaf() {
                               "%s%s %.1f Hz", i ? " | " : "", names[i], hz);
           per_report_at_last_log[i] = per_report[i];
         }
-        ESP_LOGI(kTag, "reports: %s   (configured %.1f Hz each)", breakdown,
-                 1'000'000.0 / CONFIG_NATKIT_IMU_REPORT_INTERVAL_US);
+        const auto askedHz = [](int us) { return us > 0 ? 1'000'000.0 / us : 0.0; };
+        // The same four sensors seen from the OTHER end: what fraction of emitted
+        // samples carried a fresh reading. Should equal the delivered rate above
+        // divided by the 100 Hz sample rate, computed from a separate counter.
+        const uint32_t emitted = sSamplesEmitted - samples_at_last_log;
+        char freshness[128];
+        int fw = 0;
+        for (int i = 0; i < 4; ++i) {
+          const uint32_t f = sFreshCount[i] - fresh_at_last_log[i];
+          fw += snprintf(freshness + fw, sizeof(freshness) - fw, "%s%s %.0f%%",
+                         i ? " | " : "", names[i],
+                         emitted > 0 ? 100.0 * f / emitted : 0.0);
+          fresh_at_last_log[i] = sFreshCount[i];
+        }
+        samples_at_last_log = sSamplesEmitted;
+        ESP_LOGI(kTag, "fresh:   %s   (of %lu samples emitted)", freshness,
+                 static_cast<unsigned long>(emitted));
+        // ⚠️ SPREAD, NOT JUST THE AVERAGE. A hub emitting on its own clock gives a
+        // tight min/max; our loop only looking occasionally gives a wide one. Both
+        // average the same, so the average alone cannot say which (TEC-NATKIT-41).
+        const auto &burst = imu.burstStats();
+        if (burst.gaps > 0 && elapsed_us > 0) {
+          ESP_LOGI(kTag,
+                   "accel gaps: %lu | avg %lu us, min %lu, max %lu | %lu%% under "
+                   "2 ms (same burst) | sh2_service %.0f/s, %lu productive",
+                   static_cast<unsigned long>(burst.gaps),
+                   static_cast<unsigned long>(burst.gap_sum_us / burst.gaps),
+                   static_cast<unsigned long>(burst.gap_min_us),
+                   static_cast<unsigned long>(burst.gap_max_us),
+                   static_cast<unsigned long>(100UL * burst.gaps_under_2ms /
+                                              burst.gaps),
+                   burst.service_calls * 1e6f / static_cast<float>(elapsed_us),
+                   static_cast<unsigned long>(burst.productive_calls));
+        }
+        imu.resetBurstStats();
+        ESP_LOGI(kTag,
+                 "reports: %s   (asked %.0f/%.0f/%.0f/%.0f Hz, 0 = off)",
+                 breakdown, askedHz(CONFIG_NATKIT_IMU_INTERVAL_ACCEL_US),
+                 askedHz(CONFIG_NATKIT_IMU_INTERVAL_GYRO_US),
+                 askedHz(CONFIG_NATKIT_IMU_INTERVAL_MAG_US),
+                 askedHz(CONFIG_NATKIT_IMU_INTERVAL_QUAT_US));
       }
       ESP_LOGI(kTag,
                "sensor: %lu reports @ %.1f Hz | resets %lu | cal %s | heap "

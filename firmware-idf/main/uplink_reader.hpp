@@ -34,6 +34,7 @@ struct UplinkReaderStats {
   uint32_t frames_data = 0;
   uint32_t frames_node_status = 0;
   uint32_t frames_primary_status = 0;
+  uint32_t frames_command_log = 0;
   uint32_t crc_failures = 0;
   uint32_t version_mismatches = 0;
   uint64_t bytes_read = 0;

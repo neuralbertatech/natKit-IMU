@@ -103,13 +103,89 @@ class Bno08x {
   static const HalStats &halStats();
   static int intLevel();
 
+  // --- runtime report configuration (TEC-NATKIT-40) --------------------------
+  //
+  // Which reports the hub is asked for, as a bit mask. ⚠️ THE BITS ARE THE SAME
+  // ONES has_data USES on the wire -- accel 0b100, gyro 0b010, rotation 0b001,
+  // magnetometer 0b1000 -- so a mask and a sample's presence byte can be compared
+  // directly, and neither has to be translated to read the other.
+  static constexpr uint8_t kReportAccel = 0b0100;
+  static constexpr uint8_t kReportGyro = 0b0010;
+  static constexpr uint8_t kReportRotation = 0b0001;
+  static constexpr uint8_t kReportMagnetometer = 0b1000;
+  static constexpr uint8_t kReportAll = 0b1111;
+
+  // ⚠️ AT LEAST ONE MOTION REPORT IS REQUIRED. sampleFromReadings emits nothing
+  // unless the accelerometer, gyroscope or rotation vector has data, so a node
+  // with only the magnetometer enabled goes silent -- correctly, but
+  // indistinguishably from a fault.
+  static constexpr uint8_t kReportMotionMask =
+      kReportAccel | kReportGyro | kReportRotation;
+
+  uint8_t reportMask() const { return report_mask_; }
+
+  // --- burst cadence instrumentation (TEC-NATKIT-41) -------------------------
+  //
+  // The hub delivers reports in bursts at ~88 Hz rather than at the rates it is
+  // asked for, and that cadence is the real ceiling on distinct observations. It
+  // is insensitive to the report count and to the requested rates, so the open
+  // question is whether it is the HUB's schedule or OUR polling.
+  //
+  // ⚠️ THE TWO ARE TOLD APART BY SPREAD, NOT BY THE AVERAGE. A hub emitting on
+  // its own clock gives a tight interval; a loop that only looks every so often
+  // gives a mean near its own period with a wide spread. Both average ~11 ms, so
+  // the average alone cannot distinguish them -- which is why the minimum and
+  // maximum are kept rather than just a rate.
+  // ⚠️ MEASURED AT THE REPORT, NOT AT THE POLL. The first version of this counted
+  // sh2_service() invocations that produced anything, and it disagreed with the
+  // freshness counter by a factor of two -- 47 "bursts"/s against 87% of 100
+  // samples carrying fresh data, which cannot both be true. The drain loop
+  // collapses several arrivals into one invocation, so invocations say how often
+  // WE LOOKED, not how often the hub SPOKE. Only the gap between consecutive
+  // reports of one sensor answers the actual question.
+  struct BurstStats {
+    uint32_t service_calls = 0;     // sh2_service() invocations
+    uint32_t productive_calls = 0;  // ... that produced at least one report
+    // Gaps between consecutive ACCELEROMETER reports. One sensor, because the
+    // question is what cadence the hub emits at and mixing sensors would blur
+    // four schedules into one histogram.
+    uint32_t gaps = 0;
+    uint32_t gap_sum_us = 0;
+    uint32_t gap_min_us = 0xFFFFFFFF;
+    uint32_t gap_max_us = 0;
+    // Split at 2 ms: anything closer is the same burst arriving, anything wider
+    // is a wait. The ratio is what says bursty or even.
+    uint32_t gaps_under_2ms = 0;
+  };
+
+  const BurstStats &burstStats() const { return burst_; }
+  void resetBurstStats();
+
+  // Applies a mask, persists it, and re-configures the hub. Returns an error
+  // without changing anything if no motion report would be left.
+  //
+  // ⚠️ DISABLING CLEARS THAT SENSOR'S READING. Without it the frame builder keeps
+  // copying the last value it saw into every subsequent sample forever -- a
+  // plausible-looking number from a sensor that was switched off, which is worse
+  // than a zero because nothing about it looks wrong.
+  esp_err_t setReportMask(uint8_t mask);
+
+  // ⚠️ Called from begin(), BEFORE the first enableReports(), so a restored mask
+  // is what the hub is first configured with rather than something applied a
+  // moment later -- which would put one round of unwanted reports on the wire.
+  void loadReportMask();
+
  private:
   bool enableReports();
+
 
   SensorSet readings_{};
   uint64_t first_report_us_ = 0;
   uint32_t total_reports_ = 0;
   uint32_t reset_count_ = 0;
+  uint8_t report_mask_ = kReportAll;
+  BurstStats burst_{};
+  uint64_t last_burst_us_ = 0;
 
   bool calibration_settled_ = false;
   bool calibration_enabled_ = false;

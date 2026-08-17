@@ -86,12 +86,33 @@ void refit() {
     return;
   }
 
+  // ⚠️ BOTH DIFFERENCES ARE SIGNED, AND THE x ONE USED NOT TO BE. That was a
+  // two-second data outage every 32 seconds, on every leaf, for as long as this
+  // estimator has existed.
+  //
+  // sWindow is a RING BUFFER. While it is filling, sWindow[0] is the oldest
+  // sample and every difference below is positive. The moment it wraps -- at
+  // exactly kSyncWindow samples, so 32 seconds at one beacon a second --
+  // sWindow[0] is overwritten with the NEWEST sample, and every other entry is
+  // then older than the origin. In uint64 arithmetic those differences underflow
+  // to about 1.8e19 instead of going negative, which destroys the slope, which
+  // trips the implausible-skew guard, which resets the window.
+  //
+  // The guard did its job: it refused a fit that was genuinely nonsense. But the
+  // leaf then reported kUnsynced for the ~2 s it took to rebuild, and the primary
+  // silently DROPS every frame it cannot timestamp-shift (publish_no_shift), so
+  // ~20 frames per leaf per 32 s never reached the broker. Measured before and
+  // after on the same node.
+  //
+  // The y term already had the int64_t cast and so was immune; the x term did
+  // not. Nothing about the two lines suggested one was protected and the other
+  // was not, which is why this survived so long.
   const uint64_t x0 = sWindow[0].local_us;
   const uint64_t y0 = sWindow[0].primary_us;
 
   double sum_x = 0.0, sum_y = 0.0;
   for (size_t i = 0; i < sCount; ++i) {
-    sum_x += static_cast<double>(sWindow[i].local_us - x0);
+    sum_x += static_cast<double>(static_cast<int64_t>(sWindow[i].local_us - x0));
     sum_y += static_cast<double>(static_cast<int64_t>(sWindow[i].primary_us - y0));
   }
   const double mean_x = sum_x / static_cast<double>(sCount);
@@ -99,7 +120,9 @@ void refit() {
 
   double sxx = 0.0, sxy = 0.0;
   for (size_t i = 0; i < sCount; ++i) {
-    const double dx = static_cast<double>(sWindow[i].local_us - x0) - mean_x;
+    const double dx =
+        static_cast<double>(static_cast<int64_t>(sWindow[i].local_us - x0)) -
+        mean_x;
     const double dy =
         static_cast<double>(static_cast<int64_t>(sWindow[i].primary_us - y0)) -
         mean_y;
@@ -437,7 +460,24 @@ bool rewriteFrameTimestamps(uint8_t *frame, size_t length,
     return false;
   }
   const uint16_t samples = readLeBytes<uint16_t>(frame + 2);
-  if (length < kFrameHeaderSize + static_cast<size_t>(samples) * kSampleSize) {
+
+  // ⚠️ THE SAMPLE SIZE COMES FROM THE FRAME, NOT FROM kSampleSize. This function
+  // used the compile-time constant, which meant that the moment frame version 2
+  // made kSampleSize 62, every version 1 frame -- 524 bytes for ten samples --
+  // failed the length check below and was refused. The primary then SILENTLY
+  // DROPPED it into publish_no_shift, so a node running older firmware appeared
+  // to be transmitting nothing at all while the hub was receiving every frame.
+  //
+  // Found when a leaf was swapped for a board that had not been reflashed: 29
+  // frames received, 28 dropped, and no Data topic for it. The whole point of
+  // putting a version in the header is that both can coexist, and this was the
+  // one place that ignored it.
+  const uint16_t frame_version = readLeBytes<uint16_t>(frame);
+  const size_t sample_size = frame_version >= 2 ? 62u : 50u;
+  if (frame_version == 0 || frame_version > kFrameSchemaVersion) {
+    return false;  // a newer writer than this build understands
+  }
+  if (length < kFrameHeaderSize + static_cast<size_t>(samples) * sample_size) {
     return false;
   }
 
@@ -462,7 +502,7 @@ bool rewriteFrameTimestamps(uint8_t *frame, size_t length,
   writeLeBytes<uint64_t>(frame + 16, header_wall);
 
   for (uint16_t i = 0; i < samples; ++i) {
-    uint8_t *sample = frame + kFrameHeaderSize + static_cast<size_t>(i) * kSampleSize;
+    uint8_t *sample = frame + kFrameHeaderSize + static_cast<size_t>(i) * sample_size;
     const uint64_t device_ms = readLeBytes<uint64_t>(sample);
     uint64_t wall_us = 0;
     if (!toWall(device_ms * 1000ULL, wall_us)) {
