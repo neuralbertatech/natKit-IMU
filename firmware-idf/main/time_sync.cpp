@@ -460,7 +460,24 @@ bool rewriteFrameTimestamps(uint8_t *frame, size_t length,
     return false;
   }
   const uint16_t samples = readLeBytes<uint16_t>(frame + 2);
-  if (length < kFrameHeaderSize + static_cast<size_t>(samples) * kSampleSize) {
+
+  // ⚠️ THE SAMPLE SIZE COMES FROM THE FRAME, NOT FROM kSampleSize. This function
+  // used the compile-time constant, which meant that the moment frame version 2
+  // made kSampleSize 62, every version 1 frame -- 524 bytes for ten samples --
+  // failed the length check below and was refused. The primary then SILENTLY
+  // DROPPED it into publish_no_shift, so a node running older firmware appeared
+  // to be transmitting nothing at all while the hub was receiving every frame.
+  //
+  // Found when a leaf was swapped for a board that had not been reflashed: 29
+  // frames received, 28 dropped, and no Data topic for it. The whole point of
+  // putting a version in the header is that both can coexist, and this was the
+  // one place that ignored it.
+  const uint16_t frame_version = readLeBytes<uint16_t>(frame);
+  const size_t sample_size = frame_version >= 2 ? 62u : 50u;
+  if (frame_version == 0 || frame_version > kFrameSchemaVersion) {
+    return false;  // a newer writer than this build understands
+  }
+  if (length < kFrameHeaderSize + static_cast<size_t>(samples) * sample_size) {
     return false;
   }
 
@@ -485,7 +502,7 @@ bool rewriteFrameTimestamps(uint8_t *frame, size_t length,
   writeLeBytes<uint64_t>(frame + 16, header_wall);
 
   for (uint16_t i = 0; i < samples; ++i) {
-    uint8_t *sample = frame + kFrameHeaderSize + static_cast<size_t>(i) * kSampleSize;
+    uint8_t *sample = frame + kFrameHeaderSize + static_cast<size_t>(i) * sample_size;
     const uint64_t device_ms = readLeBytes<uint64_t>(sample);
     uint64_t wall_us = 0;
     if (!toWall(device_ms * 1000ULL, wall_us)) {
