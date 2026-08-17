@@ -36,3 +36,16 @@ CONFIG_FREERTOS_HZ=1000
 # fails when someone happens to pick the other chip.
 CONFIG_ETH_USE_SPI_ETHERNET=y
 CONFIG_ETH_SPI_ETHERNET_W5500=y
+
+# --- Partition table (TEC-NATKIT-49) -----------------------------------------
+#
+# The stock single-factory table gives the app 1 MB, and the primary measured
+# 93.2% of that on 2026-08-17 with 3 MB of the flash unused. partitions.csv
+# widens `factory` to 3 MB and leaves nvs/phy_init byte-identical, so a node's
+# NVS-persisted report mask survives the change.
+#
+# ⚠️ ESP-IDF reads sdkconfig.defaults* ONLY when the generated sdkconfig does not
+# exist yet, so picking this up means `rm build/<target>-<role>/sdkconfig` first.
+# build-role.sh warns when a defaults file is newer than the generated config.
+CONFIG_PARTITION_TABLE_CUSTOM=y
+CONFIG_PARTITION_TABLE_CUSTOM_FILENAME="partitions.csv"
