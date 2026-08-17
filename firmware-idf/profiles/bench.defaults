@@ -1,0 +1,61 @@
+# The bench profile: the radio settings this desk needs, IN GIT.
+#
+# ⚠️ THIS FILE EXISTS BECAUSE THE BENCH CONFIGURATION WAS LOST ON 2026-08-17.
+# `sdkconfig` is generated and gitignored, and the settings that made this rig
+# work -- both leaves pinned to 8.5 dBm with the power sweep off -- lived ONLY in
+# those generated files. TEC-NATKIT-49 required `rm build/<target>-<role>/sdkconfig`
+# (which build-role.sh itself instructs), the configs regenerated from the committed
+# defaults, and the radio silently reverted to "sweep on, power whatever IDF likes".
+# One leaf was reflashed and the other was not, so the two nodes then ran DIFFERENT
+# radio configurations and the resulting per-node discrepancy was measured for an
+# hour before anyone checked what was actually configured.
+#
+# So: anything about this bench's radio that is not an ESP-IDF default belongs
+# here, not in a generated file.
+#
+# Use it with:
+#     NATKIT_PROFILE=bench ./build-role.sh leaf esp32 -p /dev/ttyACM1 flash
+#
+# ⚠️⚠️ LEAVES ONLY. DO NOT BUILD THE PRIMARY WITH THIS.
+# The documented bench state pins the LEAVES; the primary's power was never
+# pinned, and pinning it is actively harmful. Measured 2026-08-17, same boards,
+# minutes apart:
+#     primary pinned to 8.5 dBm   both leaves degraded, 14.4% and 8.1% loss,
+#                                 ~40% of beacons missed at each
+#     primary at full power       one leaf at 0 gaps and 99.1 fresh samples/s
+# The hub's beacons are BROADCAST -- no acknowledgement, no retry -- so a beacon
+# that is not heard is simply lost, and every leaf's clock fit is built from them.
+# Turning the hub down costs every node at once. The "lower is better" lesson on
+# this bench is about a LEAF overloading the hub's receiver; it does not run in
+# reverse.
+#
+# ⚠️ THIS IS A BENCH PROFILE, NOT A DEPLOYMENT ONE. Nodes here sit centimetres
+# apart; deployments have them metres apart and want the sweep doing its job.
+# Do not move these into sdkconfig.defaults.
+
+# --- Transmit power ----------------------------------------------------------
+#
+# 8.5 dBm (34 quarter-dBm), pinned, sweep OFF.
+#
+# ⚠️ PINNED RATHER THAN SWEPT ON PURPOSE. The sweep picks a level PER NODE at
+# every boot by argmax on acknowledgement rate, and two nodes landing on very
+# different powers is what produced the original "near-far problem" -- the far
+# node arrives 15-25 dB weaker and is squeezed out of the hub's receiver. With
+# both pinned to the same level they arrive within about 1 dB.
+#
+# ⚠️ AND HIGHER IS NOT BETTER HERE. At a few centimetres free-space loss is only
+# ~10 dB, so 19.5 dBm arrives at roughly +9 dBm -- far above any 2.4 GHz front
+# end's linear range. Measured on this bench: turning both radios DOWN from 19.5
+# to 2 dBm took the hub from 0.4 to 8.5 received frames/s. 8.5 dBm is the level
+# this rig has been running at since 2026-08-14; if the discrepancy in
+# TEC-NATKIT-37 turns out to be receiver overload, the next thing to try is 8
+# (2.0 dBm), which is what fixed it before.
+CONFIG_NATKIT_TX_POWER_SWEEP=n
+CONFIG_NATKIT_TX_POWER_QUARTER_DBM=34
+
+# --- Channel: already committed, deliberately NOT repeated here ---------------
+#
+# CONFIG_NATKIT_CHANNEL_SURVEY=n and CONFIG_NATKIT_ESPNOW_CHANNEL=3 are already in
+# sdkconfig.defaults, so they survived the incident above and are not restated
+# here -- two sources of truth for one setting is how they drift apart. Only
+# settings that DIFFER from the committed defaults belong in a profile.

@@ -153,7 +153,26 @@ struct Heartbeat {
   // MQTT like everything else on this rig.
   uint32_t channel_hops;   // rises if the leaf is rescanning channels
   uint8_t scan_channel;    // 0 when locked; non-zero while hopping
-  uint8_t reserved_hb[3];
+  // ⚠️ THE OTHER HALF OF THE RECIPROCITY CHECK (TEC-NATKIT-37). LinkStats has
+  // held both of these all along and neither ever left the node, so the only
+  // published view of a link was the primary's -- and a frame count cannot tell
+  // a bad antenna (which attenuates BOTH directions) from a receiver problem
+  // (which shows on one side only). That comparison has found three RF faults on
+  // this bench and it was being made from one number.
+  //
+  // Sent in the bytes `reserved_hb` already had, so the struct size does not move
+  // and a leaf on older firmware still parses -- the primary accepts a heartbeat
+  // by `payload_size >= sizeof(Heartbeat)` and memcpys the whole thing.
+  //
+  // ⚠️ 0 MEANS "UNKNOWN", NOT "MEASURED ZERO", for both. An old leaf zero-inits
+  // the struct, so reading these as real values would have every pre-2026-08-17
+  // node reporting 0 dBm -- a transmitter wired directly into the receiver -- and
+  // a radio that is switched off. Neither is a plausible measurement, which is
+  // what makes 0 usable as the sentinel. (Same argument as the v1 frame's spare
+  // bits in TEC-NATKIT-38: unused is not the same as false.)
+  int8_t rssi_of_primary;         // how loudly THIS LEAF hears the hub, dBm
+  uint8_t tx_power_quarter_dbm;   // the power actually applied, not the one configured
+  uint8_t reserved_hb[1];
 };
 
 // --- Timing broadcast (#340 / TEC-NATKIT-17) --------------------------------

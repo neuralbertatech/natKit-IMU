@@ -77,6 +77,20 @@ build_dir="build/${target}-${role}"
 # (flash size, PSRAM) would be silently dropped.
 defaults="sdkconfig.defaults;sdkconfig.defaults.${target};roles/${role}.defaults"
 
+# An optional site profile, appended LAST so it wins. Exists because the bench's
+# radio settings used to live only in the generated sdkconfig, which is gitignored
+# -- so the `rm sdkconfig` this script tells you to do silently reverted them, and
+# two leaves ended up running different transmit powers for an hour before anyone
+# looked. See profiles/bench.defaults.
+if [[ -n "${NATKIT_PROFILE:-}" ]]; then
+  profile="profiles/${NATKIT_PROFILE}.defaults"
+  if [[ ! -f "${profile}" ]]; then
+    echo "$0: no such profile '${NATKIT_PROFILE}' (expected ${profile})" >&2
+    exit 2
+  fi
+  defaults="${defaults};${profile}"
+fi
+
 # ESP-IDF reads sdkconfig.defaults* ONLY when the generated sdkconfig does not
 # exist yet. After that, editing a defaults file silently does nothing: the
 # build succeeds and the setting is simply absent from the image. Measured the
@@ -92,10 +106,48 @@ if [[ -f "${sdkconfig_path}" ]]; then
   done
 fi
 
+# ⚠️ SAY WHAT RADIO THIS IMAGE WILL HAVE, EVERY TIME.
+#
+# Flashing a node is how the bench's transmit power, channel and sweep setting
+# actually change, and all three are invisible in the command line. On 2026-08-17 a
+# rebuild picked up different radio settings than the board next to it, and the
+# resulting per-node discrepancy was measured for an hour as if it were physics.
+# This costs one line of output and makes that impossible to miss.
+#
+# Reported AFTER idf.py rather than before, because on a fresh build directory the
+# generated sdkconfig does not exist yet -- there would be nothing to read.
+report_radio_config() {
+  local cfg="${sdkconfig_path}"
+  if [[ ! -f "${cfg}" ]]; then
+    return 0
+  fi
+  local sweep survey power channel power_text
+  if grep -qE '^CONFIG_NATKIT_TX_POWER_SWEEP=y' "${cfg}"; then sweep=on; else sweep=off; fi
+  if grep -qE '^CONFIG_NATKIT_CHANNEL_SURVEY=y' "${cfg}"; then survey=on; else survey=off; fi
+  power="$(grep -E '^CONFIG_NATKIT_TX_POWER_QUARTER_DBM=' "${cfg}" | cut -d= -f2-)"
+  channel="$(grep -E '^CONFIG_NATKIT_ESPNOW_CHANNEL=' "${cfg}" | cut -d= -f2-)"
+  if [[ -n "${power}" && "${power}" != "0" ]]; then
+    power_text="$(awk -v q="${power}" 'BEGIN{printf "%.1f dBm pinned", q/4}')"
+  else
+    power_text="IDF default (full power)"
+  fi
+  echo >&2
+  echo "  radio for ${target}-${role}: tx ${power_text} | sweep ${sweep} | channel ${channel:-?} | survey ${survey} | profile ${NATKIT_PROFILE:-none}" >&2
+  if [[ "${sweep}" == "on" ]]; then
+    echo "  ⚠️  the sweep picks a level PER NODE at every boot -- two nodes can land on" >&2
+    echo "     very different powers, which is the shape of TEC-NATKIT-37. Use" >&2
+    echo "     NATKIT_PROFILE=bench to pin them." >&2
+  fi
+}
+
 set -x
-exec idf.py \
+idf.py \
   -B "${build_dir}" \
   -D SDKCONFIG="${build_dir}/sdkconfig" \
   -D SDKCONFIG_DEFAULTS="${defaults}" \
   -D IDF_TARGET="${target}" \
   "${@:-build}"
+status=$?
+{ set +x; } 2>/dev/null
+report_radio_config
+exit "${status}"

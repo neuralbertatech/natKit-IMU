@@ -287,6 +287,13 @@ void runLeaf() {
       beat.accuracy_rotation = r.rotation.accuracy;
       beat.channel_hops = link.channel_hops;
       beat.scan_channel = link.scan_channel;
+      // 0 when this leaf has not heard the hub yet -- see Heartbeat, where 0 is
+      // the "unknown" sentinel rather than a measurement.
+      beat.rssi_of_primary = link.rssi_seen ? link.rssi_last : 0;
+      beat.tx_power_quarter_dbm =
+          link.tx_power_quarter_dbm > 0
+              ? static_cast<uint8_t>(link.tx_power_quarter_dbm)
+              : 0;
       espNowLinkSend(PacketType::kHeartbeat, &beat, sizeof(beat));
     }
 

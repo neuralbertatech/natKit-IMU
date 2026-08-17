@@ -96,7 +96,23 @@ struct UplinkNodeStatus {
   int8_t rssi_worst;
   uint8_t rssi_seen;
   uint8_t leaf_scan_channel;   // non-zero while that leaf is hopping channels
-  uint8_t reserved1[2];
+  // ⚠️ THE LEAF'S OWN VIEW, so the reciprocity check can finally be made from the
+  // published data. `rssi_last` above is how loudly the HUB hears the node;
+  // `leaf_rssi_of_primary` is how loudly the NODE hears the hub. A passive path
+  // is reciprocal, so a large gap between the two is a receiver fault or
+  // interference rather than distance -- the single diagnostic that has found the
+  // most RF faults on this rig, and until now it needed a console that resets the
+  // board it prints on.
+  //
+  // `leaf_tx_power_quarter_dbm` is there because the power sweep picks a level
+  // PER NODE, independently, at every boot, and nothing on the wire said what it
+  // chose. Two nodes silently landing on different powers is exactly the shape of
+  // TEC-NATKIT-37, and it was being diagnosed without the number.
+  //
+  // Both live in the two bytes `reserved1` already had, so the struct stays 168
+  // bytes and existing decoders do not move. ⚠️ 0 means UNKNOWN for both.
+  int8_t leaf_rssi_of_primary;
+  uint8_t leaf_tx_power_quarter_dbm;
   // The LEAF's own counters, relayed from its heartbeat. These separate the three
   // ways a stall can happen and which the primary alone cannot tell apart:
   // the leaf stopped BUILDING frames, its send queue OVERFLOWED because the radio

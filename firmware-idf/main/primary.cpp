@@ -119,6 +119,8 @@ void fillNodeStatus(const NodeState &node, UplinkNodeStatus &out) {
     out.leaf_send_failures = node.last_heartbeat.send_failures;
     out.leaf_channel_hops = node.last_heartbeat.channel_hops;
     out.leaf_scan_channel = node.last_heartbeat.scan_channel;
+    out.leaf_rssi_of_primary = node.last_heartbeat.rssi_of_primary;
+    out.leaf_tx_power_quarter_dbm = node.last_heartbeat.tx_power_quarter_dbm;
   }
   out.publish_no_sync = node.publish_no_sync;
   out.publish_no_shift = node.publish_no_shift;
