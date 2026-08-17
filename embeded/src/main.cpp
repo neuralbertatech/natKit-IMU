@@ -581,7 +581,7 @@ void handleNetworkingStagesAndImuJoinedTask(void*) {
           // Connect to MQTT with retry limit
           uint8_t mqttRetries = 0;
           bool mqttConnectRetryExhausted = false;
-          while (!mqttClient.connect("natKit-IMU")) {
+          while (!mqttClient.connect(natkitMqttClientId())) {
             mqttRetries++;
             if (mqttRetries >= MQTT_MAX_CONNECT_RETRIES) {
               // Don't strand the device (the old code went to a dead Disconnected
