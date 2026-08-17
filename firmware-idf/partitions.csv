@@ -1,0 +1,26 @@
+# Partition table for every fork role and target (TEC-NATKIT-49).
+#
+# WHY THIS FILE EXISTS: the roles were on ESP-IDF's stock single-factory table,
+# which gives the app 1 MB. Measured 2026-08-17, that put the primary at 93.2% of
+# its partition (976,848 of 1,048,576 bytes) with 3 MB of the flash unused beside
+# it -- and the primary is the role that keeps growing, having taken the command
+# relay, the status frames, the coherence metric and the channel survey in one
+# month. The tree that uses far less flash than `embeded/` was the one about to
+# hit a wall first.
+#
+# ⚠️ nvs AND phy_init ARE BYTE-IDENTICAL TO THE STOCK TABLE, DELIBERATELY.
+# The leaf persists its enabled-report mask in NVS (TEC-NATKIT-40), so moving or
+# resizing that partition would silently drop a node's configuration on the next
+# flash. Only `factory` grows, and it grows into space that was already empty.
+#
+# 0x10000 + 0x300000 = 0x310000, so this fits the 4 MB every target declares
+# (see sdkconfig.defaults.esp32 on why 4 MB is declared on an 8 MB part). The
+# ~960 KB above `factory` stays unallocated; a `coredump` partition is the
+# obvious future claim on it, and would be worth having on the S3 primary whose
+# USB console cannot be read at all -- but enabling core dumps is a separate
+# decision with its own IRAM cost, not a side effect of repartitioning.
+#
+# Name,     Type, SubType, Offset,   Size,     Flags
+nvs,        data, nvs,     0x9000,   0x6000,
+phy_init,   data, phy,     0xf000,   0x1000,
+factory,    app,  factory, 0x10000,  0x300000,
