@@ -12,7 +12,7 @@ the same topic names, so knowing which one is on a board is not optional.
 | What | the ORIGINAL firmware, now a rollback path — every node a full WiFi/MQTT/NTP client | **what the rig actually runs** (EPIC TEC-NATKIT-20): leaf/primary/gateway roles, ESP-NOW between nodes, one networked hub |
 | Framework | Arduino via pioarduino (arduino-esp32 3.3.11 / ESP-IDF 5.5.5) | native ESP-IDF (`idf.py`), v5.5.3 |
 | Build | `cd embeded && pio run -e release` | `cd firmware-idf && ./build-role.sh leaf esp32` |
-| Status | buildable, not deployed on anything | **in use on every board**, streaming 100 samples/s per leaf |
+| Status | buildable, kept as the rollback path; **benched head-to-head on 2026-08-17 (TEC-NATKIT-27)** | **in use on every board**, streaming 100 samples/s per leaf |
 
 The fork is still **additive and reversible** — `embeded/` stays buildable and
 flashable, and the epic ends in an explicit adopt-or-discard decision
@@ -32,6 +32,13 @@ channel (`embeded/include/CommandChannel.hpp`) has no counterpart in
 Nothing errors — the backend half still works, so a command is published and
 simply goes unsubscribed. TEC-NATKIT-39.
 
+⚠️ **`embeded/` COULD NEVER RUN TWO NODES AT ONCE UNTIL 2026-08-17.** All three of
+its `connect()` calls passed the literal MQTT client id `"natKit-IMU"`, and a broker
+must evict an existing session when a second client presents the same id — so two of
+these nodes took turns kicking each other off ~700 times a minute and **lost 41% of
+their frames**. Fixed (`natkitMqttClientId()`); if you are on a checkout older than
+that, do not benchmark two of them. Measured on TEC-NATKIT-27.
+
 ⚠️ **THE TWO FIRMWARES ARE NO LONGER WIRE-COMPATIBLE BY DEFAULT.** `firmware-idf/`
 emits IMU frame **version 2** (13 floats, 62-byte samples, 644-byte frames, with
 the magnetometer). `embeded/` emits **version 1** (10 floats, 50-byte samples, 524
@@ -49,8 +56,8 @@ that it is a record rather than a measurement (nothing is read back off a board)
 | Board | Port | Firmware | Recorded |
 |---|---|---|---|
 | ESP32-S3 (ESP Thread Border Router + W5500 Ethernet), MAC `b8:f8:62:62:f7:3c` | `/dev/ttyACM0` | `firmware-idf/` **primary**. ⚠️ Opening its USB console RESETS it *and re-enumerates*, so `capture.py` returns an empty file — diagnose it from the published status. | 2026-08-14 |
-| ESP32-PICO-V3-02, MAC `0c:8b:95:96:bc:4c`, BNO08x | `ACM1` or `ACM2` | `firmware-idf/` **leaf**. 10.0 samples/s, heard at −47 dBm. | 2026-08-14 |
-| ESP32, MAC `4c:75:25:a4:45:3c`, BNO08x | `ACM1` or `ACM2` | `firmware-idf/` **leaf**, swapped in 2026-08-14. 10.0 samples/s, zero stalls, heard at −40 dBm. | 2026-08-14 |
+| ESP32-PICO-V3-02, MAC `0c:8b:95:96:bc:4c`, BNO08x | `/dev/ttyACM1` (serial `5185026888`) | `firmware-idf/` **leaf**. Flashed to `embeded/` and back on 2026-08-17 for TEC-NATKIT-27. | 2026-08-17 |
+| ESP32, MAC `4c:75:25:a4:45:3c`, BNO08x | `/dev/ttyACM2` (serial `5185027828`) | `firmware-idf/` **leaf**. Flashed to `embeded/` and back on 2026-08-17 for TEC-NATKIT-27. | 2026-08-17 |
 
 ⚠️ **PORT NUMBERS MOVE WHEN BOARDS ARE SWAPPED, AND THE PRIMARY IS NOT ALWAYS
 ttyACM2.** Two flashes were aimed at the wrong board before this was noticed; esptool
@@ -64,8 +71,21 @@ udevadm info -q property -n /dev/ttyACM0 | grep -E 'ID_MODEL=|ID_SERIAL_SHORT='
 
 The S3 primary reports `Espressif / USB_JTAG_serial_debug_unit` and **its MAC as the
 USB serial number**, so it is unambiguous. The ESP32 leaves report a `1a86` CH340
-bridge with an opaque serial, so those two can only be told apart by flashing one and
-seeing which device id goes quiet.
+bridge with an opaque serial — but the serials are **distinct and stable**, so the
+two leaves can be told apart without flashing anything after all. Mapped on
+2026-08-17 by flashing one and watching which device id changed firmware:
+
+| `ID_SERIAL_SHORT` | board | device id |
+|---|---|---|
+| `5185026888` | ESP32-PICO-V3-02, `0c:8b:95:96:bc:4c` | 13793649671244 |
+| `5185027828` | ESP32, `4c:75:25:a4:45:3c` | 84066026407228 |
+
+⚠️ **A LEAF TAKES MINUTES, NOT SECONDS, TO COME BACK TO FULL RATE AFTER A RESET.**
+Measured 2026-08-17: first frame at **18.7 s**, but still 174 sequence gaps in a
+420 s window seven minutes later, and only clean at ~10 minutes. "It is publishing
+again" is not "it has recovered", and a rate measured in between reads as a fault
+that is not there. (Suspected cause: the clock-fit latch-up in TEC-NATKIT-47.)
+`embeded/` by contrast was back at full rate ~8 s after a reset.
 
 ⚠️ Board `0c:8b:95:96:b9:f4` was REMOVED on 2026-08-14 — physically damaged, and it
 had been delivering 0-22 samples/s with 274 sequence gaps against the other leaf's
