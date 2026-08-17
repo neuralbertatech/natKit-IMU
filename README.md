@@ -80,12 +80,17 @@ two leaves can be told apart without flashing anything after all. Mapped on
 | `5185026888` | ESP32-PICO-V3-02, `0c:8b:95:96:bc:4c` | 13793649671244 |
 | `5185027828` | ESP32, `4c:75:25:a4:45:3c` | 84066026407228 |
 
-⚠️ **A LEAF TAKES MINUTES, NOT SECONDS, TO COME BACK TO FULL RATE AFTER A RESET.**
-Measured 2026-08-17: first frame at **18.7 s**, but still 174 sequence gaps in a
-420 s window seven minutes later, and only clean at ~10 minutes. "It is publishing
-again" is not "it has recovered", and a rate measured in between reads as a fault
-that is not there. (Suspected cause: the clock-fit latch-up in TEC-NATKIT-47.)
-`embeded/` by contrast was back at full rate ~8 s after a reset.
+⚠️ **A LEAF PUBLISHES AGAIN LONG BEFORE IT IS AT FULL RATE.** Measured 2026-08-17:
+first frame at **18.7 s**, still 174 sequence gaps in a 420 s window seven minutes
+later, and one leaf still at 6.7% loss **40 minutes** after its reset. "It is
+publishing again" is not "it has recovered", and a rate measured in between reads as
+a fault that is not there. `embeded/` by contrast was back at full rate in ~8 s.
+
+⚠️ **When a leaf is not delivering, read `beacons_missed` and `leaf_send_failures`
+from its `NatKitNodeStatusV1`** — the bad node was missing 616 of 913 beacons with
+1800 send failures, while the healthy one missed 22 and failed 4. The clock-fit
+figures say nothing about it: both nodes had a fully saturated `residual_rms_ns` and
+one of them was delivering perfectly.
 
 ⚠️ Board `0c:8b:95:96:b9:f4` was REMOVED on 2026-08-14 — physically damaged, and it
 had been delivering 0-22 samples/s with 274 sequence gaps against the other leaf's
