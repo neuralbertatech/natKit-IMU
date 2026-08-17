@@ -48,10 +48,29 @@ that it is a record rather than a measurement (nothing is read back off a board)
 
 | Board | Port | Firmware | Recorded |
 |---|---|---|---|
-| ESP32-PICO-V3-02, MAC `0c:8b:95:96:b9:f4`, BNO08x | `/dev/ttyACM0` | `firmware-idf/` **leaf** @ `zach/383-magnetometer-on-the-wire`. ⚠️ Delivering 0-22 samples/s — its transmits fail while it hears the primary at −40 dBm (TEC-NATKIT-37). | 2026-08-13 |
-| ESP32-PICO-V3-02, MAC `0c:8b:95:96:bc:4c`, BNO08x | `/dev/ttyACM1` | `firmware-idf/` **leaf** @ same. Streaming 100 samples/s. | 2026-08-13 |
-| ESP32-S3 (ESP Thread Border Router + W5500 Ethernet daughterboard), MAC `b8:f8:62:62:f7:3c` | `/dev/ttyACM2` | `firmware-idf/` **primary** @ same. ⚠️ Opening its USB console RESETS it. | 2026-08-13 |
+| ESP32-S3 (ESP Thread Border Router + W5500 Ethernet), MAC `b8:f8:62:62:f7:3c` | `/dev/ttyACM0` | `firmware-idf/` **primary**. ⚠️ Opening its USB console RESETS it *and re-enumerates*, so `capture.py` returns an empty file — diagnose it from the published status. | 2026-08-14 |
+| ESP32-PICO-V3-02, MAC `0c:8b:95:96:bc:4c`, BNO08x | `ACM1` or `ACM2` | `firmware-idf/` **leaf**. 10.0 samples/s, heard at −47 dBm. | 2026-08-14 |
+| ESP32, MAC `4c:75:25:a4:45:3c`, BNO08x | `ACM1` or `ACM2` | `firmware-idf/` **leaf**, swapped in 2026-08-14. 10.0 samples/s, zero stalls, heard at −40 dBm. | 2026-08-14 |
 
+⚠️ **PORT NUMBERS MOVE WHEN BOARDS ARE SWAPPED, AND THE PRIMARY IS NOT ALWAYS
+ttyACM2.** Two flashes were aimed at the wrong board before this was noticed; esptool
+refused them ("This chip is ESP32, not ESP32-S3") rather than bricking a leaf, which
+is the only reason it was cheap. Identify a port before flashing it, without touching
+the board:
+
+```sh
+udevadm info -q property -n /dev/ttyACM0 | grep -E 'ID_MODEL=|ID_SERIAL_SHORT='
+```
+
+The S3 primary reports `Espressif / USB_JTAG_serial_debug_unit` and **its MAC as the
+USB serial number**, so it is unambiguous. The ESP32 leaves report a `1a86` CH340
+bridge with an opaque serial, so those two can only be told apart by flashing one and
+seeing which device id goes quiet.
+
+⚠️ Board `0c:8b:95:96:b9:f4` was REMOVED on 2026-08-14 — physically damaged, and it
+had been delivering 0-22 samples/s with 274 sequence gaps against the other leaf's
+clean 10/s. It is still in the primary's NVS registry, so the hub publishes a
+`NatKitNodeStatusV1` for a node that no longer exists.
 Both leaves are currently pinned to 8.5 dBm with the transmit-power sweep OFF.
 
 A pre-flash 4 MB dump of the working `embeded/` firmware from board `…b9:f4` is
