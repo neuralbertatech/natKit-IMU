@@ -14,10 +14,19 @@ the same topic names, so knowing which one is on a board is not optional.
 | Build | `cd embeded && pio run -e release` | `cd firmware-idf && ./build-role.sh leaf esp32` |
 | Status | buildable, kept as the rollback path; **benched head-to-head on 2026-08-17 (TEC-NATKIT-27)** | **in use on every board**, streaming 100 samples/s per leaf |
 
-The fork is still **additive and reversible** — `embeded/` stays buildable and
-flashable, and the epic ends in an explicit adopt-or-discard decision
-(TEC-NATKIT-27). But "additive" no longer means "unused": the ESP-IDF tree is what
-every board on the bench is running, and has been since 2026-08-12.
+✅ **THE DECISION IS MADE: the fork was ADOPTED on 2026-08-17** (TEC-NATKIT-27), on
+a head-to-head bench of both firmwares on the same two boards, the same broker and
+the same three hours. Per node, two nodes: **98 fresh samples/s against 56–80, in
+half the bandwidth, with 1.4 ms of inter-arrival jitter against 17 ms and
+node-to-node clock agreement of 0.1–0.2 ms against 2.7–5.5** — plus the magnetometer,
+which `embeded/` cannot carry.
+
+`embeded/` is **kept as a rollback path, not retired**, and reviewed on
+**2026-09-15**. For it to stay a real rollback rather than a tree that merely
+compiles, its libnatkit-core pin has to be bumped when the core moves, and **it has
+to be flashed onto a board and measured once per review cycle** — 2026-08-17 was the
+first time in months, and it immediately turned out to be incapable of running two
+nodes at once (see below).
 
 **So new work goes in `firmware-idf/`. Do not edit `embeded/` unless the change
 actually requires it** — a change there cannot be verified, because no board runs
