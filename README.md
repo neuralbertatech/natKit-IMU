@@ -67,6 +67,8 @@ that it is a record rather than a measurement (nothing is read back off a board)
 | ESP32-S3 (ESP Thread Border Router + W5500 Ethernet), MAC `b8:f8:62:62:f7:3c` | `/dev/ttyACM0` | `firmware-idf/` **primary**. ⚠️ Opening its USB console RESETS it *and re-enumerates*, so `capture.py` returns an empty file — diagnose it from the published status. | 2026-08-14 |
 | ESP32-PICO-V3-02, MAC `0c:8b:95:96:bc:4c`, BNO08x | `/dev/ttyACM1` (serial `5185026888`) | `firmware-idf/` **leaf**. Flashed to `embeded/` and back on 2026-08-17 for TEC-NATKIT-27. | 2026-08-17 |
 | ESP32, MAC `4c:75:25:a4:45:3c`, BNO08x | `/dev/ttyACM2` (serial `5185027828`) | `firmware-idf/` **leaf**. Flashed to `embeded/` and back on 2026-08-17 for TEC-NATKIT-27. | 2026-08-17 |
+| ESP32 (CH340), MAC unknown | `/dev/ttyACM3` (serial `5185027171`) | **unknown** — added 2026-08-18, nothing flashed yet | 2026-08-18 |
+| ESP32 (CH340), MAC unknown | `/dev/ttyACM4` (serial `5185027831`) | **unknown** — added 2026-08-18, nothing flashed yet | 2026-08-18 |
 
 ⚠️ **PORT NUMBERS MOVE WHEN BOARDS ARE SWAPPED, AND THE PRIMARY IS NOT ALWAYS
 ttyACM2.** Two flashes were aimed at the wrong board before this was noticed; esptool
@@ -76,7 +78,23 @@ the board:
 
 ```sh
 udevadm info -q property -n /dev/ttyACM0 | grep -E 'ID_MODEL=|ID_SERIAL_SHORT='
+ls -l /dev/serial/by-id/          # the stable names, immune to ttyACM renumbering
 ```
+
+⚠️⚠️ **FLASH BY `/dev/serial/by-id/...`, NOT BY ttyACM NUMBER.** `-p /dev/ttyACM1`
+aims at a *port*, not a *board*. esptool refuses a chip-type mismatch, so aiming a
+leaf image at the S3 fails loudly — **but two ESP32 leaves can be flashed in the
+wrong order with no error whatsoever**, which silently invalidates any A/B between
+them. The by-id path names the board:
+
+```sh
+./build-role.sh leaf esp32 -p /dev/serial/by-id/usb-1a86_USB_Single_Serial_5185026888-if00 flash
+```
+
+(Measured 2026-08-17/18: the ttyACM numbers did NOT in fact move across a full day of
+resets, reflashes and bootloader parks, nor when two more boards were plugged in — a
+DTR/RTS reset does not re-enumerate a CH340. Use by-id anyway; the cost is zero and
+the failure is silent.)
 
 The S3 primary reports `Espressif / USB_JTAG_serial_debug_unit` and **its MAC as the
 USB serial number**, so it is unambiguous. The ESP32 leaves report a `1a86` CH340
