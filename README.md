@@ -67,8 +67,8 @@ that it is a record rather than a measurement (nothing is read back off a board)
 | ESP32-S3 (ESP Thread Border Router + W5500 Ethernet), MAC `b8:f8:62:62:f7:3c` | `/dev/ttyACM0` | `firmware-idf/` **primary**. ⚠️ Opening its USB console RESETS it *and re-enumerates*, so `capture.py` returns an empty file — diagnose it from the published status. | 2026-08-14 |
 | ESP32-PICO-V3-02, MAC `0c:8b:95:96:bc:4c`, BNO08x | `/dev/ttyACM1` (serial `5185026888`) | `firmware-idf/` **leaf**. Flashed to `embeded/` and back on 2026-08-17 for TEC-NATKIT-27. | 2026-08-17 |
 | ESP32, MAC `4c:75:25:a4:45:3c`, BNO08x | `/dev/ttyACM2` (serial `5185027828`) | `firmware-idf/` **leaf**. Flashed to `embeded/` and back on 2026-08-17 for TEC-NATKIT-27. | 2026-08-17 |
-| ESP32 (CH340), MAC unknown | `/dev/ttyACM3` (serial `5185027171`) | **unknown** — added 2026-08-18, nothing flashed yet | 2026-08-18 |
-| ESP32 (CH340), MAC unknown | `/dev/ttyACM4` (serial `5185027831`) | **unknown** — added 2026-08-18, nothing flashed yet | 2026-08-18 |
+| ESP32, MAC `0c:8b:95:96:b9:f4` — **the board previously believed damaged**, see below | `ttyACM3`/`ttyACM4` (serial `5185027171` or `5185027831`, ⚠️ **not yet determined which**) | `firmware-idf/` **leaf**, flashed 2026-08-18 | 2026-08-18 |
+| ESP32, MAC `0c:8b:95:94:ef:d0` | `ttyACM3`/`ttyACM4` (the other of `5185027171` / `5185027831`) | `firmware-idf/` **leaf**, flashed 2026-08-18 | 2026-08-18 |
 
 ⚠️ **PORT NUMBERS MOVE WHEN BOARDS ARE SWAPPED, AND THE PRIMARY IS NOT ALWAYS
 ttyACM2.** Two flashes were aimed at the wrong board before this was noticed; esptool
@@ -119,10 +119,20 @@ from its `NatKitNodeStatusV1`** — the bad node was missing 616 of 913 beacons 
 figures say nothing about it: both nodes had a fully saturated `residual_rms_ns` and
 one of them was delivering perfectly.
 
-⚠️ Board `0c:8b:95:96:b9:f4` was REMOVED on 2026-08-14 — physically damaged, and it
-had been delivering 0-22 samples/s with 274 sequence gaps against the other leaf's
-clean 10/s. It is still in the primary's NVS registry, so the hub publishes a
-`NatKitNodeStatusV1` for a node that no longer exists.
+⚠️⚠️ **BOARD `0c:8b:95:96:b9:f4` IS BACK, AND IT IS NOT OBVIOUSLY BROKEN.** It was
+removed on 2026-08-14 as "physically banged up" after delivering 0-22 samples/s with
+274 sequence gaps against another leaf's clean 10/s, and TEC-NATKIT-46 was closed on
+that. Reconnected and reflashed on 2026-08-18 it streams at ~10 frames/s and **the hub
+hears it at −36 dBm, the strongest of all four nodes.**
+
+Treat the original diagnosis as unsafe rather than wrong: the evidence that condemned
+it — one leaf delivering badly while its neighbour is clean, on identical firmware and
+power — is exactly what the two undamaged boards have since been doing to each other,
+alternating every 10-30 minutes with nothing touched (TEC-NATKIT-50). Physical damage
+was a plausible story for a symptom that turns out not to need one.
+
+⚠️ And do not read the reverse from one good hour either: a board looking healthy for
+twenty minutes is precisely what that fault does to every board in turn.
 Both leaves are currently pinned to 8.5 dBm with the transmit-power sweep OFF.
 
 A pre-flash 4 MB dump of the working `embeded/` firmware from board `…b9:f4` is
