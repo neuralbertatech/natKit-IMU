@@ -253,7 +253,12 @@ struct SyncState {
   uint32_t mac_spread_us;  // receive-callback jitter, measured (see time_sync.hpp)
   uint16_t samples_used;
   uint8_t quality;         // SyncQuality
-  uint8_t reserved;
+  // ⚠️ WINDOWS THROWN AWAY FOR AN IMPOSSIBLE RESIDUAL, saturating at 255 (#392).
+  // In the byte `reserved` already had, so the struct stays 88 bytes and every
+  // decoder keeps its offsets. 0 versus not-0 is the reading that matters: a leaf
+  // that keeps discarding windows is one whose beacon pairing is wrong, and
+  // before this the only symptom was a fit that quietly stayed bad.
+  uint8_t implausible_residuals;
 };
 
 // --- The probe: the primary measuring what the leaf claims -------------------

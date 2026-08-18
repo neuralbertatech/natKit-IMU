@@ -62,7 +62,19 @@ uint64_t extendMacStamp(uint32_t raw) {
   return sMacWrapBase + raw;
 }
 
+// A window this far off its own line, REPEATEDLY. One is a transient -- a
+// mispaired follow-up, a sample taken across a scheduling stall -- and throwing
+// the whole window away for it costs ~2 s of kUnsynced, which the primary turns
+// into dropped frames. Three in a row is a window that is not going to recover
+// on its own, which is the case #392 found had no way out.
+//
+// Same shape as kRejectsBeforeReset below and for the same reason: reset is the
+// escape hatch, not the first response.
+constexpr uint32_t kImplausibleBeforeReset = 3;
+uint32_t sConsecutiveImplausible = 0;
+
 void resetWindow() {
+  sConsecutiveImplausible = 0;
   sCount = 0;
   sNext = 0;
   sStatus.quality = SyncQuality::kUnsynced;
@@ -70,6 +82,26 @@ void resetWindow() {
   sStatus.residual_rms_ns = 0;
   sStatus.peak_residual_ns = 0;
   sStatus.skew_ppb = 0;
+}
+
+// Store a residual without inventing a value for one that does not fit.
+//
+// ⚠️ THE CAST THIS REPLACES WAS THE WHOLE OF #392 / TEC-NATKIT-47. It was
+// `static_cast<uint32_t>(rms * 1000.0)`, which is undefined for a double past
+// UINT32_MAX and on Xtensa produced 0xFFFFFFFF -- a specific wrong number, not a
+// flag. isOutlier() then read it back as a sigma, so the rejection limit became
+// ~12.9 s, nothing was ever an outlier again, and the window could not shed the
+// samples that had made it bad. `outliers_rejected` stayed at 0 throughout,
+// which reads as a clean signal rather than a dead guard.
+uint32_t residualToNs(double us) {
+  if (!std::isfinite(us) || us < 0.0) {
+    return kResidualSaturatedNs;
+  }
+  const double ns = us * 1000.0;
+  if (ns >= static_cast<double>(kResidualSaturatedNs)) {
+    return kResidualSaturatedNs;
+  }
+  return static_cast<uint32_t>(ns);
 }
 
 // Least squares over the populated window.
@@ -110,24 +142,34 @@ void refit() {
   const uint64_t x0 = sWindow[0].local_us;
   const uint64_t y0 = sWindow[0].primary_us;
 
+  // ⚠️ ONE PLACE, BECAUSE THE SECOND PLACE IS WHAT WENT WRONG. The signed
+  // difference was open-coded in three loops below and the cast was missing from
+  // exactly one of them -- the residual loop's x -- for as long as this estimator
+  // has existed. It is the SAME defect the comment above describes and the same
+  // one that was fixed in the sums; fixing it there and not here is what
+  // TEC-NATKIT-47 actually was. These two lambdas exist so there is no longer a
+  // second place to forget.
+  const auto dx = [&](size_t i) {
+    return static_cast<double>(static_cast<int64_t>(sWindow[i].local_us - x0));
+  };
+  const auto dy = [&](size_t i) {
+    return static_cast<double>(static_cast<int64_t>(sWindow[i].primary_us - y0));
+  };
+
   double sum_x = 0.0, sum_y = 0.0;
   for (size_t i = 0; i < sCount; ++i) {
-    sum_x += static_cast<double>(static_cast<int64_t>(sWindow[i].local_us - x0));
-    sum_y += static_cast<double>(static_cast<int64_t>(sWindow[i].primary_us - y0));
+    sum_x += dx(i);
+    sum_y += dy(i);
   }
   const double mean_x = sum_x / static_cast<double>(sCount);
   const double mean_y = sum_y / static_cast<double>(sCount);
 
   double sxx = 0.0, sxy = 0.0;
   for (size_t i = 0; i < sCount; ++i) {
-    const double dx =
-        static_cast<double>(static_cast<int64_t>(sWindow[i].local_us - x0)) -
-        mean_x;
-    const double dy =
-        static_cast<double>(static_cast<int64_t>(sWindow[i].primary_us - y0)) -
-        mean_y;
-    sxx += dx * dx;
-    sxy += dx * dy;
+    const double cx = dx(i) - mean_x;
+    const double cy = dy(i) - mean_y;
+    sxx += cx * cx;
+    sxy += cx * cy;
   }
   if (sxx <= 0.0) {
     return;  // every sample at the same instant: nothing to fit
@@ -157,10 +199,7 @@ void refit() {
   double sum_sq = 0.0;
   double peak = 0.0;
   for (size_t i = 0; i < sCount; ++i) {
-    const double x = static_cast<double>(sWindow[i].local_us - x0);
-    const double y =
-        static_cast<double>(static_cast<int64_t>(sWindow[i].primary_us - y0));
-    const double residual = y - (intercept + slope * x);
+    const double residual = dy(i) - (intercept + slope * dx(i));
     sum_sq += residual * residual;
     const double magnitude = residual < 0.0 ? -residual : residual;
     if (magnitude > peak) {
@@ -169,13 +208,46 @@ void refit() {
   }
   const double rms = std::sqrt(sum_sq / static_cast<double>(sCount));
 
+  // A fit whose samples are nowhere near its own line, handled the way the
+  // implausible-skew guard above handles a slope no crystal pair could produce:
+  // say so, do not publish it as a measurement, and eventually throw the window
+  // away -- because the per-sample guard cannot clean this one. It is downstream
+  // of this very number, which is what #392 found.
+  //
+  // ⚠️ NOT AN IMMEDIATE RESET, and the reason is on the hardware right now:
+  // three of the four leaves on the bench are sitting at a saturated residual
+  // today. An unconditional reset here would put those three into a rebuild
+  // every second -- ~2 s of kUnsynced each time, which the primary turns
+  // straight into dropped frames (publish_no_sync). That trade is the one the
+  // 32-second-reset bug already taught this file not to make.
+  if (!std::isfinite(rms) || rms > kMaxPlausibleResidualUs) {
+    ++sStatus.implausible_residuals;
+    // Publish the state we are actually in. The old code returned here leaving
+    // the PREVIOUS fit's residual in place, so a window that had gone bad kept
+    // advertising the last good number it happened to hold.
+    sStatus.residual_rms_ns = kResidualSaturatedNs;
+    sStatus.peak_residual_ns = kResidualSaturatedNs;
+    sStatus.quality = SyncQuality::kCoarse;
+    if (++sConsecutiveImplausible >= kImplausibleBeforeReset) {
+      ESP_LOGW(kTag,
+               "%lu fits in a row whose samples sit off their own line (last "
+               "%.0f us rms over %u samples): rebuilding the window, because no "
+               "amount of new samples fixes one that is anchored wrong",
+               static_cast<unsigned long>(sConsecutiveImplausible), rms,
+               static_cast<unsigned>(sCount));
+      resetWindow();  // which clears the streak
+    }
+    return;
+  }
+  sConsecutiveImplausible = 0;
+
   // Anchor the fit at the newest sample rather than at the window's origin: every
   // conversion downstream is of a timestamp near NOW, so extrapolating from the
   // newest point keeps the skew term's lever arm short, and the anchor is a real
   // measured instant rather than a projection.
-  const Pair &newest = sWindow[(sNext + kSyncWindow - 1) % kSyncWindow];
-  const double x_new = static_cast<double>(newest.local_us - x0);
-  const double predicted_y = intercept + slope * x_new;
+  const size_t newest_i = (sNext + kSyncWindow - 1) % kSyncWindow;
+  const Pair &newest = sWindow[newest_i];
+  const double predicted_y = intercept + slope * dx(newest_i);
   const int64_t predicted_primary =
       static_cast<int64_t>(y0) + static_cast<int64_t>(predicted_y + 0.5);
 
@@ -183,11 +255,24 @@ void refit() {
   sStatus.ref_offset_us =
       predicted_primary - static_cast<int64_t>(newest.local_us);
   sStatus.skew_ppb = static_cast<int32_t>(skew_ppb_d);
-  sStatus.residual_rms_ns = static_cast<uint32_t>(rms * 1000.0);
-  sStatus.peak_residual_ns = static_cast<uint32_t>(peak * 1000.0);
+  sStatus.residual_rms_ns = residualToNs(rms);
+  sStatus.peak_residual_ns = residualToNs(peak);
   sStatus.samples_used = sCount;
-  sStatus.quality =
-      sCount >= kMinFitSamples ? SyncQuality::kLocked : SyncQuality::kCoarse;
+  // ⚠️ QUALITY IS NOW ABOUT THE FIT, NOT JUST ABOUT HOW MANY SAMPLES WENT INTO
+  // IT. It used to be `sCount >= kMinFitSamples ? kLocked : kCoarse`, which is a
+  // sample count wearing the word "quality": a window latched onto a bad sample
+  // reported "good" for its whole life, and every instrument downstream --
+  // including the primary's worst-of-all-nodes figure -- repeated it. A fit can
+  // now say that it is a poor one, which is the whole point of measuring the
+  // residual.
+  //
+  // kCoarse rather than kUnsynced on purpose: the fit is still the best estimate
+  // we have and timestamps still convert through it. Refusing to convert would
+  // turn a quality signal into dropped data (publish_no_shift), which is the
+  // trade the 32-second reset bug already taught us not to make.
+  sStatus.quality = sCount < kMinFitSamples || rms > kLockResidualUs
+                        ? SyncQuality::kCoarse
+                        : SyncQuality::kLocked;
 
   // Spread, not value: the MAC-versus-timer difference is a large arbitrary
   // constant set by two clock origins, and only how much it MOVES is a
@@ -212,7 +297,12 @@ void refit() {
 // against a fit built from three samples would just entrench whichever three
 // arrived first.
 bool isOutlier(uint64_t local_us, uint64_t primary_us) {
-  if (sStatus.quality != SyncQuality::kLocked) {
+  // ⚠️ GATE ON HAVING A FIT, NOT ON THE FIT BEING GOOD. This used to require
+  // kLocked, which was harmless while kLocked meant "enough samples" -- but now
+  // that a poor residual demotes the fit to kCoarse, that test would switch the
+  // guard off at exactly the moment its work matters: when the residual is
+  // climbing and the window needs to shed something.
+  if (sStatus.quality == SyncQuality::kUnsynced || sCount < kMinFitSamples) {
     return false;
   }
   uint64_t predicted = 0;
@@ -223,12 +313,29 @@ bool isOutlier(uint64_t local_us, uint64_t primary_us) {
       static_cast<int64_t>(primary_us) - static_cast<int64_t>(predicted);
   const int64_t magnitude = residual_us < 0 ? -residual_us : residual_us;
 
-  // Three sigma, with a floor: early on the residual RMS can be small enough that
-  // three times it rejects ordinary samples and the window freezes with whatever
-  // it happened to contain.
+  // Three sigma, clamped at BOTH ends.
+  //
+  // The floor is the original reason: early on the residual RMS can be small
+  // enough that three times it rejects ordinary samples and the window freezes
+  // with whatever it happened to contain.
+  //
+  // ⚠️ THE CEILING IS #392. Deriving a limit from residual_rms_ns means deriving
+  // it from a field with a maximum, and a saturated field produced a ~12.9 s
+  // limit -- a gate that rejects nothing is a gate that is not there. refit()
+  // now throws away any window past kMaxPlausibleResidualUs, so the clamp should
+  // never bind; it is here because "should never" is what the previous version
+  // of this line assumed too.
+  constexpr int64_t kMinOutlierLimitUs = 500;
+  constexpr int64_t kMaxOutlierLimitUs =
+      3 * static_cast<int64_t>(kMaxPlausibleResidualUs);
   const int64_t sigma_us =
       static_cast<int64_t>(sStatus.residual_rms_ns / 1000) + 1;
-  const int64_t limit = sigma_us * 3 < 500 ? 500 : sigma_us * 3;
+  int64_t limit = sigma_us * 3;
+  if (limit < kMinOutlierLimitUs) {
+    limit = kMinOutlierLimitUs;
+  } else if (limit > kMaxOutlierLimitUs) {
+    limit = kMaxOutlierLimitUs;
+  }
   return magnitude > limit;
 }
 
@@ -402,6 +509,12 @@ void timeSyncFillWire(SyncState &out) {
   out.outliers_rejected = sStatus.outliers_rejected;
   out.epoch_changes = sStatus.epoch_changes;
   out.mac_spread_us = sStatus.mac_spread_us;
+  // Saturating, because it lives in a single spare byte (see espnow_link.hpp).
+  // 255 means "at least 255"; the distinction that matters is 0 versus not-0.
+  out.implausible_residuals =
+      sStatus.implausible_residuals > 255
+          ? 255
+          : static_cast<uint8_t>(sStatus.implausible_residuals);
 }
 
 bool syncStateToPrimary(const SyncState &state, uint64_t local_us,
