@@ -172,8 +172,31 @@ struct Heartbeat {
   // bits in TEC-NATKIT-38: unused is not the same as false.)
   int8_t rssi_of_primary;         // how loudly THIS LEAF hears the hub, dBm
   uint8_t tx_power_quarter_dbm;   // the power actually applied, not the one configured
-  uint8_t reserved_hb[1];
+  // ⚠️ THE NOISE FLOOR, AND IT IS THE MEASUREMENT THIS RIG HAS NEVER HAD
+  // (TEC-NATKIT-51). Every instrument here reports the strength of a WANTED signal,
+  // and all of them read healthy through the 2026-08-18 event in which leaves lost
+  // 65% of the hub's beacons with RSSI flat to within 2 dB. Signal strength cannot
+  // see the floor it is competing with.
+  //
+  // This is the PHY's own estimate (`rx_ctrl->noise_floor`), sampled on packets we
+  // were receiving anyway -- no promiscuous mode, no scan, no airtime. ⚠️ And it is
+  // ENERGY rather than decoded frames, which is the hard requirement: the channel
+  // the fault happened on is the QUIETEST channel at this site by AP count, so a
+  // frame-counting instrument would have called it pristine throughout.
+  //
+  // Reported as the WORST (least negative) floor seen since the previous heartbeat,
+  // not a snapshot: a floor that spikes for 200 ms every second is exactly the shape
+  // that would ruin reception while a 1 Hz sample kept reading clean.
+  int8_t noise_floor_dbm;
 };
+
+// The heartbeat crosses the radio, and the primary accepts one by
+// `payload_size >= sizeof(Heartbeat)` then memcpys the whole struct -- so a size
+// change silently stops a leaf on older firmware from reporting anything at all.
+// Every field added here since 2026-08-17 has used the bytes it already reserved.
+static_assert(sizeof(Heartbeat) == 56,
+              "Heartbeat is an on-air struct; use its reserved bytes rather than "
+              "growing it, or both ends must be reflashed together");
 
 // --- Timing broadcast (#340 / TEC-NATKIT-17) --------------------------------
 //
@@ -383,6 +406,12 @@ struct LinkStats {
   // Transmit-power sweep (see espNowLinkSweepPower). 0 until it has run.
   uint8_t tx_power_chosen_quarter_dbm = 0;
   bool tx_power_swept = false;
+  // Noise floor as the PHY reports it, in dBm. `worst` is the least negative seen
+  // since it was last consumed by a heartbeat, and is cleared there -- see
+  // Heartbeat::noise_floor_dbm for why a peak beats a snapshot.
+  bool noise_seen = false;
+  int8_t noise_floor_last = 0;
+  int8_t noise_floor_worst = 0;
   // RSSI of the PRIMARY's packets as heard here. The counterpart of NodeState's
   // rssi: together they say whether the path is symmetric. A bad antenna
   // attenuates both directions equally; a receiver problem shows up on one side
@@ -428,6 +457,10 @@ uint32_t espNowPrimaryCommandAnswersPublished();
 uint32_t espNowPrimaryCommandAnswersDuplicate();
 
 const LinkStats &espNowLinkStats();
+// Clears the worst-since-last-heartbeat noise floor. Called by the heartbeat that
+// just reported it, so the next one describes the next interval rather than the
+// whole uptime -- a running maximum would latch on the first bad second forever.
+void espNowLinkResetNoiseWorst();
 
 // True once a primary has been discovered and added as a unicast peer. Until then
 // announces go out as broadcast; the data path is unicast only.
@@ -574,6 +607,9 @@ esp_err_t espNowPrimaryStart();
 // by value because the caller is a logging loop, not a consumer of history.
 const NodeState *espNowPrimaryNodes();
 uint32_t espNowPrimaryUnknownPackets();
+// The hub's own noise floor in dBm, worst seen. 0 means never sampled -- a real
+// floor is tens of dB negative, so 0 is unambiguous as "unknown".
+int8_t espNowPrimaryNoiseFloor();
 
 // --- Node-to-node coherence (#315) ------------------------------------------
 //

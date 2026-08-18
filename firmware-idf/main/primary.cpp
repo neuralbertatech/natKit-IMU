@@ -3,6 +3,10 @@
 #include <cstring>
 
 #include "device_id.hpp"
+#include "soc/soc_caps.h"
+#if SOC_TEMP_SENSOR_SUPPORTED
+#include "driver/temperature_sensor.h"
+#endif
 #include "driver/gpio.h"
 #include "esp_system.h"
 #include "ethernet_net.hpp"
@@ -49,6 +53,76 @@ namespace natkit {
 namespace {
 
 constexpr char kTag[] = "natkit-primary";
+
+// --- the hub's die temperature (TEC-NATKIT-50) -------------------------------
+//
+// ⚠️ HERE BECAUSE THE LEADING EXPLANATION IS THE PRIMARY'S TRANSMIT PATH. The
+// 2026-08-18 impairment was entirely hub->leaf: four leaves lost up to 65% of the
+// hub's beacons and the same fraction of its MAC acknowledgements, while leaf->hub
+// lost 0 of 25,199 frames. Every leaf is downstream of ONE transmitter, which is
+// why "shared and simultaneous" needs no coincidence -- and a transmit path that
+// degrades for tens of minutes at a time is thermal until proven otherwise.
+//
+// Not available on every target (the classic ESP32 has no such sensor), so this is
+// compiled out rather than faked, and reports -128 where it does not exist. A
+// plausible-looking 25 C from a chip with no sensor would be worse than nothing.
+#if SOC_TEMP_SENSOR_SUPPORTED
+temperature_sensor_handle_t sTempSensor = nullptr;
+// ⚠️ WHY IT IS NOT WORKING, PUBLISHED. The first version of this reported only
+// -128 ("unavailable"), which on a board whose USB console RESETS it is
+// indistinguishable from "this target has no sensor" and from "nobody wired it up".
+// A silent unavailable is the exact failure mode this rig keeps re-learning, so the
+// esp_err_t travels out in a byte the status struct already reserved.
+uint8_t sTempErr = 0;
+
+void primaryTempSensorStart() {
+  // ⚠️ -10..80, NOT an arbitrary span. The sensor has a set of PREDEFINED range
+  // buckets (50..125, 20..100, -10..80, -30..50, -40..20) and a request that
+  // straddles two of them is rejected with ESP_ERR_INVALID_ARG. The first attempt
+  // here asked for -10..110, which spans three, and reported "unavailable" -- found
+  // only because the error code is published (chip_temp_err read 2 = 0x102).
+  // -10..80 covers every die temperature this board can survive.
+  temperature_sensor_config_t cfg = TEMPERATURE_SENSOR_CONFIG_DEFAULT(-10, 80);
+  esp_err_t err = temperature_sensor_install(&cfg, &sTempSensor);
+  if (err == ESP_OK) {
+    err = temperature_sensor_enable(sTempSensor);
+  }
+  if (err != ESP_OK) {
+    ESP_LOGW(kTag, "die temperature sensor did not start (%s); will retry",
+             esp_err_to_name(err));
+    sTempSensor = nullptr;
+  }
+  sTempErr = static_cast<uint8_t>(err & 0xff);
+}
+
+int8_t primaryChipTempC() {
+  // Retried rather than given up on: this is started before the radio, and the PHY
+  // claims the same sensor on some targets, so an ordering conflict at boot should
+  // not cost the measurement for the whole uptime.
+  if (sTempSensor == nullptr) {
+    primaryTempSensorStart();
+    if (sTempSensor == nullptr) {
+      return -128;
+    }
+  }
+  float celsius = 0.0f;
+  const esp_err_t err = temperature_sensor_get_celsius(sTempSensor, &celsius);
+  if (err != ESP_OK) {
+    sTempErr = static_cast<uint8_t>(err & 0xff);
+    return -128;
+  }
+  sTempErr = 0;
+  if (celsius < -127.0f || celsius > 126.0f) {
+    return -128;
+  }
+  return static_cast<int8_t>(celsius);
+}
+uint8_t primaryTempErr() { return sTempErr; }
+#else
+void primaryTempSensorStart() {}
+int8_t primaryChipTempC() { return -128; }
+uint8_t primaryTempErr() { return 0xff; }  // 0xff = no sensor on this target
+#endif
 
 // #373: this image runs ESP-NOW and an associated WiFi station on one radio, and
 // publishes to the broker itself. An unset bool Kconfig emits no symbol, so it is
@@ -121,6 +195,7 @@ void fillNodeStatus(const NodeState &node, UplinkNodeStatus &out) {
     out.leaf_scan_channel = node.last_heartbeat.scan_channel;
     out.leaf_rssi_of_primary = node.last_heartbeat.rssi_of_primary;
     out.leaf_tx_power_quarter_dbm = node.last_heartbeat.tx_power_quarter_dbm;
+    out.leaf_noise_floor_dbm = node.last_heartbeat.noise_floor_dbm;
   }
   out.publish_no_sync = node.publish_no_sync;
   out.publish_no_shift = node.publish_no_shift;
@@ -150,6 +225,9 @@ void fillPrimaryStatus(UplinkPrimaryStatus &out) {
   out.nodes_known = registryCount();
   out.nodes_rejected = registryRejections();
   out.unknown_packets = espNowPrimaryUnknownPackets();
+  out.noise_floor_dbm = espNowPrimaryNoiseFloor();
+  out.chip_temp_c = primaryChipTempC();
+  out.chip_temp_err = primaryTempErr();
 
   const UplinkStats &up = uplinkStats();
   out.frames_queued = up.frames_queued;
@@ -176,6 +254,7 @@ void runPrimary() {
   // Registry BEFORE the radio, so the first packet to arrive is already judged
   // against the roster rather than admitted because we had not finished loading.
   registryLoad();
+  primaryTempSensorStart();
 
 #if CONFIG_NATKIT_HOLD_RCP_IN_RESET
   // Hold the ESP32-H2 radio co-processor in reset.
