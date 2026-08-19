@@ -173,6 +173,19 @@ void leafRecvCallback(const esp_now_recv_info_t *info, const uint8_t *data,
     sStats.rssi_last = rssi;
     if (rssi > sStats.rssi_best) sStats.rssi_best = rssi;
     if (rssi < sStats.rssi_worst) sStats.rssi_worst = rssi;
+
+    // The floor this packet was pulled out of. Free here: we are already holding
+    // the receive control block for the RSSI, and this is the number that says
+    // whether a healthy RSSI is actually a healthy link (TEC-NATKIT-51).
+    const int8_t floor_dbm = static_cast<int8_t>(info->rx_ctrl->noise_floor);
+    if (!sStats.noise_seen) {
+      sStats.noise_seen = true;
+      sStats.noise_floor_worst = floor_dbm;
+    }
+    sStats.noise_floor_last = floor_dbm;
+    if (floor_dbm > sStats.noise_floor_worst) {
+      sStats.noise_floor_worst = floor_dbm;
+    }
   }
 
   const uint8_t *payload = data + kEnvelopeSize;
@@ -804,6 +817,10 @@ bool espNowLinkSend(PacketType type, const void *payload, size_t payload_size) {
 
 const LinkStats &espNowLinkStats() { return sStats; }
 
+void espNowLinkResetNoiseWorst() {
+  sStats.noise_floor_worst = sStats.noise_floor_last;
+}
+
 bool espNowLinkHasPrimary() { return sPrimaryKnown; }
 
 // --- Primary side ----------------------------------------------------------
@@ -812,6 +829,11 @@ namespace {
 
 NodeState sNodes[kMaxTrackedNodes];
 uint32_t sUnknownPackets = 0;
+// The hub's own noise floor, from the PHY, sampled on packets it was receiving
+// anyway. Rig-level rather than per node: it describes where the primary sits.
+bool sPrimaryNoiseSeen = false;
+int8_t sPrimaryNoiseLast = 0;
+int8_t sPrimaryNoiseWorst = 0;
 
 NodeState *nodeFor(const uint8_t *mac) {
   for (NodeState &node : sNodes) {
@@ -1131,6 +1153,19 @@ void primaryRecvCallback(const esp_now_recv_info_t *info, const uint8_t *data,
     }
     if (rssi < node->rssi_worst) {
       node->rssi_worst = rssi;
+    }
+    // The HUB's own noise floor. Kept at rig level rather than per node because it
+    // is a property of where the primary sits, not of who transmitted -- and it is
+    // the control for the leaf-side figure: if the leaves' floor rises and the
+    // hub's does not, the noise is at the leaves, and vice versa.
+    const int8_t floor_dbm = static_cast<int8_t>(info->rx_ctrl->noise_floor);
+    if (!sPrimaryNoiseSeen) {
+      sPrimaryNoiseSeen = true;
+      sPrimaryNoiseWorst = floor_dbm;
+    }
+    sPrimaryNoiseLast = floor_dbm;
+    if (floor_dbm > sPrimaryNoiseWorst) {
+      sPrimaryNoiseWorst = floor_dbm;
     }
   }
 
@@ -1619,6 +1654,9 @@ esp_err_t espNowPrimaryStart() {
 const NodeState *espNowPrimaryNodes() { return sNodes; }
 
 uint32_t espNowPrimaryUnknownPackets() { return sUnknownPackets; }
+int8_t espNowPrimaryNoiseFloor() {
+  return sPrimaryNoiseSeen ? sPrimaryNoiseWorst : 0;
+}
 
 const CoherenceStats &espNowPrimaryCoherence() { return sCoherence; }
 

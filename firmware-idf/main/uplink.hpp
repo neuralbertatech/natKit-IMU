@@ -74,7 +74,13 @@ enum class UplinkType : uint8_t {
 struct UplinkNodeStatus {
   uint64_t device_id;
   uint8_t mac[6];
-  uint16_t reserved0;
+  // ⚠️ THE NOISE FLOOR AT THIS LEAF, in dBm, worst since its previous heartbeat.
+  // The measurement this rig has never had (TEC-NATKIT-51): every other figure here
+  // describes a WANTED signal, and all of them read healthy through an event that
+  // cost 65% of the hub's beacons with RSSI flat to within 2 dB. 0 = never sampled;
+  // a real floor is tens of dB negative, so 0 is unambiguous.
+  int8_t leaf_noise_floor_dbm;
+  uint8_t reserved0;
   uint32_t data_frames;
   uint32_t seq_gaps;
   uint32_t seq_duplicates;
@@ -131,6 +137,16 @@ struct UplinkNodeStatus {
   uint32_t publish_no_shift;  // fit present but rewriteFrameTimestamps refused
 };
 
+// ⚠️ THESE SIZES ARE THE WIRE FORMAT. Every field added since 2026-08-17 has gone
+// into bytes the struct already reserved, precisely so decoders do not move -- and
+// the only thing enforcing that was care. A struct that grows here decodes as
+// plausible nonsense on the far side: a spurious 4 bytes in the primary layout once
+// came to the right total by coincidence and shifted every field after it, and the
+// size check passed. Assert it instead.
+static_assert(sizeof(UplinkNodeStatus) == 168,
+              "UplinkNodeStatus is published binary; use its reserved bytes rather "
+              "than growing it, or bump the topic's V1 and update every decoder");
+
 struct UplinkPrimaryStatus {
   uint64_t device_id;
   uint64_t uptime_us;
@@ -155,7 +171,23 @@ struct UplinkPrimaryStatus {
   uint8_t coherence_quality;
   uint8_t coherence_measured;
   uint8_t registry_sealed;
-  uint8_t reserved[5];
+  // ⚠️ THE HUB'S OWN NOISE FLOOR, and it is the CONTROL for the per-leaf figure.
+  // If the leaves' floor rises and this one does not, the noise is at the leaves;
+  // if both rise, it is the room. Neither reading means much alone.
+  int8_t noise_floor_dbm;
+  // ⚠️ THE HUB'S DIE TEMPERATURE, in whole degrees C. Here because the leading
+  // explanation for TEC-NATKIT-50 is the PRIMARY'S TRANSMIT PATH degrading for tens
+  // of minutes at a time -- the impairment is entirely hub->leaf, with leaf->hub
+  // losing 0 of 25,199 frames -- and thermal is the first cause to rule in or out.
+  // Whole degrees is deliberate: the question is 40 vs 70, not 40.0 vs 40.1, and a
+  // byte keeps this struct at 144 so no decoder moves.
+  // -128 = unavailable (no sensor on this target, or it failed to start).
+  int8_t chip_temp_c;
+  // The esp_err_t (low byte) behind a chip_temp_c of -128, so "unavailable" is
+  // diagnosable from the broker rather than from a console that resets the board.
+  // 0 = fine, 0xff = this target has no sensor.
+  uint8_t chip_temp_err;
+  uint8_t reserved[2];
   // Command relay (TEC-NATKIT-39). ⚠️ These are here rather than on the console
   // because THE PRIMARY'S CONSOLE CANNOT BE READ: the ESP32-S3 resets when its
   // native USB console is opened AND re-enumerates, so the reading process loses
@@ -186,6 +218,10 @@ struct UplinkPrimaryStatus {
   // diagnosis available.
   uint32_t reset_reason;
 };
+
+static_assert(sizeof(UplinkPrimaryStatus) == 144,
+              "UplinkPrimaryStatus is published binary; use its reserved bytes "
+              "rather than growing it, or bump the topic's V1");
 
 struct UplinkStats {
   uint32_t frames_queued = 0;

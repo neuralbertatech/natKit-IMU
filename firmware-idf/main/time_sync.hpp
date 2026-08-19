@@ -72,6 +72,32 @@ constexpr size_t kSyncWindow = 32;
 // plausible.
 constexpr int32_t kMaxPlausibleSkewPpb = 200'000;  // 200 ppm
 
+// The same guard, for the OTHER half of the fit (#392 / TEC-NATKIT-47). A slope
+// can be plausible while the samples it was drawn through are nowhere near the
+// line, and until this existed nothing checked that: a window that latched onto
+// a bad sample reported an ordinary skew, a saturated residual, and quality
+// "good" for as long as it lived.
+//
+// Both numbers are set from measurements on this bench rather than from taste.
+// An ordinary fit here sits at ~3 us rms; the worst legitimate excursion the
+// primary's independent coherence probe has ever recorded is 652 us. So:
+//
+//   kLockResidualUs      1 ms   -- above every real figure by ~40x, below
+//                                 anything a working fit produces. Past this we
+//                                 still convert timestamps, but we stop calling
+//                                 the fit locked, because it is not.
+//   kMaxPlausibleResidualUs  50 ms -- fifty times the lock ceiling. A window
+//                                 whose samples sit this far off its own line is
+//                                 not a clock measurement at all, so it is thrown
+//                                 away the way an implausible skew already is.
+constexpr double kLockResidualUs = 1'000.0;
+constexpr double kMaxPlausibleResidualUs = 50'000.0;
+
+// What a residual too large to state is stored as. It is the field's maximum on
+// purpose: a reader that does not know about this constant still sees an
+// obviously extreme number rather than a plausible small one.
+constexpr uint32_t kResidualSaturatedNs = 0xFFFFFFFFu;
+
 enum class SyncQuality : uint8_t {
   kUnsynced = 0,  // nothing usable: no beacons, or the fit was rejected
   kCoarse = 1,    // offset known, slope not yet fitted (fewer than kMinFitSamples)
@@ -103,6 +129,13 @@ struct TimeSyncStatus {
   // Fit quality. RMS in nanoseconds because a good fit here is expected to land
   // well under a microsecond of residual and an integer count of microseconds
   // would report "0" for everything worth distinguishing.
+  //
+  // ⚠️ THE UNIT COSTS A CEILING: uint32 nanoseconds stops at 4.295 SECONDS, and
+  // casting a double past UINT32_MAX is undefined -- on Xtensa it landed on
+  // exactly 0xFFFFFFFF, which is a number rather than an error and was read back
+  // downstream as if it were one (#392). Anything at or over the ceiling is now
+  // stored as kResidualSaturatedNs DELIBERATELY, and every reader must treat that
+  // value as "too large to state" rather than as 4.29 s.
   uint32_t residual_rms_ns = 0;
   uint32_t peak_residual_ns = 0;
   size_t samples_used = 0;
@@ -119,6 +152,11 @@ struct TimeSyncStatus {
   uint32_t beacons_missed = 0;   // from gaps in the beacon sequence
   uint32_t epoch_changes = 0;
   uint32_t implausible_fits = 0;
+  // Windows discarded for a residual no clock fit could produce. Separate from
+  // implausible_fits because they fail differently: that one is a slope through
+  // samples that cannot be a crystal pair, this one is a slope the samples are
+  // not near. A rig where this climbs is a rig whose beacon pairing is wrong.
+  uint32_t implausible_residuals = 0;
 
   // The MAC-stamp diagnostic described in the header comment. The difference
   // itself is a large arbitrary constant (two clock origins), so only its SPREAD

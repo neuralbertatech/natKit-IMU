@@ -82,13 +82,24 @@ defaults="sdkconfig.defaults;sdkconfig.defaults.${target};roles/${role}.defaults
 # -- so the `rm sdkconfig` this script tells you to do silently reverted them, and
 # two leaves ended up running different transmit powers for an hour before anyone
 # looked. See profiles/bench.defaults.
+#
+# A COMMA-SEPARATED LIST, applied left to right so the last one wins. One profile
+# was not enough the moment a setting had to apply to the primary as well as the
+# leaves: profiles/bench.defaults is explicitly LEAVES ONLY (it pins transmit
+# power, which is actively harmful on the hub), while a channel has to be the same
+# at both ends or there is no link at all. Splitting them means
+# `NATKIT_PROFILE=bench,ch10` for a leaf and `NATKIT_PROFILE=ch10` for the primary,
+# rather than a second copy of the power settings that can drift from the first.
 if [[ -n "${NATKIT_PROFILE:-}" ]]; then
-  profile="profiles/${NATKIT_PROFILE}.defaults"
-  if [[ ! -f "${profile}" ]]; then
-    echo "$0: no such profile '${NATKIT_PROFILE}' (expected ${profile})" >&2
-    exit 2
-  fi
-  defaults="${defaults};${profile}"
+  IFS=',' read -r -a profile_names <<< "${NATKIT_PROFILE}"
+  for name in "${profile_names[@]}"; do
+    profile="profiles/${name}.defaults"
+    if [[ ! -f "${profile}" ]]; then
+      echo "$0: no such profile '${name}' (expected ${profile})" >&2
+      exit 2
+    fi
+    defaults="${defaults};${profile}"
+  done
 fi
 
 # ESP-IDF reads sdkconfig.defaults* ONLY when the generated sdkconfig does not

@@ -294,6 +294,10 @@ void runLeaf() {
           link.tx_power_quarter_dbm > 0
               ? static_cast<uint8_t>(link.tx_power_quarter_dbm)
               : 0;
+      // Worst floor since the last heartbeat, then cleared, so a spike between
+      // heartbeats is reported rather than averaged away. 0 = never sampled.
+      beat.noise_floor_dbm = link.noise_seen ? link.noise_floor_worst : 0;
+      espNowLinkResetNoiseWorst();
       espNowLinkSend(PacketType::kHeartbeat, &beat, sizeof(beat));
     }
 

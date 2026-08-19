@@ -1,0 +1,23 @@
+# Move the ESP-NOW link off channel 3.
+#
+# TEC-NATKIT-50's evidence says the fault on this bench is a SHARED, EXTERNAL,
+# TIME-VARYING receive impairment near channel 3: four leaves' beacon loss
+# correlated at r = +0.67..+0.97, it switched off for all four in the same
+# instant, and the wanted signal did not move by more than 2 dB while loss went
+# from 65% to 0.1%. Signal flat with loss changing is the noise floor moving.
+#
+# ⚠️ APPLIES TO BOTH ENDS. A channel is not a per-node setting -- the primary and
+# every leaf must be built with the same one or there is no link. That is why this
+# is its own profile rather than a line in bench.defaults, which is leaves-only:
+#
+#     NATKIT_PROFILE=bench,ch10 ./build-role.sh leaf esp32       # leaves
+#     NATKIT_PROFILE=ch10       ./build-role.sh primary esp32s3  # hub
+#
+# ⚠️ Channel 1 is NOT an alternative: a 25 MHz crystal's 96th and 97th harmonics
+# land in it, which is a fault this rig has already had. 10 was measured at
+# -22/-23 dBm and carried full rate historically.
+#
+# ⚠️ AND THIS IS AN EXPERIMENT, NOT A NEW DEFAULT. sdkconfig.defaults still says
+# 3. If the soak on 10 is decisively better, move the default there and delete
+# this file rather than leaving two answers in the tree.
+CONFIG_NATKIT_ESPNOW_CHANNEL=10

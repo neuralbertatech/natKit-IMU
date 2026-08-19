@@ -25,6 +25,11 @@ idf_component_register(
         esp_app_format
         esp_driver_gpio
         esp_driver_spi
+        # The die-temperature sensor, for the primary's transmit-path investigation
+        # (TEC-NATKIT-50). Guarded by SOC_TEMP_SENSOR_SUPPORTED in primary.cpp, but
+        # the REQUIRES has to be unconditional: the component list is evaluated
+        # before any target-specific header is visible.
+        esp_driver_tsens
         esp_driver_uart
         esp_event
         esp_netif
