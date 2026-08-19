@@ -49,3 +49,19 @@ CONFIG_ETH_SPI_ETHERNET_W5500=y
 # build-role.sh warns when a defaults file is newer than the generated config.
 CONFIG_PARTITION_TABLE_CUSTOM=y
 CONFIG_PARTITION_TABLE_CUSTOM_FILENAME="partitions.csv"
+
+# --- SNTP poll interval (TEC-NATKIT-48) --------------------------------------
+#
+# ⚠️ 60 s, against an IDF default of ONE HOUR, and the default is what the ticket
+# is about. Between polls the hub's clock free-runs on its crystal, and MEASURED on
+# this board it drifts about -57 ms/hour (~16 ppm). Every sample in every recording
+# is stamped from that clock by rewriteFrameTimestamps, so the whole rig inherits
+# the drift and then jumps when the next poll corrects it -- which is exactly the
+# ~38 ms wander observed across three runs on 2026-08-17.
+#
+# At 60 s the free-run error is ~1 ms instead of ~57, for one small UDP exchange a
+# minute against an NTP server on the same LAN. 15 s is the RFC 4330 floor if this
+# ever needs to be tighter; it should not, because node-to-node coherence does not
+# come from here -- it comes from the ESP-NOW timing master, and that is already
+# 60-100 us.
+CONFIG_LWIP_SNTP_UPDATE_DELAY=60000

@@ -162,6 +162,22 @@ esp_err_t gatewayServicesStart() {
   sntp.sync_cb = sntpSyncCallback;
   sntp.start = true;
   sntp.server_from_dhcp = false;
+  // ⚠️⚠️ LEFT ON THE DEFAULT (IMMED), AND SNTP_SYNC_MODE_SMOOTH WAS TRIED AND IS
+  // WORSE. The argument for smooth was real -- this clock stamps every sample, so a
+  // backwards STEP writes non-monotonic timestamps into a recording. But measured
+  // on this board, smooth mode is a much bigger problem than the one it solves:
+  //
+  //   after a reflash the hub came up 41 SECONDS out and adjtime slewed it back at
+  //   ~4.4 s per 300 s -- all four leaves reporting an identical +20.8 s offset
+  //   forty minutes later, with healthy fits. Every sample recorded in that window
+  //   is stamped tens of seconds wrong. IMMED would have stepped it at the first
+  //   poll. The 35-minute threshold at which smooth mode gives up and steps is far
+  //   too loose to protect against this.
+  //
+  // What actually removes the non-monotonicity risk is the 60 s poll below, not the
+  // sync mode: the error between polls is ~2 ms rather than the ~119 ms an hourly
+  // poll accumulates, so any step is ~2 ms. Small steps at a known cadence beat a
+  // slew that cannot catch up.
   ESP_ERROR_CHECK(esp_netif_sntp_init(&sntp));
 
   esp_mqtt_client_config_t mqtt{};
