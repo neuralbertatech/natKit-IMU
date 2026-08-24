@@ -9,6 +9,7 @@
 #include "bno08x.hpp"
 #include "cJSON.h"
 #include "device_id.hpp"
+#include "espnow_link.hpp"
 #include "esp_app_desc.h"
 #include "esp_log.h"
 #include "esp_system.h"
@@ -136,6 +137,69 @@ bool runGetLed(const CommandFrame &request) {
   }
   reply(request, true, true, "r=%u g=%u b=%u brightness=%u", colour.r, colour.g,
         colour.b, colour.brightness);
+  return true;
+}
+
+bool runGetTxPower(const CommandFrame &request) {
+  const int8_t quarter = espNowLinkTxPowerQuarterDbm();
+  reply(request, true, true, "%.2f dBm (%d quarter-dBm), %s", quarter / 4.0,
+        static_cast<int>(quarter),
+        espNowLinkTxPowerPinned() ? "pinned by operator" : "chosen by the sweep");
+  return true;
+}
+
+bool runSetTxPower(const CommandFrame &request) {
+  cJSON *args = cJSON_Parse(request.args);
+  if (args == nullptr) {
+    reply(request, false, true,
+          "set_tx_power needs args like {\"dbm\":11} or {\"auto\":true}");
+    return false;
+  }
+
+  // Handing it back to the sweep is a first-class request, not an absent
+  // argument: "stop overriding this" has to be expressible or a pin is permanent
+  // until the next reboot.
+  const cJSON *automatic = cJSON_GetObjectItemCaseSensitive(args, "auto");
+  if (cJSON_IsBool(automatic) && cJSON_IsTrue(automatic)) {
+    cJSON_Delete(args);
+    espNowLinkReleaseTxPower();
+    reply(request, true, true, "released; the sweep will measure again");
+    return true;
+  }
+
+  // dBm for a person, quarter-dBm for the radio. Both accepted, because the
+  // status frame reports quarter-dBm and somebody reading it should be able to
+  // send the number back without converting it.
+  int8_t quarter = 0;
+  const cJSON *dbm = cJSON_GetObjectItemCaseSensitive(args, "dbm");
+  const cJSON *raw = cJSON_GetObjectItemCaseSensitive(args, "quarter_dbm");
+  if (cJSON_IsNumber(dbm)) {
+    quarter = static_cast<int8_t>(dbm->valuedouble * 4);
+  } else if (cJSON_IsNumber(raw)) {
+    quarter = static_cast<int8_t>(raw->valuedouble);
+  } else {
+    cJSON_Delete(args);
+    reply(request, false, true,
+          "set_tx_power needs {\"dbm\":11}, {\"quarter_dbm\":44} or {\"auto\":true}");
+    return false;
+  }
+  cJSON_Delete(args);
+
+  const esp_err_t err = espNowLinkPinTxPower(quarter);
+  if (err == ESP_ERR_INVALID_ARG) {
+    reply(request, false, true,
+          "%.2f dBm is outside the 2..21 dBm this radio accepts", quarter / 4.0);
+    return false;
+  }
+  if (err != ESP_OK) {
+    reply(request, false, true, "could not set transmit power (%s)",
+          esp_err_to_name(err));
+    return false;
+  }
+  // ⚠️ Answered with what the radio REPORTS, not what was asked for. The two can
+  // differ, and a command that echoes its own argument cannot tell you that.
+  reply(request, true, true, "pinned at %.2f dBm; the sweep will not override it",
+        espNowLinkTxPowerQuarterDbm() / 4.0);
   return true;
 }
 
@@ -318,6 +382,10 @@ void commandsService() {
     runGetLed(request);
   } else if (std::strcmp(request.command, "set_led") == 0) {
     runSetLed(request);
+  } else if (std::strcmp(request.command, "get_tx_power") == 0) {
+    runGetTxPower(request);
+  } else if (std::strcmp(request.command, "set_tx_power") == 0) {
+    runSetTxPower(request);
   } else if (std::strcmp(request.command, "set_reports") == 0) {
     runSetReports(request);
   } else {

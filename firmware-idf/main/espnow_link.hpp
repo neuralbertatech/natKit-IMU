@@ -452,6 +452,15 @@ void espNowPrimaryPublishAnswer(const CommandLogFrame &log);
 
 // Answers relayed back up, counted separately from anything else. See
 // UplinkPrimaryStatus for why these are two counters and not one.
+// The transmit power in force, in QUARTER dBm (ESP-IDF's unit: 78 = 19.5 dBm).
+int8_t espNowLinkTxPowerQuarterDbm();
+// Whether an operator has pinned it, which suppresses the automatic sweep.
+bool espNowLinkTxPowerPinned();
+// Pin a level. Refuses anything outside ESP-IDF's 8..84 rather than clamping.
+esp_err_t espNowLinkPinTxPower(int8_t quarter_dbm);
+// Hand the choice back to the sweep.
+void espNowLinkReleaseTxPower();
+
 uint32_t espNowPrimaryCommandAnswersReceived();
 uint32_t espNowPrimaryCommandAnswersPublished();
 uint32_t espNowPrimaryCommandAnswersDuplicate();
