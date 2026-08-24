@@ -467,6 +467,29 @@ constexpr uint8_t kMaxChannel = 13;
 // so like the channel survey it costs nothing that was not already being lost --
 // and it uses the DATA FRAMES ALREADY BEING SENT as its probes rather than adding
 // traffic.
+// Whether the link has stopped getting through since the last check.
+//
+// ⚠️ A RATE OVER THIS INTERVAL, not a total. send_failures is cumulative since
+// boot and is routinely in the thousands after a bad spell, so any absolute test
+// on it fires forever once it has fired once -- the same trap the host-side
+// counters kept falling into.
+bool sendsAreFailing() {
+  static uint32_t last_sent = 0;
+  static uint32_t last_failed = 0;
+  const uint32_t sent = sStats.packets_sent - last_sent;
+  const uint32_t failed = sStats.send_failures - last_failed;
+  last_sent = sStats.packets_sent;
+  last_failed = sStats.send_failures;
+
+  // Nothing attempted tells us nothing. Don't re-sweep on an idle interval.
+  if (sent + failed < 20) {
+    return false;
+  }
+  // Two thirds failing is well past "a few retries" and well short of demanding
+  // perfection, which on this rig is not available at any power.
+  return failed * 3 > (sent + failed) * 2;
+}
+
 void sweepTxPower() {
   // Ascending, coarsely: 2, 5, 8.5, 11, 14, 17, 19.5 dBm. Fine steps would cost
   // time without changing the answer -- the transition from saturated to sane is
@@ -508,6 +531,28 @@ void sweepTxPower() {
       best = level;
       any = true;
     }
+  }
+
+  // ⚠️ IF NOTHING ACKED AT ANY LEVEL, THE SWEEP LEARNED NOTHING (TEC-NATKIT-84).
+  //
+  // `best` is initialised to kLevels[0] -- the FLOOR -- and only replaced when a
+  // level beats the previous best percentage. So a sweep in which every level
+  // measures 0% leaves `best` at 2.0 dBm and then latches it forever, because
+  // tx_power_swept is set unconditionally below and nothing ever clears it. That
+  // is the worst possible outcome dressed as a decision: the leaf goes on hearing
+  // the primary perfectly, reports a locked clock, and cannot deliver a frame.
+  //
+  // Observed 2026-08-24: three leaves rebooted, all three came back at the floor
+  // with thousands of tx failures, and a power cycle re-rolled the same dice.
+  //
+  // So: keep whatever power the radio booted with, say so, and DO NOT latch --
+  // the next pass round the loop tries again.
+  if (!any) {
+    ESP_LOGW(kTag,
+             "transmit power sweep inconclusive: no level acknowledged anything. "
+             "Leaving the power as it was and retrying rather than asserting the "
+             "floor");
+    return;
   }
 
   esp_wifi_set_max_tx_power(best);
@@ -574,10 +619,23 @@ void announceTask(void *) {
         now_us - last_beacon > kRescanAfterSilenceUs;
 
 #if CONFIG_NATKIT_TX_POWER_SWEEP
-    // Once, after the hub is found: there is nothing to measure ACKs against
-    // until there is something to acknowledge them.
+    // After the hub is found: there is nothing to measure ACKs against until
+    // there is something to acknowledge them.
+    //
+    // ⚠️ NO LONGER ONCE PER BOOT (TEC-NATKIT-84). A chosen power is only right for
+    // the geometry it was measured in, and the failure it produces is silent and
+    // permanent -- rx keeps working, so the leaf looks healthy while delivering
+    // nothing. If the link stops acknowledging, the previous answer is stale by
+    // definition, so measure again.
     if (sPrimaryKnown && !sStats.tx_power_swept) {
       sweepTxPower();
+      continue;
+    }
+    if (sPrimaryKnown && sStats.tx_power_swept && sendsAreFailing()) {
+      ESP_LOGW(kTag,
+               "sends are failing at %.1f dBm; sweeping transmit power again",
+               sStats.tx_power_chosen_quarter_dbm / 4.0);
+      sStats.tx_power_swept = false;
       continue;
     }
 #endif
