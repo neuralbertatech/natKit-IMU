@@ -2,6 +2,7 @@ idf_component_register(
     SRCS
         "main.cpp"
         "device_id.cpp"
+        "status_led.cpp"
         "node_role.cpp"
         "bno08x.cpp"
         "espnow_link.cpp"

@@ -1,4 +1,6 @@
 #include "commands.hpp"
+#include "board_config.hpp"
+#include "status_led.hpp"
 
 #include <cinttypes>
 #include <cstdio>
@@ -124,6 +126,75 @@ void describeReports(char *out, size_t out_size, uint8_t mask) {
                 (mask & Bno08x::kReportRotation) ? 1 : 0);
 }
 
+// --- the indicator LED (TEC-NATKIT-82) ------------------------------------
+
+bool runGetLed(const CommandFrame &request) {
+  const LedColour colour = statusLedCurrent();
+  if (colour.brightness == 0) {
+    reply(request, true, true, "off");
+    return true;
+  }
+  reply(request, true, true, "r=%u g=%u b=%u brightness=%u", colour.r, colour.g,
+        colour.b, colour.brightness);
+  return true;
+}
+
+bool runSetLed(const CommandFrame &request) {
+  cJSON *args = cJSON_Parse(request.args);
+  if (args == nullptr) {
+    reply(request, false, true,
+          "set_led needs args like {\"r\":0,\"g\":0,\"b\":255} or {\"off\":true}");
+    return false;
+  }
+
+  // ⚠️ STARTS FROM WHAT IS CURRENTLY SHOWING, like set_reports: a caller may send
+  // brightness alone, or a colour alone. Starting from zero would make
+  // {"brightness":40} turn the LED black.
+  LedColour colour = statusLedCurrent();
+
+  const cJSON *off = cJSON_GetObjectItemCaseSensitive(args, "off");
+  if (cJSON_IsBool(off) && cJSON_IsTrue(off)) {
+    // Off is brightness 0 rather than black, so "off" survives a round trip as an
+    // intention. r/g/b are kept, so turning it back on restores the colour.
+    colour.brightness = 0;
+  } else {
+    const auto component = [&](const char *name, uint8_t &out) {
+      const cJSON *item = cJSON_GetObjectItemCaseSensitive(args, name);
+      if (cJSON_IsNumber(item)) {
+        // Clamped rather than refused: a UI slider that sends 256 once should not
+        // make the operator retype a command.
+        const double value = item->valuedouble;
+        out = static_cast<uint8_t>(value < 0 ? 0 : (value > 255 ? 255 : value));
+      }
+    };
+    component("r", colour.r);
+    component("g", colour.g);
+    component("b", colour.b);
+    component("brightness", colour.brightness);
+    // A colour asked for with no brightness, on a dark LED, means "show this" --
+    // not "show this invisibly". Default to the bench-safe level rather than
+    // leaving the operator wondering why nothing happened.
+    if (colour.brightness == 0) {
+      colour.brightness = kStatusLedDefaultBrightness;
+    }
+  }
+  cJSON_Delete(args);
+
+  const esp_err_t err = statusLedSet(colour);
+  if (err != ESP_OK) {
+    reply(request, false, true, "no indicator on this node (%s)",
+          esp_err_to_name(err));
+    return false;
+  }
+  if (colour.brightness == 0) {
+    reply(request, true, true, "off");
+  } else {
+    reply(request, true, true, "r=%u g=%u b=%u brightness=%u", colour.r, colour.g,
+          colour.b, colour.brightness);
+  }
+  return true;
+}
+
 bool runGetReports(const CommandFrame &request) {
   if (sImu == nullptr) {
     reply(request, false, true, "no IMU on this node");
@@ -243,6 +314,10 @@ void commandsService() {
     runVersion(request);
   } else if (std::strcmp(request.command, "get_reports") == 0) {
     runGetReports(request);
+  } else if (std::strcmp(request.command, "get_led") == 0) {
+    runGetLed(request);
+  } else if (std::strcmp(request.command, "set_led") == 0) {
+    runSetLed(request);
   } else if (std::strcmp(request.command, "set_reports") == 0) {
     runSetReports(request);
   } else {
