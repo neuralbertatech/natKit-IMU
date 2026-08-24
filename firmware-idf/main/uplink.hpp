@@ -223,14 +223,30 @@ static_assert(sizeof(UplinkPrimaryStatus) == 144,
               "UplinkPrimaryStatus is published binary; use its reserved bytes "
               "rather than growing it, or bump the topic's V1");
 
+// A SNAPSHOT of the uplink counters, not a live view.
+//
+// ⚠️ Returned by value on purpose (TEC-NATKIT-75). Four of these are written from
+// TWO tasks -- the ESP-NOW receive callback on the WiFi task and the 1 Hz status
+// loop both call uplinkSend() -- and a plain `++` on a shared word loses
+// increments to the race. On the live rig frames_queued read ~30 BELOW frames_sent
+// with frames_dropped at 0, which the code makes otherwise impossible.
+//
+// The atomics live inside uplink.cpp rather than in this struct so that the wire
+// side stays a plain POD, and so a reader gets figures that were all read at
+// roughly the same moment instead of fields that can move between two reads.
 struct UplinkStats {
+  // ⚠️ Producer side: written from more than one task, so accumulated atomically.
   uint32_t frames_queued = 0;
-  uint32_t frames_sent = 0;
   uint32_t frames_dropped = 0;   // queue was full; OLDEST discarded
-  uint32_t write_timeouts = 0;
   uint32_t oversize_rejected = 0;
-  uint64_t bytes_sent = 0;
   uint32_t queue_high_water = 0;
+  // ⚠️ Drain side: written ONLY by drainTask, which is why these were never the
+  // ones that drifted. Left as plain words deliberately -- bytes_sent is 64-bit
+  // and std::atomic<uint64_t> on a 32-bit target is not lock-free, so making it
+  // atomic would pull libatomic in for no defect.
+  uint32_t frames_sent = 0;
+  uint32_t write_timeouts = 0;
+  uint64_t bytes_sent = 0;
 };
 
 // Brings up the uplink UART and its drain task.
@@ -246,7 +262,7 @@ esp_err_t uplinkStart();
 bool uplinkSend(UplinkType type, uint64_t stream_id, const void *payload,
                 size_t payload_size);
 
-const UplinkStats &uplinkStats();
+UplinkStats uplinkStats();
 
 // The largest payload the uplink will carry: the canonical frame at its
 // configured maximum. Sized from the frame constants rather than a round number

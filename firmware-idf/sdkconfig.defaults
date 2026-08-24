@@ -1,3 +1,24 @@
+# ⚠️ THIS FILE IS READ ONCE, when `sdkconfig` does not exist.
+#
+# ESP-IDF generates `sdkconfig` from these defaults on the first configure and
+# then never consults them again. So adding a line here has NO EFFECT on any
+# checkout that has already been built — including yours. There is no warning; the
+# option is simply absent from the generated config.
+#
+# That has bitten this project twice over, silently:
+#   * CONFIG_ETH_SPI_ETHERNET_W5500 was added with the Ethernet uplink (0b5f303)
+#     and never applied, so `ethernet_net.cpp` failed to compile —
+#     `eth_w5500_config_t` undeclared — and the whole firmware would not build.
+#   * CONFIG_PARTITION_TABLE_CUSTOM is TEC-NATKIT-49's fix for the 1 MB app
+#     partition. It sat here inert while the build kept using the stock table,
+#     which is the very thing the ticket was raised about.
+#
+# After editing this file: `rm sdkconfig && idf.py reconfigure`, then check the
+# option actually landed:  grep '^CONFIG_YOUR_OPTION' sdkconfig
+#
+# `sdkconfig` is gitignored, so it is safe to delete — it is generated, and these
+# defaults are the source of truth.
+
 # Shared defaults for every role and every target.
 #
 # Only deliberate deviations from the ESP-IDF defaults belong here -- nothing

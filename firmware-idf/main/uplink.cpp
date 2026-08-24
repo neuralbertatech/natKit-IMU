@@ -1,5 +1,6 @@
 #include "uplink.hpp"
 
+#include <atomic>
 #include <cinttypes>
 #include <cstdarg>
 #include <cstdio>
@@ -35,7 +36,25 @@ struct TxFrame {
 
 QueueHandle_t sQueue = nullptr;
 SemaphoreHandle_t sWireLock = nullptr;
-UplinkStats sStats{};
+// ⚠️ The producer-side counters are ATOMIC because two tasks increment them
+// (TEC-NATKIT-75): uplinkSend() is called both from the ESP-NOW receive callback
+// on the WiFi task and from the 1 Hz status loop, and a plain `++` on a shared
+// word loses increments. The symptom was frames_queued reading ~30 BELOW
+// frames_sent while frames_dropped was 0 — arithmetically impossible here, since
+// every send is preceded by a queue increment.
+//
+// relaxed ordering throughout: these are counters, nothing is synchronised
+// THROUGH them, and only the arithmetic has to be sound.
+std::atomic<uint32_t> sFramesQueued{0};
+std::atomic<uint32_t> sFramesDropped{0};
+std::atomic<uint32_t> sOversizeRejected{0};
+std::atomic<uint32_t> sQueueHighWater{0};
+
+// Drain side: single writer (drainTask), so plain words are correct here and a
+// 64-bit atomic would pull libatomic in for a defect that does not exist.
+uint32_t sFramesSent = 0;
+uint32_t sWriteTimeouts = 0;
+uint64_t sBytesSent = 0;
 uint32_t sSequence = 0;
 
 // --- sharing the console, when asked to ------------------------------------
@@ -149,10 +168,10 @@ void publishFrame(const uint8_t *frame, size_t length) {
   }
   std::snprintf(sTopic, sizeof(sTopic), topic, stream_id);
   if (gatewayPublish(sTopic, frame + kUplinkHeaderSize, payload_length)) {
-    ++sStats.frames_sent;
-    sStats.bytes_sent += payload_length;
+    ++sFramesSent;
+    sBytesSent += payload_length;
   } else {
-    ++sStats.write_timeouts;  // the broker refused it; same slot, same meaning
+    ++sWriteTimeouts;  // the broker refused it; same slot, same meaning
   }
 }
 
@@ -206,11 +225,11 @@ void drainTask(void *) {
     }
 
     if (written < static_cast<int>(frame.length) || flushed != ESP_OK) {
-      ++sStats.write_timeouts;
+      ++sWriteTimeouts;
       continue;
     }
-    ++sStats.frames_sent;
-    sStats.bytes_sent += static_cast<uint64_t>(written);
+    ++sFramesSent;
+    sBytesSent += static_cast<uint64_t>(written);
   }
 }
 
@@ -314,7 +333,7 @@ bool uplinkSend(UplinkType type, uint64_t stream_id, const void *payload,
     return false;
   }
   if (payload_size > kUplinkMaxPayload) {
-    ++sStats.oversize_rejected;
+    sOversizeRejected.fetch_add(1, std::memory_order_relaxed);
     return false;
   }
 
@@ -339,11 +358,18 @@ bool uplinkSend(UplinkType type, uint64_t stream_id, const void *payload,
   p += writeLe<uint32_t>(p, crc);
   frame.length = static_cast<size_t>(p - frame.bytes);
 
-  ++sStats.frames_queued;
+  sFramesQueued.fetch_add(1, std::memory_order_relaxed);
 
-  const UBaseType_t waiting = uxQueueMessagesWaiting(sQueue);
-  if (waiting > sStats.queue_high_water) {
-    sStats.queue_high_water = static_cast<uint32_t>(waiting);
+  // A high-water mark, so compare-and-exchange rather than a read-then-write:
+  // two producers each seeing a lower current value would otherwise take turns
+  // lowering the record.
+  const auto waiting = static_cast<uint32_t>(uxQueueMessagesWaiting(sQueue));
+  uint32_t high = sQueueHighWater.load(std::memory_order_relaxed);
+  while (waiting > high &&
+         !sQueueHighWater.compare_exchange_weak(high, waiting,
+                                                std::memory_order_relaxed)) {
+    // compare_exchange_weak refreshes `high` on failure; loop until it sticks or
+    // another producer has already recorded something larger.
   }
 
   if (xQueueSend(sQueue, &frame, 0) == pdTRUE) {
@@ -355,14 +381,24 @@ bool uplinkSend(UplinkType type, uint64_t stream_id, const void *payload,
   // gap is detectable on the far side from both sequence numbers in the header.
   TxFrame discarded{};
   if (xQueueReceive(sQueue, &discarded, 0) == pdTRUE) {
-    ++sStats.frames_dropped;
+    sFramesDropped.fetch_add(1, std::memory_order_relaxed);
   }
   if (xQueueSend(sQueue, &frame, 0) != pdTRUE) {
-    ++sStats.frames_dropped;
+    sFramesDropped.fetch_add(1, std::memory_order_relaxed);
   }
   return true;
 }
 
-const UplinkStats &uplinkStats() { return sStats; }
+UplinkStats uplinkStats() {
+  UplinkStats out{};
+  out.frames_queued = sFramesQueued.load(std::memory_order_relaxed);
+  out.frames_dropped = sFramesDropped.load(std::memory_order_relaxed);
+  out.oversize_rejected = sOversizeRejected.load(std::memory_order_relaxed);
+  out.queue_high_water = sQueueHighWater.load(std::memory_order_relaxed);
+  out.frames_sent = sFramesSent;
+  out.write_timeouts = sWriteTimeouts;
+  out.bytes_sent = sBytesSent;
+  return out;
+}
 
 }  // namespace natkit
