@@ -467,6 +467,14 @@ constexpr uint8_t kMaxChannel = 13;
 // so like the channel survey it costs nothing that was not already being lost --
 // and it uses the DATA FRAMES ALREADY BEING SENT as its probes rather than adding
 // traffic.
+// How many sweeps in a row have measured nothing, for the backoff below. Reset as
+// soon as one succeeds.
+uint32_t sInconclusiveSweeps = 0;
+// 30 s, 60 s, 90 s, then 120 s forever. Long enough that a wedged rig is idle
+// rather than transmitting, short enough that unplugging and replugging the hub is
+// noticed within a couple of minutes.
+constexpr uint32_t kSweepBackoffBaseS = 30;
+
 // Whether the link has stopped getting through since the last check.
 //
 // ⚠️ A RATE OVER THIS INTERVAL, not a total. send_failures is cumulative since
@@ -500,6 +508,16 @@ void sweepTxPower() {
   int8_t best = kLevels[0];
   uint32_t best_pct = 0;
   bool any = false;
+  // ⚠️ The power in force BEFORE the sweep, so an inconclusive sweep can actually
+  // put it back. Without this, "leave the power as it was" left the radio at the
+  // LAST level tried -- 19.5 dBm, maximum -- because the loop's final
+  // set_max_tx_power call is never undone. Combined with an immediate retry that
+  // meant continuous transmission at full power: the boards ran hot and the
+  // channel was hammered, which is a worse failure than the latch it replaced.
+  int8_t power_before = 0;
+  if (esp_wifi_get_max_tx_power(&power_before) != ESP_OK) {
+    power_before = kLevels[0];
+  }
   ESP_LOGI(kTag, "sweeping transmit power, %lu ms per level",
            static_cast<unsigned long>(dwell));
 
@@ -548,12 +566,15 @@ void sweepTxPower() {
   // So: keep whatever power the radio booted with, say so, and DO NOT latch --
   // the next pass round the loop tries again.
   if (!any) {
+    esp_wifi_set_max_tx_power(power_before);
     ESP_LOGW(kTag,
              "transmit power sweep inconclusive: no level acknowledged anything. "
-             "Leaving the power as it was and retrying rather than asserting the "
-             "floor");
+             "Restored %.1f dBm and backing off rather than asserting the floor",
+             power_before / 4.0);
+    sInconclusiveSweeps++;
     return;
   }
+  sInconclusiveSweeps = 0;
 
   esp_wifi_set_max_tx_power(best);
   sStats.tx_power_chosen_quarter_dbm = static_cast<uint8_t>(best);
@@ -628,6 +649,23 @@ void announceTask(void *) {
     // nothing. If the link stops acknowledging, the previous answer is stale by
     // definition, so measure again.
     if (sPrimaryKnown && !sStats.tx_power_swept) {
+      // ⚠️ BACK OFF between inconclusive attempts. A sweep is ~10 s of continuous
+      // transmission that climbs to maximum power, so retrying it end to end is
+      // not a retry policy -- it is a duty cycle of 100% at full power. Measured
+      // after the first version of this fix: five sweeps in 45 seconds, and the
+      // boards were noticeably hot to the touch.
+      //
+      // A link that cannot be measured at any power will not become measurable in
+      // the next ten seconds, so waiting costs nothing that was available anyway.
+      if (sInconclusiveSweeps > 0) {
+        const uint32_t wait_s =
+            kSweepBackoffBaseS * (sInconclusiveSweeps < 4 ? sInconclusiveSweeps : 4);
+        ESP_LOGI(kTag,
+                 "waiting %lus before sweeping again (%lu inconclusive so far)",
+                 static_cast<unsigned long>(wait_s),
+                 static_cast<unsigned long>(sInconclusiveSweeps));
+        vTaskDelay(pdMS_TO_TICKS(wait_s * 1000));
+      }
       sweepTxPower();
       continue;
     }
