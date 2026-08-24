@@ -56,4 +56,35 @@ esp_err_t statusLedSet(const LedColour &colour);
 /** What is currently showing, for the `get_led` command. */
 LedColour statusLedCurrent();
 
+// --- Fault signalling (TEC-NATKIT-84) ---------------------------------------
+//
+// ⚠️ WHY THE LED AND NOT JUST THE PANEL: the panel already says which devices are
+// not delivering, but it cannot say WHICH BOARD ON THE BENCH that is. When the
+// answer is "the antenna on one of these is bad" and the antennas are soldered to
+// the PCBs, the only useful output is on the board itself.
+//
+// The leaf is the one that can tell these apart, because it is the end that knows
+// both whether it hears the hub and whether the hub answers:
+enum class LinkFault {
+  // Delivering. Shows whatever colour the operator set.
+  kNone,
+  // ⚠️ Hears the hub, cannot be heard BY it. The asymmetry is the diagnosis: the
+  // hub's transmits arrive and its acknowledgements do not, which is a receive
+  // fault at the hub, not a transmit fault here. If EVERY leaf shows this, the
+  // problem is the one board they all talk to.
+  kUnheardByPrimary,
+  // Cannot hear the hub at all: it is off, out of range, or on another channel.
+  kNoPrimary,
+};
+
+/**
+ * Show a link fault, overriding the identity colour until it clears.
+ *
+ * ⚠️ Only touches the LED when the state CHANGES. That is not an optimisation --
+ * it is the constraint the Arduino firmware's crash loop taught: driving the pixel
+ * on every pass through a loop is what exhausted the RMT channels. A fault that
+ * persists is written once.
+ */
+void statusLedShowFault(LinkFault fault);
+
 }  // namespace natkit

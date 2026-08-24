@@ -71,6 +71,35 @@ esp_err_t apply(const LedColour &colour) {
 
 LedColour statusLedCurrent() { return sCurrent; }
 
+void statusLedShowFault(const LinkFault fault) {
+  static LinkFault shown = LinkFault::kNone;
+  if (fault == shown) {
+    return;  // see the header: write on CHANGE, never per loop
+  }
+  shown = fault;
+
+  switch (fault) {
+    case LinkFault::kNone:
+      // Back to whatever the operator asked for. Not "off": a dark LED is
+      // indistinguishable from a dead one and from a board that never booted.
+      ESP_LOGI(kTag, "link recovered; restoring the operator's colour");
+      apply(sCurrent);
+      return;
+    case LinkFault::kUnheardByPrimary:
+      // ⚠️ Amber rather than red, and the distinction is the point: this board is
+      // working. It hears the hub and is transmitting; it is the far end that is
+      // not acknowledging. Red here would send somebody to replace the wrong
+      // board.
+      ESP_LOGW(kTag, "the primary is not acknowledging us -- showing amber");
+      apply(LedColour{255, 80, 0, kStatusLedDefaultBrightness});
+      return;
+    case LinkFault::kNoPrimary:
+      ESP_LOGW(kTag, "no primary heard at all -- showing red");
+      apply(LedColour{255, 0, 0, kStatusLedDefaultBrightness});
+      return;
+  }
+}
+
 esp_err_t statusLedRestore() {
   nvs_handle_t handle;
   esp_err_t err = nvs_open(kNamespace, NVS_READONLY, &handle);

@@ -1,6 +1,7 @@
 #include <cinttypes>
 
 #include "bno08x.hpp"
+#include "status_led.hpp"
 #include "device_id.hpp"
 #include "esp_log.h"
 #include "esp_system.h"
@@ -411,6 +412,16 @@ void runLeaf() {
       // also sends heartbeats and announces down this path, so a single "sent"
       // figure next to the frame count reads as though more frames were sent than
       // were ever built.
+      // Put the link state on the board's own LED, so "which one of these is the
+      // problem" is answerable on the bench rather than only in the panel
+      // (TEC-NATKIT-84). ⚠️ Called every pass but writes only on a CHANGE -- see
+      // statusLedShowFault.
+      statusLedShowFault(!espNowLinkHasPrimary()
+                             ? LinkFault::kNoPrimary
+                             : link.primary_absent
+                                   ? LinkFault::kUnheardByPrimary
+                                   : LinkFault::kNone);
+
       ESP_LOGI(kTag,
                "link: %s | data frames built %lu @ %.1f/s | packets sent %lu, "
                "dropped %lu, tx failures %lu, retries %lu, announces %lu",
