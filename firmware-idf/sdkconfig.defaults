@@ -86,3 +86,28 @@ CONFIG_PARTITION_TABLE_CUSTOM_FILENAME="partitions.csv"
 # come from here -- it comes from the ESP-NOW timing master, and that is already
 # 60-100 us.
 CONFIG_LWIP_SNTP_UPDATE_DELAY=60000
+
+# --- Transmit power: pinned, and the sweep OFF (TEC-NATKIT-37) --------------
+#
+# ⚠️ THIS IS A KNOWN-GOOD STATE THAT WAS LOST ONCE ALREADY, which is why it is
+# here rather than in somebody's local sdkconfig. TEC-NATKIT-37 closed with the
+# bench recorded as "both leaves pinned at 8.5 dBm with NATKIT_TX_POWER_SWEEP
+# off", and a warning: if the sweep is re-enabled, watch for it choosing very
+# different powers per node, because that is what produced the asymmetry the
+# ticket was originally filed about.
+#
+# That warning came true on 2026-08-24. `NATKIT_TX_POWER_SWEEP` defaults to y in
+# Kconfig and nothing here overrode it, so a regenerated sdkconfig silently
+# turned it back on -- and the three leaves settled at 2.0, 8.5 and 19.5 dBm,
+# 17 dB apart. The symptom is not a board that fails: it is EXACTLY TWO of three
+# leaves working, with which one loses rotating between them as each sweep
+# re-runs. That reads like failing hardware and is a configuration difference.
+#
+# Pinning all leaves to one power removes the asymmetry at the source. 34
+# quarter-dBm = 8.5 dBm, which is the level the ticket measured. Do not "fix"
+# this by raising it: the sweep's own help records 19.5 dBm delivering 0.4
+# frames/s against 2 dBm delivering 8.5, because ~+9 dBm arriving at a 2.4 GHz
+# front end saturates it, and raising both leaves uniformly took 10.6 frames/s
+# each down to 2.6 and 6.2.
+CONFIG_NATKIT_TX_POWER_SWEEP=n
+CONFIG_NATKIT_TX_POWER_QUARTER_DBM=34
