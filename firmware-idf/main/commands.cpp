@@ -126,7 +126,7 @@ void describeReports(char *out, size_t out_size, uint8_t mask) {
                 (mask & Bno08x::kReportRotation) ? 1 : 0);
 }
 
-// --- the indicator LED (TEC-NATKIT-82) ------------------------------------
+// --- the indicator LED (TEC-NATKIT-83) ------------------------------------
 
 bool runGetLed(const CommandFrame &request) {
   const LedColour colour = statusLedCurrent();

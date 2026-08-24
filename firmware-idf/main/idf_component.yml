@@ -3,7 +3,7 @@ dependencies:
   idf:
     # ESP-IDF v5.5.3 is what is installed on the bench box (~/esp/esp-idf).
     version: '>=5.5'
-  # The identity LED (TEC-NATKIT-82). Chosen over hand-rolling the WS2812 bit
+  # The identity LED (TEC-NATKIT-83). Chosen over hand-rolling the WS2812 bit
   # timing because that timing cannot be verified without watching the LED, and
   # this component is the one Espressif tests per target.
   espressif/led_strip: '^3.0.0'
