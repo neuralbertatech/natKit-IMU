@@ -199,6 +199,10 @@ void fillNodeStatus(const NodeState &node, UplinkNodeStatus &out) {
   }
   out.publish_no_sync = node.publish_no_sync;
   out.publish_no_shift = node.publish_no_shift;
+  // The raw probe accumulators, so a consumer can window them (TEC-NATKIT-52).
+  out.probe_error_sum_us = node.probe_error_sum_us;
+  out.probe_error_sum_sq = node.probe_error_sum_sq;
+  out.probe_error_count = node.probe_error_count;
 }
 
 void fillPrimaryStatus(UplinkPrimaryStatus &out) {
@@ -241,6 +245,14 @@ void fillPrimaryStatus(UplinkPrimaryStatus &out) {
   out.coherence_bound_us = metric.bound_us;
   out.coherence_worst_us = metric.worst_seen_us;
   out.coherence_samples = metric.samples;
+  // ...and the sums behind them, so "how good is the rig right now" is answerable
+  // without resetting the primary to clear its history (TEC-NATKIT-52).
+  {
+    const CoherenceStats &coherence = espNowPrimaryCoherence();
+    out.spread_sum_us = coherence.spread_sum_us;
+    out.spread_sum_sq = coherence.spread_sum_sq;
+    out.markers_paired = coherence.markers_paired;
+  }
   out.coherence_quality = metric.quality;
   out.coherence_measured = metric.measured ? 1 : 0;
   out.registry_sealed = registrySealed() ? 1 : 0;
