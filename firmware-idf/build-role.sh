@@ -63,6 +63,29 @@ if [[ $# -gt 0 ]]; then
   esac
 fi
 
+# --- combinations that do not exist, refused BEFORE the compiler says so -----
+#
+# A C3 carries no BNO08x in this project -- it is the WiFi gateway of the
+# two-board rig -- so there is no honest pinout for a C3 leaf and
+# board_config.hpp raises an #error rather than inventing one (TEC-NATKIT-34).
+#
+# Catching it here as well is not belt-and-braces, it is what makes the target
+# sweep readable. #379's own suggested check is
+#
+#   for t in esp32 esp32c3 esp32s3; do for r in leaf primary gateway; do ...
+#
+# and a sweep with one permanently-red row is a sweep people stop reading -- which
+# is precisely how a whole target rotted for five slices in the first place. Exit
+# 3 (not 1, not 0) so a caller can tell "this combination does not exist" apart
+# from "this combination is broken".
+if [[ "${role}" == "leaf" && "${target}" == "esp32c3" ]]; then
+  echo "$0: leaf/esp32c3 is not a supported combination -- skipping." >&2
+  echo "$0:   The C3 in this project is the gateway and carries no BNO08x, so no" >&2
+  echo "$0:   sensor pinout exists for it (TEC-NATKIT-34). Wire a C3 leaf and put" >&2
+  echo "$0:   its MEASURED pins in board_config.hpp to make this real." >&2
+  exit 3
+fi
+
 if [[ -z "${IDF_PATH:-}" ]]; then
   echo "$0: IDF_PATH is not set -- run 'source ~/esp/esp-idf/export.sh' first" >&2
   exit 1
