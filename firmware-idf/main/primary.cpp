@@ -447,13 +447,22 @@ void runPrimary() {
                static_cast<unsigned long>(node.last_declared_rate));
 
       // --- the time-shift proxy, and its two instruments (#340) -------------
-      if (node.publish_no_sync || node.publish_no_time || node.publish_no_shift) {
+      // ⚠️ EVERY WAY A FRAME CAN FAIL TO REACH THE QUEUE, or this line lies by
+      // omission -- which is exactly what TEC-NATKIT-86 was. publish_too_big
+      // existed as a code path and not as a counter, so a dropped frame showed
+      // up only as a gap between what the hub said it received and what the
+      // broker saw, with nothing anywhere to explain it. Adding the branch to
+      // the guard chain without adding it here would leave the bug half fixed.
+      if (node.publish_no_sync || node.publish_no_time ||
+          node.publish_no_shift || node.publish_too_big) {
         ESP_LOGW(kTag,
                  "  NOT PUBLISHED: %lu no leaf fit, %lu no wall clock, %lu "
-                 "rewrite refused -- these never reached the uplink queue",
+                 "rewrite refused, %lu TOO BIG for the shift buffer -- these "
+                 "never reached the uplink queue",
                  static_cast<unsigned long>(node.publish_no_sync),
                  static_cast<unsigned long>(node.publish_no_time),
-                 static_cast<unsigned long>(node.publish_no_shift));
+                 static_cast<unsigned long>(node.publish_no_shift),
+                 static_cast<unsigned long>(node.publish_too_big));
       }
       if (node.frames_unicast || node.frames_broadcast) {
         ESP_LOGI(kTag, "  delivery: %lu unicast, %lu BROADCAST fallback",

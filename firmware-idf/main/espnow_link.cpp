@@ -1279,6 +1279,26 @@ void primaryRecvCallback(const esp_now_recv_info_t *info, const uint8_t *data,
           } else {
             ++node->publish_no_shift;
           }
+        } else {
+          // ⚠️ THE BRANCH THAT USED TO BE MISSING (TEC-NATKIT-86). A frame
+          // larger than kMaxPayload fell off the end of this chain: dropped
+          // silently, with every visible counter saying the rig was healthy and
+          // the broker simply never seeing it. The NOT PUBLISHED line -- the
+          // instrument used to rule the publish path in or out -- lied by
+          // omission about exactly this case.
+          //
+          // Logged ONCE rather than per frame: a persistent oversize would
+          // otherwise flood the console it is trying to be visible on, which is
+          // how a diagnostic becomes the fault.
+          if (node->publish_too_big == 0) {
+            ESP_LOGE(kTag,
+                     "node %" PRIu64 " sent a %u-byte payload, over the %u-byte "
+                     "shift buffer -- DROPPED and it cannot be timestamp-"
+                     "corrected here (TEC-NATKIT-86)",
+                     node->device_id, static_cast<unsigned>(payload_size),
+                     static_cast<unsigned>(sizeof(shifted)));
+          }
+          ++node->publish_too_big;
         }
       } else {
         uplinkSend(UplinkType::kData, node->device_id, payload, payload_size);
