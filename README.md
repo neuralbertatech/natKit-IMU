@@ -62,13 +62,68 @@ magnetic field in them.
 Last recorded state — **update this table when you flash something**, and note
 that it is a record rather than a measurement (nothing is read back off a board):
 
-| Board | Port | Firmware | Recorded |
+| Board | Port (by-id is the stable name) | Firmware | Recorded |
 |---|---|---|---|
-| ESP32-S3 (ESP Thread Border Router + W5500 Ethernet), MAC `b8:f8:62:62:f7:3c` | `/dev/ttyACM0` | `firmware-idf/` **primary**. ⚠️ Opening its USB console RESETS it *and re-enumerates*, so `capture.py` returns an empty file — diagnose it from the published status. | 2026-08-14 |
-| ESP32-PICO-V3-02, MAC `0c:8b:95:96:bc:4c`, BNO08x | `/dev/ttyACM1` (serial `5185026888`) | `firmware-idf/` **leaf**. Flashed to `embeded/` and back on 2026-08-17 for TEC-NATKIT-27. | 2026-08-17 |
-| ESP32, MAC `4c:75:25:a4:45:3c`, BNO08x | `/dev/ttyACM2` (serial `5185027828`) | `firmware-idf/` **leaf**. Flashed to `embeded/` and back on 2026-08-17 for TEC-NATKIT-27. | 2026-08-17 |
-| ESP32, MAC `0c:8b:95:96:b9:f4` — **the board previously believed damaged**, see below | `ttyACM3`/`ttyACM4` (serial `5185027171` or `5185027831`, ⚠️ **not yet determined which**) | `firmware-idf/` **leaf**, flashed 2026-08-18 | 2026-08-18 |
-| ESP32, MAC `0c:8b:95:94:ef:d0` | `ttyACM3`/`ttyACM4` (the other of `5185027171` / `5185027831`) | `firmware-idf/` **leaf**, flashed 2026-08-18 | 2026-08-18 |
+| **ESP32-D0WD-V3 rev 3.1**, MAC `30:c9:22:33:0c:ec`, id 53640420330732 | CP2102, serial `0001` | `firmware-idf/` **primary** — the WiFi rig's hub. ESP-NOW + serial uplink, no network of its own. | 2026-08-25 |
+| **ESP32-C3 (QFN32) rev v0.4**, MAC `dc:da:0c:d1:49:38`, id 242829076023608 | CP2102**N**, serial `f46f1cbd859ded11a31c5f84e259fb3e` | `firmware-idf/` **gateway** — serial in, WiFi + MQTT out. ⚠️ The only board holding credentials (`main/DevConfig.hpp`). | 2026-08-25 |
+| ESP32-S3 (ESP Thread Border Router + W5500 Ethernet), MAC `b8:f8:62:62:f7:3c`, id 203376942053180 | Espressif native USB, serial = its MAC | `firmware-idf/` **primary** (Ethernet uplink). ⚠️ **Powered down 2026-08-25** while the WiFi rig runs — two hubs on one channel adopt each other. ⚠️ Opening its USB console RESETS it *and re-enumerates*, so `capture.py` returns an empty file — diagnose it from the published status. | 2026-08-25 |
+| ESP32-PICO-V3-02, MAC `0c:8b:95:96:bc:4c`, id 13793649671244, BNO08x | CH340, serial `5185026888` | `firmware-idf/` **leaf** | 2026-08-17 |
+| ESP32, MAC `4c:75:25:a4:45:3c`, id 84066026407228, BNO08x | CH340, serial `5185027828` | `firmware-idf/` **leaf**. ⚠️ Was suspected bad; it is not — see below. | 2026-08-25 |
+| ESP32, MAC `0c:8b:95:96:b9:f4`, id 13793649670644 — **the board previously believed damaged** | CH340, serial `5185027171` or `5185027831`, ⚠️ **not determined which** | `firmware-idf/` **leaf** | 2026-08-18 |
+| ESP32, MAC `0c:8b:95:94:ef:d0`, id 13793649553360 | CH340, the other of `5185027171` / `5185027831` | `firmware-idf/` **leaf** | 2026-08-18 |
+| **ESP32-PICO-V3-02 rev 3.0**, MAC `0c:8b:95:94:f0:78`, id 13793649553528 | CH340, serial `5185027088` | added to the bench 2026-08-25; streamed briefly, **not currently on the radio** | 2026-08-25 |
+| **ESP32 (unknown revision)** | CH340, serial `5185027373` | ⚠️ **DEAD — no 3.3 V rail.** Bridge enumerates, chip never answers on any baud, and the onboard LEDs do not light. Not a cable and not the auto-reset circuit. | 2026-08-25 |
+
+⚠️ **`5185027828` WAS WRONGLY SUSPECTED, and the evidence against it was confounded.**
+On 2026-08-25 it showed a `NatKitNodeStatusV1` topic with no `Data` topic, which looks
+exactly like a node that is registered and delivering nothing. It was simply
+**unplugged** — the hub keeps publishing a registry entry for a leaf that is gone
+(TEC-NATKIT-81). Reconnected, it delivers 10.0 frames/s with **zero sequence gaps**
+and the strongest RSSI of the four (−43 dBm mean, −57 worst). A missing `Data` topic
+is not evidence about a board until you have checked the board is powered.
+
+### The two-board WiFi rig
+
+For a bench with no Ethernet port. The hub does ESP-NOW only and reaches the broker
+through a second chip over a wire, which keeps the uplink **off the radio** — the
+thing TEC-NATKIT-30 measured as costing ~85% of ESP-NOW frames when one chip tried
+to do both.
+
+```sh
+# hub: ESP-NOW + serial uplink, no network of its own
+./build-role.sh primary esp32 \
+  -p /dev/serial/by-id/usb-Silicon_Labs_CP2102_USB_to_UART_Bridge_Controller_0001-if00-port0 flash
+
+# gateway: serial in, WiFi + MQTT out. Needs main/DevConfig.hpp (gitignored).
+./build-role.sh gateway esp32c3 \
+  -p /dev/serial/by-id/usb-Silicon_Labs_CP2102N_USB_to_UART_Bridge_Controller_f46f1cbd859ded11a31c5f84e259fb3e-if00-port0 flash
+```
+
+**Three wires, and it is a CROSSOVER:**
+
+| From | To | Carries |
+|---|---|---|
+| ESP32 primary **GPIO 26** (UART1 TX) | C3 gateway **GPIO 6** (UART1 RX) | data and status, upward |
+| C3 gateway **GPIO 5** (UART1 TX) | ESP32 primary **GPIO 25** (UART1 RX) | device commands, downward |
+| GND | GND | mandatory shared reference |
+
+⚠️ **TX to RX.** TX→TX puts two push-pull outputs on one net, and the symptom —
+garbage the CRC silently discards — looks identical to a baud mismatch. ⚠️ **GND
+only**; do not tie 3V3 between two USB-powered boards.
+
+⚠️ **Diagnosing a dead link: `0 bytes` and `0 frames` are different faults.** A baud
+mismatch, a floating line or a missing ground all produce *edges*, which land in the
+gateway's `bytes_skipped` as resync garbage. Exactly zero **bytes** read means the RX
+pin saw no transitions at all — an open circuit or the wrong pin, and nothing else.
+So read `bytes_read` before suspecting the baud rate. That is what found a jumper on
+the wrong pin on 2026-08-25 while the primary was reporting 45,662 bytes sent.
+
+⚠️ **The uplink pins are per-target and a missing default is fatal**: classic ESP32
+26/25, ESP32-C3 5/6, ESP32-S3 9/10. A target absent from that list inherits 26/25,
+`uart_set_pin` rejects a GPIO the chip does not have, and the board **reboots in a
+loop before there is any console output to say why**. The S3 pair is reasoned rather
+than measured — that board runs Ethernet and has never called `uart_set_pin`.
+
 
 ⚠️ **PORT NUMBERS MOVE WHEN BOARDS ARE SWAPPED, AND THE PRIMARY IS NOT ALWAYS
 ttyACM2.** Two flashes were aimed at the wrong board before this was noticed; esptool
