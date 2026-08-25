@@ -133,20 +133,7 @@ void publishFrame(const uint8_t *frame, size_t length) {
     return;
   }
 
-  const char *topic = kTopicTemplate;
-  switch (static_cast<UplinkType>(frame[3])) {
-    case UplinkType::kNodeStatus:
-      topic = kNodeStatusTopic;
-      break;
-    case UplinkType::kPrimaryStatus:
-      topic = kPrimaryStatusTopic;
-      break;
-    case UplinkType::kCommandLog:
-      topic = kCommandLogTopic;
-      break;
-    default:
-      break;
-  }
+  const char *topic = uplinkTopicTemplate(static_cast<UplinkType>(frame[3]));
   std::snprintf(sTopic, sizeof(sTopic), topic, stream_id);
   if (gatewayPublish(sTopic, frame + kUplinkHeaderSize, payload_length)) {
     ++sStats.frames_sent;
@@ -215,6 +202,32 @@ void drainTask(void *) {
 }
 
 }  // namespace
+
+// ⚠️ THE ONE PLACE A FRAME TYPE BECOMES A TOPIC NAME (TEC-NATKIT-88).
+//
+// There are two publishers of these frames and they must not be able to
+// disagree: the PRIMARY publishing directly (publishFrame above, the Ethernet
+// and #373 WiFi paths) and the GATEWAY republishing what arrived over the wire
+// (gateway.cpp). They were separate copies, and the copies diverged -- the
+// gateway never grew the two status topics at all, so a WiFi rig streamed data
+// perfectly and published nothing about its own health for two weeks without a
+// single error anywhere.
+//
+// A second copy that is merely correct today is the same bug waiting again, so
+// the mapping lives here and both callers ask for it.
+const char *uplinkTopicTemplate(UplinkType type) {
+  switch (type) {
+    case UplinkType::kNodeStatus:
+      return kNodeStatusTopic;
+    case UplinkType::kPrimaryStatus:
+      return kPrimaryStatusTopic;
+    case UplinkType::kCommandLog:
+      return kCommandLogTopic;
+    case UplinkType::kData:
+      break;
+  }
+  return kTopicTemplate;
+}
 
 esp_err_t uplinkStart() {
   uart_config_t cfg{};

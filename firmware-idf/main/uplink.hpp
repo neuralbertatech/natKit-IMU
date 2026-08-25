@@ -248,6 +248,14 @@ bool uplinkSend(UplinkType type, uint64_t stream_id, const void *payload,
 
 const UplinkStats &uplinkStats();
 
+// The MQTT topic template for a frame type -- one "%" PRIu64 for the device id.
+//
+// Shared between the primary's direct publisher and the gateway's republisher on
+// purpose (TEC-NATKIT-88): they are the two ways a frame reaches the broker, the
+// backend correlates on these exact names, and when each kept its own copy the
+// gateway's silently lacked the two status topics entirely.
+const char *uplinkTopicTemplate(UplinkType type);
+
 // The largest payload the uplink will carry: the canonical frame at its
 // configured maximum. Sized from the frame constants rather than a round number
 // so a change to samples-per-frame cannot silently overflow a queue item.

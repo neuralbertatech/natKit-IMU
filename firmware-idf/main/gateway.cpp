@@ -53,15 +53,18 @@ namespace {
 
 constexpr char kTag[] = "natkit-gateway";
 
-// The topic the bridge already listens on. `natKit/sending/` is the
-// device-to-server direction (the bridge subscribes to `natKit/sending/#`);
-// `natKit/receiving/` is the opposite one and is not ours to publish on.
-constexpr char kTopicTemplate[] =
-    "natKit/sending/Data-%" PRIu64 "-Binary-NatImuBulkDataSchema";
-// Matches what the primary uses when it publishes directly (uplink.cpp) and what
-// the backend already correlates against.
-constexpr char kCommandLogTopicTemplate[] =
-    "natKit/sending/Log-%" PRIu64 "-Json-NatLogV1";
+// ⚠️ THE TOPIC NAMES ARE NOT DEFINED HERE ANY MORE (TEC-NATKIT-88).
+//
+// They used to be, as a second copy of uplink.cpp's set, and the copies
+// diverged exactly as you would expect: this one never grew the two STATUS
+// topics, so a WiFi rig published its data perfectly and published nothing at
+// all about its own health -- no device pill, no Logs page, and a recording that
+// sealed "no clock data" on every run. Confirmed on hardware 2026-08-25: four
+// Data topics on the broker and zero Log- topics, while this file's own counters
+// showed 972 node-status and 243 primary-status frames arriving and being
+// discarded.
+//
+// uplinkTopicTemplate() is now the single mapping and both publishers ask it.
 
 // Per-node state: the leaf's clock fit, as forwarded by the primary. Without it
 // a data frame's timestamps cannot be turned into anything publishable.
@@ -85,6 +88,14 @@ int64_t sPrimaryToWallUs = 0;
 uint32_t sPrimaryOffsetUpdates = 0;
 
 uint32_t sFramesNoRoute = 0;
+// ⚠️ These two used to be bare `return`s with no counter -- the same defect
+// shape as TEC-NATKIT-86, where a frame too large for the shift buffer vanished
+// and every visible number said the rig was healthy. A drop that is not counted
+// is a drop nobody can find.
+uint32_t sFramesOversize = 0;
+uint32_t sStatusPublished = 0;
+uint32_t sStatusRefused = 0;
+uint32_t sStatusTooShort = 0;
 
 NodeClock *nodeFor(uint64_t device_id) {
   for (NodeClock &node : sNodes) {
@@ -125,10 +136,43 @@ void writeLe(uint8_t *out, T value) {
 uint8_t sFrame[kUplinkMaxPayload];
 char sTopic[96];
 
+// Republishes a status frame verbatim, under the id of the device it DESCRIBES.
+//
+// ⚠️ That id is in the PAYLOAD at offset 0, not in the uplink header. A
+// primary-status frame is about the primary, and the uplink header's stream id
+// is whatever the sender put there -- publishing under the wrong one would file
+// the hub's health against a leaf, or against the gateway.
+// UplinkNodeStatus/UplinkPrimaryStatus both assert offsetof(device_id) == 0.
+//
+// ⚠️ Length is NOT validated against sizeof(the struct). The fleet is flashed one
+// board at a time, so a 168-byte node status from older firmware and a 192-byte
+// one from current firmware are both live on the same broker, and libnatkit-core
+// accepts both by design. Refusing the short one here would blank the health
+// panel for exactly the devices that have not been reflashed yet.
+void republishStatus(UplinkType type, const uint8_t *payload, size_t length) {
+  if (length < sizeof(uint64_t)) {
+    ++sStatusTooShort;  // cannot even name the device it is about
+    return;
+  }
+  const uint64_t about = readLe<uint64_t>(payload);
+  std::snprintf(sTopic, sizeof(sTopic), uplinkTopicTemplate(type), about);
+  if (gatewayPublish(sTopic, payload, length)) {
+    ++sStatusPublished;
+  } else {
+    ++sStatusRefused;
+  }
+}
+
 void onFrame(UplinkType type, uint64_t stream_id, const uint8_t *payload,
              size_t length) {
   switch (type) {
     case UplinkType::kPrimaryStatus: {
+      // ⚠️ PUBLISHED FIRST, and deliberately BEFORE the clock check below.
+      // The hub's own health is the thing you need most when the clock is NOT
+      // valid -- "why is nothing being published" is answered by this frame, and
+      // gating it on the same condition it explains would hide it exactly when
+      // it matters. It carries no timestamp of ours, so it needs no wall clock.
+      republishStatus(type, payload, length);
       if (length < 16 || !gatewayTimeValid()) {
         return;
       }
@@ -143,7 +187,13 @@ void onFrame(UplinkType type, uint64_t stream_id, const uint8_t *payload,
       return;
     }
     case UplinkType::kNodeStatus: {
+      // Same reasoning: out to the broker first, then used for our own routing.
+      // A leaf's counters are how a silent leaf is told from a dead one, so they
+      // must survive a frame we cannot fully parse.
+      republishStatus(type, payload, length);
       if (length < sizeof(UplinkNodeStatus)) {
+        // Older firmware, shorter struct. Published above regardless -- the host
+        // decoders read both sizes -- but we cannot lift a clock fit out of it.
         return;
       }
       UplinkNodeStatus status{};
@@ -163,10 +213,12 @@ void onFrame(UplinkType type, uint64_t stream_id, const uint8_t *payload,
       // it must go out even when a node has no valid sync, because "why is this
       // node not producing data" is exactly what someone would be asking it.
       if (length > sizeof(sFrame)) {
+        ++sFramesOversize;
         return;
       }
       std::memcpy(sFrame, payload, length);
-      std::snprintf(sTopic, sizeof(sTopic), kCommandLogTopicTemplate, stream_id);
+      std::snprintf(sTopic, sizeof(sTopic),
+                    uplinkTopicTemplate(UplinkType::kCommandLog), stream_id);
       gatewayPublish(sTopic, sFrame, length);
       return;
     }
@@ -189,6 +241,7 @@ void onFrame(UplinkType type, uint64_t stream_id, const uint8_t *payload,
         return;
       }
       if (length > sizeof(sFrame)) {
+        ++sFramesOversize;
         return;
       }
 
@@ -199,7 +252,8 @@ void onFrame(UplinkType type, uint64_t stream_id, const uint8_t *payload,
         return;
       }
 
-      std::snprintf(sTopic, sizeof(sTopic), kTopicTemplate, stream_id);
+      std::snprintf(sTopic, sizeof(sTopic),
+                    uplinkTopicTemplate(UplinkType::kData), stream_id);
       if (gatewayPublish(sTopic, sFrame, length)) {
         ++node->published;
       } else {
@@ -255,6 +309,19 @@ void runGateway() {
              static_cast<unsigned long>(net.publishes_failed),
              static_cast<unsigned long>(net.wifi_disconnects),
              static_cast<unsigned long>(net.mqtt_disconnects));
+
+    // The republished telemetry, counted separately from the data stream. Without
+    // this line the fix for TEC-NATKIT-88 would itself be unverifiable from the
+    // device -- and "the panel is blank" would still not say whether the frames
+    // never arrived, were never published, or were refused by the broker.
+    ESP_LOGI(kTag,
+             "status republished: %lu published, %lu refused by mqtt, %lu too "
+             "short to address | %lu frames oversize, %lu no route",
+             static_cast<unsigned long>(sStatusPublished),
+             static_cast<unsigned long>(sStatusRefused),
+             static_cast<unsigned long>(sStatusTooShort),
+             static_cast<unsigned long>(sFramesOversize),
+             static_cast<unsigned long>(sFramesNoRoute));
 
     for (const NodeClock &node : sNodes) {
       if (!node.in_use) {
