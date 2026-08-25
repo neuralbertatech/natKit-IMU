@@ -202,6 +202,51 @@ void fillNodeStatus(const NodeState &node, UplinkNodeStatus &out) {
   out.publish_no_shift = node.publish_no_shift;
 }
 
+// --- presence, as against the roster (TEC-NATKIT-81) -------------------------
+//
+// A leaf stopped talking to this hub and the hub did not notice: it kept
+// composing a status frame for it once a second out of the state the node had
+// when it went away, and `nodes_known` -- the persistent registry count -- went
+// on saying 4. Every visible number described a complete rig while a board sat
+// dead on the bench.
+//
+// The fix is NOT to age the node out. Two things would break: the roster is what
+// a seal freezes, so a sealed rig would evict the node it exists to accept and
+// then refuse it on its return; and dropping its NodeState would stop the status
+// frame entirely, which loses the only evidence that the node was ever here. The
+// panel's "last heard 2m ago" is worth more than silence, because silence cannot
+// be told from a node that never existed.
+//
+// So the hub keeps publishing, and reports separately how many nodes it can
+// actually hear.
+constexpr uint64_t kPresenceTimeoutUs =
+    static_cast<uint64_t>(CONFIG_NATKIT_NODE_PRESENCE_TIMEOUT_MS) * 1000ULL;
+
+// ⚠️ last_seen_us == 0 means never heard, not "heard at time zero". An entry can
+// be in_use with no packet behind it only transiently, but treating 0 as recent
+// at boot would report a node present before it has said anything.
+bool nodeIsPresent(const NodeState &node, uint64_t now_us) {
+  if (!node.in_use || node.last_seen_us == 0) {
+    return false;
+  }
+  // Saturating: the primary's esp_timer clock is monotonic, so now < last_seen
+  // should be impossible, but an unsigned wrap here would report a dead node as
+  // present forever, which is the exact failure this is here to end.
+  return now_us >= node.last_seen_us &&
+         (now_us - node.last_seen_us) <= kPresenceTimeoutUs;
+}
+
+uint8_t countNodesPresent(uint64_t now_us) {
+  const NodeState *nodes = espNowPrimaryNodes();
+  uint8_t present = 0;
+  for (size_t i = 0; i < kMaxTrackedNodes; ++i) {
+    if (nodeIsPresent(nodes[i], now_us)) {
+      ++present;
+    }
+  }
+  return present;
+}
+
 void fillPrimaryStatus(UplinkPrimaryStatus &out) {
   out = UplinkPrimaryStatus{};
   const CommandRelayStats &commands = commandRelayStats();
@@ -224,6 +269,9 @@ void fillPrimaryStatus(UplinkPrimaryStatus &out) {
   out.free_heap = static_cast<uint32_t>(esp_get_free_heap_size());
   out.min_free_heap = static_cast<uint32_t>(esp_get_minimum_free_heap_size());
   out.nodes_known = registryCount();
+  out.nodes_present =
+      countNodesPresent(static_cast<uint64_t>(esp_timer_get_time()));
+  out.nodes_present_valid = 1;
   out.nodes_rejected = registryRejections();
   out.unknown_packets = espNowPrimaryUnknownPackets();
   out.noise_floor_dbm = espNowPrimaryNoiseFloor();
@@ -373,6 +421,11 @@ void runPrimary() {
   (void)interval_s;
 
   uint32_t previous_frames[kMaxTrackedNodes] = {};
+  // Whether each node was present on the PREVIOUS pass, so the console says
+  // something once when a node leaves or returns instead of printing a "silent
+  // 4,215,880 ms" that scrolls past with everything else. An operator reads an
+  // edge; nobody reads a gauge that has been wrong for an hour.
+  bool was_present[kMaxTrackedNodes] = {};
   uint32_t ticks = 0;
   uint64_t next_status_us = 0;
 
@@ -429,6 +482,40 @@ void runPrimary() {
           node.last_seen_us == 0 ? 0 : (now - node.last_seen_us) / 1000;
       const uint32_t delta = node.data_frames - previous_frames[i];
       previous_frames[i] = node.data_frames;
+
+      // --- the hub noticing, once, that a node left or came back -------------
+      //
+      // ⚠️ THIS IS THE HALF THAT WAS MISSING (TEC-NATKIT-81). The "silent N ms"
+      // figure below has always been correct and has never been read: it is one
+      // number inside a line the hub prints for every node every second, so a leaf
+      // going dark looks exactly like a leaf that is fine unless somebody is
+      // diffing consecutive lines at the moment it happens. A WARN on the edge is
+      // a thing you can find afterwards, and it names the count that stopped.
+      const bool present = nodeIsPresent(node, now);
+      if (present != was_present[i]) {
+        was_present[i] = present;
+        if (present) {
+          ESP_LOGW(kTag,
+                   "node %" PRIu64 " is being heard (%lu data frames so far); "
+                   "%lu of %lu roster node(s) present",
+                   node.device_id, static_cast<unsigned long>(node.data_frames),
+                   static_cast<unsigned long>(countNodesPresent(now)),
+                   static_cast<unsigned long>(registryCount()));
+        } else {
+          ESP_LOGW(kTag,
+                   "node %" PRIu64 " (%02x:%02x:%02x:%02x:%02x:%02x) HAS GONE "
+                   "QUIET: nothing heard for %llu ms, stopped at %lu data frames. "
+                   "It stays on the roster and its status frame keeps being "
+                   "published from its last known state -- that frame is now "
+                   "HISTORY, not news. %lu of %lu roster node(s) present.",
+                   node.device_id, node.mac[0], node.mac[1], node.mac[2],
+                   node.mac[3], node.mac[4], node.mac[5],
+                   static_cast<unsigned long long>(silent_ms),
+                   static_cast<unsigned long>(node.data_frames),
+                   static_cast<unsigned long>(countNodesPresent(now)),
+                   static_cast<unsigned long>(registryCount()));
+        }
+      }
 
       ESP_LOGI(kTag,
                "node %" PRIu64 " (%02x:%02x:%02x:%02x:%02x:%02x): %lu data frames "

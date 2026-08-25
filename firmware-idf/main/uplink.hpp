@@ -167,6 +167,11 @@ struct UplinkPrimaryStatus {
   uint32_t epoch;
   uint32_t free_heap;
   uint32_t min_free_heap;
+  // ⚠️ THE ROSTER, NOT THE FLEET. This is registryCount(): how many nodes the hub
+  // has ever admitted and remembers in NVS. It is deliberately persistent — that
+  // is what makes a roster a roster, and what a seal freezes — so it does NOT fall
+  // when a leaf stops talking. Read alone it says the rig is complete when a board
+  // is dead on the bench (TEC-NATKIT-81). Pair it with nodes_present.
   uint32_t nodes_known;
   uint32_t nodes_rejected;      // packets from MACs the registry will not accept
   uint32_t unknown_packets;
@@ -201,7 +206,29 @@ struct UplinkPrimaryStatus {
   // diagnosable from the broker rather than from a console that resets the board.
   // 0 = fine, 0xff = this target has no sensor.
   uint8_t chip_temp_err;
-  uint8_t reserved[2];
+  // ⚠️ THE FLEET, as against nodes_known's roster: how many nodes the hub has
+  // actually HEARD inside the presence window. This is the number that falls when
+  // a board dies, and the discrepancy between the two is the whole finding of
+  // TEC-NATKIT-81 — a leaf went quiet for hours while nodes_known held at 4 and
+  // the hub kept composing a status frame for it out of its last known state.
+  //
+  // Two counts rather than one because they are different questions and both are
+  // wanted: "which nodes are mine" survives a reboot and a leaf's absence, "which
+  // nodes are here" is now. Expiring the ROSTER to make one number do both would
+  // be wrong twice over: a sealed rig would evict the very node it is sealed to
+  // accept, and it would then be unable to tell an absent node from an unknown one.
+  //
+  // ⚠️ `nodes_present_valid` exists because a legacy frame's spare bytes are ZERO,
+  // and zero is a legitimate reading here — every leaf gone is exactly the state
+  // this field is for. Without the flag, firmware too old to report it would be
+  // indistinguishable from a rig with nothing left alive, which is the more
+  // alarming of the two. 0 = this hub does not report presence; ignore the count.
+  uint8_t nodes_present;
+  uint8_t nodes_present_valid;
+  // ⚠️ NO SPARE BYTES REMAIN in the declared body: nodes_present took the last two
+  // that `reserved[2]` held. The next field either uses bytes 140..143 — real tail
+  // padding today, which must be DECLARED before it can be written, since padding
+  // is not guaranteed to be transmitted as anything in particular — or bumps V1.
   // Command relay (TEC-NATKIT-39). ⚠️ These are here rather than on the console
   // because THE PRIMARY'S CONSOLE CANNOT BE READ: the ESP32-S3 resets when its
   // native USB console is opened AND re-enumerates, so the reading process loses

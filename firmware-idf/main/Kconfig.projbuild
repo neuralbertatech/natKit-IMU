@@ -434,6 +434,27 @@ config NATKIT_ESPNOW_HEARTBEAT_MS
         queue are its own back-pressure, not the primary's loss, and from the
         receiving side alone the two are indistinguishable.
 
+config NATKIT_NODE_PRESENCE_TIMEOUT_MS
+    int "How long a node may go unheard before the hub stops counting it present"
+    default 30000
+    range 1000 600000
+    help
+        The window behind `nodes_present` in the hub's status frame. A node the
+        primary has not heard from -- no data frame, no heartbeat, no announce --
+        for longer than this stops being counted as part of the fleet, and the hub
+        logs the transition once rather than printing a growing "silent" figure
+        forever among everything else it prints.
+
+        It does NOT touch the registry. The roster is persistent on purpose, and a
+        node dropping off the air is exactly the case a sealed rig must keep
+        accepting when it comes back.
+
+        30 s by default, and the default is set by the known failure rather than by
+        the heartbeat: leaves on this rig go quiet for up to 18 s and return
+        (TEC-NATKIT-46), so anything near the 2 s heartbeat would spend its life
+        flapping and teach an operator to ignore it. A board that is actually gone
+        stays gone for hours (TEC-NATKIT-81), so nothing is lost by waiting.
+
 config NATKIT_TIME_BEACON_MS
     int "Primary timing broadcast interval (milliseconds)"
     default 1000
