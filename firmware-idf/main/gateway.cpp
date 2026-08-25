@@ -247,6 +247,93 @@ void republishStatus(UplinkType type, const uint8_t *payload, size_t length) {
   }
 }
 
+// How many 1 s loop passes between health publishes.
+constexpr uint32_t kHealthIntervalTicks = 5;
+uint32_t sHealthTick = 0;
+uint32_t sHealthPublished = 0;
+uint32_t sHealthRefused = 0;
+
+// One line of JSON on the free-form log topic -- the one the Logs page already
+// resolves through the schema registry, so this is readable with no frontend
+// change and no new wire format to get wrong.
+void publishOwnHealth(const UplinkReaderStats &rx, const GatewayNetStats &net) {
+  // ⚠️ 1536, and the compiler is the reason it is not 640. -Wformat-truncation
+  // proved the old size could clip the last field: ~35 keys plus five 64-bit
+  // values at 20 digits each and twenty-odd 32-bit ones at 10 leaves no room in
+  // 640. Static rather than on this task's stack -- the gateway loop's stack is
+  // sized for logging, not for a kilobyte of JSON.
+  static char body[1536];
+  const int written = std::snprintf(
+      body, sizeof(body),
+      "{\"schema_version\":\"nat.log.v1\",\"source\":\"gateway\",\"ok\":%s,"
+      "\"message\":\"gateway %s, rssi %d, mqtt %s, clock %s\","
+      "\"uptime_us\":%llu,\"heap_free\":%u,"
+      "\"wifi_up\":%s,\"rssi_dbm\":%d,\"wifi_drops\":%u,"
+      "\"mqtt_up\":%s,\"mqtt_drops\":%u,\"mqtt_errors\":%u,"
+      "\"clock_valid\":%s,"
+      "\"published\":%u,\"publishes_refused\":%u,\"bytes_published\":%llu,"
+      "\"serial_frames_ok\":%u,\"serial_data\":%u,\"serial_node_status\":%u,"
+      "\"serial_primary_status\":%u,\"serial_command\":%u,"
+      "\"crc_failures\":%u,\"bytes_read\":%llu,\"bytes_skipped\":%llu,"
+      "\"uplink_seq_gaps\":%u,\"overruns\":%u,"
+      "\"status_republished\":%u,\"status_refused\":%u,\"status_too_short\":%u,"
+      "\"frames_oversize\":%u,\"frames_no_route\":%u,"
+      "\"commands_received\":%u,\"commands_forwarded\":%u,"
+      "\"commands_malformed\":%u,\"command_subscriptions\":%u,"
+      "\"health_published\":%u,\"health_refused\":%u}",
+      // ⚠️ "ok" is false when this gateway cannot do its job, not when it is
+      // merely unhappy. No broker or no clock means nothing is being published;
+      // a weak signal that is still delivering is not a fault.
+      (net.mqtt_connected && gatewayTimeValid()) ? "true" : "false",
+      net.wifi_connected ? "up" : "DOWN", net.rssi,
+      net.mqtt_connected ? "up" : "DOWN",
+      gatewayTimeValid() ? "synced" : "NOT SYNCED",
+      static_cast<unsigned long long>(esp_timer_get_time()),
+      static_cast<unsigned>(esp_get_free_heap_size()),
+      net.wifi_connected ? "true" : "false", net.rssi,
+      static_cast<unsigned>(net.wifi_disconnects),
+      net.mqtt_connected ? "true" : "false",
+      static_cast<unsigned>(net.mqtt_disconnects),
+      static_cast<unsigned>(net.mqtt_errors),
+      gatewayTimeValid() ? "true" : "false",
+      static_cast<unsigned>(net.publishes_ok),
+      static_cast<unsigned>(net.publishes_failed),
+      static_cast<unsigned long long>(net.bytes_published),
+      static_cast<unsigned>(rx.frames_ok), static_cast<unsigned>(rx.frames_data),
+      static_cast<unsigned>(rx.frames_node_status),
+      static_cast<unsigned>(rx.frames_primary_status),
+      static_cast<unsigned>(rx.frames_command),
+      static_cast<unsigned>(rx.crc_failures),
+      static_cast<unsigned long long>(rx.bytes_read),
+      static_cast<unsigned long long>(rx.bytes_skipped),
+      static_cast<unsigned>(rx.uplink_seq_gaps),
+      static_cast<unsigned>(rx.overruns),
+      static_cast<unsigned>(sStatusPublished),
+      static_cast<unsigned>(sStatusRefused),
+      static_cast<unsigned>(sStatusTooShort),
+      static_cast<unsigned>(sFramesOversize),
+      static_cast<unsigned>(sFramesNoRoute),
+      static_cast<unsigned>(sCommandsReceived),
+      static_cast<unsigned>(sCommandsForwarded),
+      static_cast<unsigned>(sCommandsMalformed),
+      static_cast<unsigned>(sCommandSubscriptions),
+      static_cast<unsigned>(sHealthPublished),
+      static_cast<unsigned>(sHealthRefused));
+  if (written <= 0 || static_cast<size_t>(written) >= sizeof(body)) {
+    // Truncated JSON will not parse, so it is dropped whole rather than sent
+    // half-formed -- the same rule command_relay applies to oversized args.
+    ++sHealthRefused;
+    return;
+  }
+  std::snprintf(sTopic, sizeof(sTopic),
+                uplinkTopicTemplate(UplinkType::kCommandLog), deviceId());
+  if (gatewayPublish(sTopic, body, static_cast<size_t>(written))) {
+    ++sHealthPublished;
+  } else {
+    ++sHealthRefused;
+  }
+}
+
 void onFrame(UplinkType type, uint64_t stream_id, const uint8_t *payload,
              size_t length) {
   switch (type) {
@@ -419,6 +506,28 @@ void runGateway() {
              static_cast<unsigned long>(net.publishes_failed),
              static_cast<unsigned long>(net.wifi_disconnects),
              static_cast<unsigned long>(net.mqtt_disconnects));
+
+    // --- the gateway's own health, out to the broker (TEC-NATKIT-93) ---------
+    //
+    // Every other device in the rig reports itself and this one did not, which
+    // matters because the gateway is the hop that can fail INVISIBLY from the
+    // server's point of view: when its WiFi decayed to -91 dBm the whole rig
+    // stopped publishing, and the only reason it was diagnosable is that
+    // somebody had a serial cable on it. A fielded rig has nobody at the bench.
+    //
+    // ⚠️ A JSON log line, NOT NatKitPrimaryStatusV1. That struct's fields are
+    // the hub's -- node counts, coherence sums, registry state -- and a gateway
+    // filling in the ones that happen to fit would decode cleanly and describe
+    // something that does not exist.
+    //
+    // ⚠️ Slower than the hub's 1 Hz, deliberately. The hub's status is the rig's
+    // instrument and gets differenced over windows; this is a health check on
+    // one box, over a link already seen to fail under load, and it should not
+    // contribute to the thing it is there to report.
+    if (++sHealthTick >= kHealthIntervalTicks) {
+      sHealthTick = 0;
+      publishOwnHealth(rx, net);
+    }
 
     // The republished telemetry, counted separately from the data stream. Without
     // this line the fix for TEC-NATKIT-88 would itself be unverifiable from the
