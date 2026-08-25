@@ -44,6 +44,23 @@ esp_err_t commandRelayStart();
 // silently.
 void commandRelayRefreshSubscriptions();
 
+// Hands in a command that arrived by some route OTHER than this node's own MQTT
+// subscription -- today, over the serial uplink from a gateway (TEC-NATKIT-92).
+//
+// ⚠️ THE SECOND WAY IN, NOT A SECOND DECISION-MAKER. Everything past this point
+// is the same code the MQTT path uses: same queue, same parse, same relay, same
+// counters, same retransmission. A primary behind a gateway and a primary with
+// its own network must not be able to behave differently about what a command
+// MEANS -- only about how it arrived.
+//
+// `device_id` is the node the command is addressed to. ⚠️ The caller must have
+// taken it from the TOPIC the command arrived on and never from the document,
+// which carries no device field; see deviceIdFromTopic in the implementation.
+//
+// Returns false if the document is empty, too large, or the queue is full, and
+// counts it the same way a malformed MQTT message is counted.
+bool commandRelaySubmit(uint64_t device_id, const char *document, size_t length);
+
 // A device acknowledged a command. Stops the retransmissions for it.
 void commandRelayNoteAck(uint64_t device_id, const char *command_id);
 

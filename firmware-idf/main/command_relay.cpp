@@ -20,6 +20,15 @@ namespace {
 
 constexpr char kTag[] = "natkit-cmd";
 
+// Whether this image publishes and subscribes for itself. False means it is fed
+// by a gateway over the serial uplink, and has no broker session to subscribe on.
+#if defined(CONFIG_NATKIT_PRIMARY_WIFI_UPLINK) || \
+    defined(CONFIG_NATKIT_PRIMARY_ETH_UPLINK)
+constexpr bool kHasOwnNetwork = true;
+#else
+constexpr bool kHasOwnNetwork = false;
+#endif
+
 // The topic the backend publishes on. ⚠️ "receiving" is the bridge's direction,
 // not ours: the bridge republishes every Kafka record under natKit/receiving/,
 // so what the server SENDS arrives here on receiving/ and what we send goes out
@@ -133,6 +142,32 @@ struct InboundMessage {
 
 QueueHandle_t sInbound = nullptr;
 
+// The copy-and-queue half, shared by both ways in. Callers differ only in how
+// they learned the device id; from here down there is one path.
+bool enqueueDocument(uint64_t device_id, const char *payload,
+                     size_t payload_len) {
+  if (payload_len == 0 || payload_len >= kMaxDocument || sInbound == nullptr) {
+    ++sStats.malformed;
+    return false;
+  }
+  // Allocated from the heap rather than this task's stack for the same reason.
+  auto *message = static_cast<InboundMessage *>(malloc(sizeof(InboundMessage)));
+  if (message == nullptr) {
+    ++sStats.malformed;
+    return false;
+  }
+  message->device_id = device_id;
+  message->length = static_cast<uint16_t>(payload_len);
+  std::memcpy(message->document, payload, payload_len);
+  message->document[payload_len] = '\0';
+  if (xQueueSend(sInbound, &message, 0) != pdTRUE) {
+    ++sStats.malformed;
+    free(message);
+    return false;
+  }
+  return true;
+}
+
 void onMessage(const char *topic, size_t topic_len, const char *payload,
                size_t payload_len) {
   ++sStats.received;
@@ -142,24 +177,7 @@ void onMessage(const char *topic, size_t topic_len, const char *payload,
     ++sStats.malformed;
     return;
   }
-  if (payload_len == 0 || payload_len >= kMaxDocument || sInbound == nullptr) {
-    ++sStats.malformed;
-    return;
-  }
-  // Allocated from the heap rather than this task's stack for the same reason.
-  auto *message = static_cast<InboundMessage *>(malloc(sizeof(InboundMessage)));
-  if (message == nullptr) {
-    ++sStats.malformed;
-    return;
-  }
-  message->device_id = device_id;
-  message->length = static_cast<uint16_t>(payload_len);
-  std::memcpy(message->document, payload, payload_len);
-  message->document[payload_len] = '\0';
-  if (xQueueSend(sInbound, &message, 0) != pdTRUE) {
-    ++sStats.malformed;
-    free(message);
-  }
+  enqueueDocument(device_id, payload, payload_len);
 }
 
 void handleMessage(const uint64_t device_id, char *document) {
@@ -314,20 +332,54 @@ void relayTask(void *) {
 }
 
 esp_err_t commandRelayStart() {
-  gatewaySetMessageHandler(onMessage);
-  commandRelayRefreshSubscriptions();
-  // Its own task rather than the primary's 1 Hz console loop: a retry interval
-  // measured in seconds would make a command that needed one arrive after the
-  // server had already stopped waiting.
+  // ⚠️ THE QUEUE BEFORE THE SUBSCRIPTION, not after. Installing the handler and
+  // subscribing first left a window in which an arriving command found
+  // sInbound == nullptr and was counted MALFORMED -- a command discarded and
+  // then blamed on the sender. Narrow, but it is the first command after boot
+  // that falls into it, which is exactly the one somebody is watching for.
+  //
   // 6144, and generously: this task parses JSON, formats 64-bit values into log
   // lines, and holds a CommandFrame or two. It is the only place command work
   // happens, so it is the only stack that has to be right.
   sInbound = xQueueCreate(4, sizeof(InboundMessage *));
+  // Its own task rather than the primary's 1 Hz console loop: a retry interval
+  // measured in seconds would make a command that needed one arrive after the
+  // server had already stopped waiting.
   xTaskCreate(relayTask, "cmd-relay", 6144, nullptr, 4, nullptr);
+
+  // ⚠️ ONLY WHEN THIS PRIMARY HAS A NETWORK OF ITS OWN. Behind a gateway there
+  // is no MQTT client, and subscribing anyway would leave `subscriptions`
+  // counting topics nobody is listening to -- a counter reporting the wrong
+  // thing, on the one path where the operator most needs to know whether
+  // commands can arrive. Commands reach a gateway-fed primary through
+  // commandRelaySubmit() instead.
+  if (kHasOwnNetwork) {
+    gatewaySetMessageHandler(onMessage);
+    commandRelayRefreshSubscriptions();
+  } else {
+    ESP_LOGI(kTag,
+             "no MQTT on this primary: commands arrive over the serial uplink "
+             "(TEC-NATKIT-92), not by subscription");
+  }
   return ESP_OK;
 }
 
 void commandRelayRefreshSubscriptions() {
+  // ⚠️ THE GUARD LIVES HERE, NOT AT THE CALL SITES. It was in commandRelayStart()
+  // only, and primary.cpp calls this again every second from its status loop --
+  // so a gateway-fed primary went on "subscribing" once a second with no broker
+  // session and reported commands_subscriptions = 5.
+  //
+  // Caught by decoding the primary's own status frame off the broker after the
+  // first successful command: every other counter reconciled and that one did
+  // not. A counter that says a rig can receive commands by a route it does not
+  // have is worse than no counter, because it is the number you would check to
+  // find out why a command never arrived.
+  if (!kHasOwnNetwork) {
+    sStats.subscriptions = 0;
+    return;
+  }
+
   const RegistryEntry *entries = registryEntries();
   uint32_t subscribed = 0;
   char topic[96];
@@ -342,6 +394,16 @@ void commandRelayRefreshSubscriptions() {
     }
   }
   sStats.subscriptions = subscribed;
+}
+
+bool commandRelaySubmit(uint64_t device_id, const char *document,
+                        size_t length) {
+  // Counted as received on the same counter as an MQTT arrival, deliberately:
+  // `received` should mean "a command reached this primary", not "a command
+  // reached this primary by the route I was thinking of". A rig behind a gateway
+  // would otherwise report zero commands received while relaying them fine.
+  ++sStats.received;
+  return enqueueDocument(device_id, document, length);
 }
 
 const CommandRelayStats &commandRelayStats() { return sStats; }

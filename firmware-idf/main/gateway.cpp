@@ -96,6 +96,90 @@ uint32_t sFramesOversize = 0;
 uint32_t sStatusPublished = 0;
 uint32_t sStatusRefused = 0;
 uint32_t sStatusTooShort = 0;
+// The downward command path (TEC-NATKIT-92).
+uint32_t sCommandsReceived = 0;   // MQTT messages on a command topic
+uint32_t sCommandsForwarded = 0;  // ... written down the wire as kCommand
+uint32_t sCommandsMalformed = 0;  // not addressable, or too large for a frame
+uint32_t sCommandSubscriptions = 0;
+
+// The command topic the backend publishes on. ⚠️ `natKit/receiving/` is the
+// server-to-device direction and is NOT the one we publish telemetry on; the
+// bridge republishes every Kafka record under it.
+constexpr char kCommandTopicTemplate[] =
+    "natKit/receiving/Command-%" PRIu64 "-Json-NatExecutionCommandV1";
+
+// Pulls the addressed device out of the topic.
+//
+// ⚠️ FROM THE TOPIC, NEVER THE PAYLOAD -- the same rule command_relay.cpp
+// records on the primary, and for the same reason: the command document has no
+// device field, addressing is the topic's job, and reading an id out of the body
+// would let a command published on one device's topic be executed by another.
+bool commandDeviceFromTopic(const char *topic, size_t topic_len,
+                            uint64_t &out) {
+  static constexpr char kPrefix[] = "natKit/receiving/Command-";
+  constexpr size_t kPrefixLen = sizeof(kPrefix) - 1;
+  if (topic_len <= kPrefixLen || std::strncmp(topic, kPrefix, kPrefixLen) != 0) {
+    return false;
+  }
+  uint64_t value = 0;
+  size_t i = kPrefixLen;
+  for (; i < topic_len && topic[i] >= '0' && topic[i] <= '9'; ++i) {
+    value = value * 10 + static_cast<uint64_t>(topic[i] - '0');
+  }
+  if (i == kPrefixLen || value == 0) {
+    return false;
+  }
+  out = value;
+  return true;
+}
+
+// A command from the broker, on its way to a node behind the primary.
+//
+// ⚠️ Runs on the MQTT task, and does nothing but frame and queue. uplinkSend()
+// never blocks -- a full queue drops its oldest -- so this cannot stall
+// publishing, which is the data path.
+void onCommandMessage(const char *topic, size_t topic_len, const char *payload,
+                      size_t payload_len) {
+  ++sCommandsReceived;
+  uint64_t device_id = 0;
+  if (!commandDeviceFromTopic(topic, topic_len, device_id)) {
+    ++sCommandsMalformed;
+    return;
+  }
+  if (payload_len == 0 || payload_len > kUplinkMaxPayload) {
+    ++sCommandsMalformed;
+    return;
+  }
+  if (uplinkSend(UplinkType::kCommand, device_id, payload, payload_len)) {
+    ++sCommandsForwarded;
+  } else {
+    ++sCommandsMalformed;
+  }
+}
+
+// Subscribes for every node we have heard a status frame about.
+//
+// ⚠️ PER NODE, NOT A WILDCARD. A wildcard would also deliver commands for
+// devices on other rigs sharing the broker, and this gateway would forward them
+// to a primary that has never heard of them. Same decision as the primary's own
+// subscription logic.
+//
+// The node list comes from the kNodeStatus frames already arriving, so there is
+// no second registry to keep in step with the primary's.
+void refreshCommandSubscriptions() {
+  uint32_t subscribed = 0;
+  char topic[96];
+  for (const NodeClock &node : sNodes) {
+    if (!node.in_use) {
+      continue;
+    }
+    std::snprintf(topic, sizeof(topic), kCommandTopicTemplate, node.device_id);
+    if (gatewaySubscribe(topic)) {
+      ++subscribed;
+    }
+  }
+  sCommandSubscriptions = subscribed;
+}
 
 NodeClock *nodeFor(uint64_t device_id) {
   for (NodeClock &node : sNodes) {
@@ -222,6 +306,14 @@ void onFrame(UplinkType type, uint64_t stream_id, const uint8_t *payload,
       gatewayPublish(sTopic, sFrame, length);
       return;
     }
+    case UplinkType::kCommand: {
+      // ⚠️ WE ARE THE SENDER OF THIS TYPE, NOT A RECEIVER. Seeing one arrive
+      // means the primary echoed it back, or something else is writing on the
+      // line -- neither is normal, and acting on it would loop a command back
+      // toward the broker. Counted by the reader as frames_command so it is
+      // visible rather than silent, and otherwise ignored here.
+      return;
+    }
     case UplinkType::kData: {
       NodeClock *node = nodeFor(stream_id);
       if (node == nullptr) {
@@ -278,9 +370,27 @@ void runGateway() {
     ESP_LOGE(kTag, "serial reader did not start");
     idleStatusLoop("gateway (no serial)");
   }
+  // ⚠️ The gateway is a WRITER too now (TEC-NATKIT-92). Same queue, same
+  // drop-oldest policy and the same counters the primary's uplink uses -- the
+  // wire is one link and it should be accounted for once, not twice.
+  //
+  // Started AFTER the reader on purpose: uplinkUartEnsure() is idempotent and
+  // either order works, but the reader is the data path and should be draining
+  // before anything else competes for the port.
+  if (uplinkStart() != ESP_OK) {
+    ESP_LOGE(kTag,
+             "uplink writer did not start -- device commands cannot reach the "
+             "rig, though data will keep arriving");
+  }
+  gatewaySetMessageHandler(onCommandMessage);
 
   while (true) {
     vTaskDelay(pdMS_TO_TICKS(1000));
+
+    // A node that first reports after startup would otherwise be uncommandable
+    // until this gateway reboots, silently -- the same hazard the primary's own
+    // refresh exists to close.
+    refreshCommandSubscriptions();
 
     const UplinkReaderStats &rx = uplinkReaderStats();
     const GatewayNetStats &net = gatewayNetStats();
@@ -314,6 +424,14 @@ void runGateway() {
     // this line the fix for TEC-NATKIT-88 would itself be unverifiable from the
     // device -- and "the panel is blank" would still not say whether the frames
     // never arrived, were never published, or were refused by the broker.
+    ESP_LOGI(kTag,
+             "commands: %lu received, %lu forwarded to the wire, %lu malformed "
+             "| %lu topics subscribed",
+             static_cast<unsigned long>(sCommandsReceived),
+             static_cast<unsigned long>(sCommandsForwarded),
+             static_cast<unsigned long>(sCommandsMalformed),
+             static_cast<unsigned long>(sCommandSubscriptions));
+
     ESP_LOGI(kTag,
              "status republished: %lu published, %lu refused by mqtt, %lu too "
              "short to address | %lu frames oversize, %lu no route",

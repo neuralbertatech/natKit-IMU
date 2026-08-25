@@ -67,6 +67,20 @@ enum class UplinkType : uint8_t {
   // The primary's own health, including what it dropped and the rig's
   // time-coherence metric (#315).
   kPrimaryStatus = 3,
+  // ⚠️ THE ONLY TYPE THAT TRAVELS GATEWAY -> PRIMARY (TEC-NATKIT-92). Payload is
+  // the command JSON exactly as the backend published it, and `stream_id` is the
+  // device it is addressed to -- taken from the TOPIC the gateway received it
+  // on, never from the document, which has no device field.
+  //
+  // The frame format was directionless already: magic, version, type, id,
+  // sequence, length, CRC say nothing about which way they are going. What was
+  // missing was a reader on the primary and a writer on the gateway, not a
+  // protocol.
+  //
+  // ⚠️ It is never published to MQTT in either direction. It is consumed at the
+  // primary and turned into an ESP-NOW unicast; the ANSWER comes back up as
+  // kCommandLog, which is a different type on a different topic.
+  kCommand = 5,
 };
 
 // What the gateway needs about one node: who it is, whether we are losing it, and
@@ -232,6 +246,19 @@ struct UplinkStats {
   uint64_t bytes_sent = 0;
   uint32_t queue_high_water = 0;
 };
+
+// Installs and configures the uplink UART, exactly once.
+//
+// ⚠️ EXISTS BECAUSE BOTH ENDS NOW READ AND WRITE THE SAME PORT (TEC-NATKIT-92),
+// and ESP-IDF allows one driver install per UART. Before the downward command
+// path there was a clean split -- the primary called uplinkStart() and installed
+// with a TX buffer, the gateway called uplinkReaderStart() and installed with RX
+// only -- and each side called exactly one of them. Now each side calls both,
+// so the second install would fail on an already-installed driver.
+//
+// Idempotent, and sized for BOTH directions rather than for whichever caller
+// happens to run first. Safe to call from either, in either order.
+esp_err_t uplinkUartEnsure();
 
 // Brings up the uplink UART and its drain task.
 esp_err_t uplinkStart();

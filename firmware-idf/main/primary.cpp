@@ -14,6 +14,7 @@
 #include "command_relay.hpp"
 #include "registry.hpp"
 #include "uplink.hpp"
+#include "uplink_reader.hpp"
 #include "esp_log.h"
 #include "esp_timer.h"
 #include "espnow_link.hpp"
@@ -248,6 +249,24 @@ void fillPrimaryStatus(UplinkPrimaryStatus &out) {
 
 }  // namespace
 
+// A frame arriving FROM the gateway. The only type that travels this way.
+//
+// ⚠️ Runs on the reader task, so it does the same thing the MQTT handler does:
+// hand the document over and return. The relay owns a stack sized for parsing;
+// this one is not it.
+void onDownlinkFrame(UplinkType type, uint64_t stream_id,
+                     const uint8_t *payload, size_t length) {
+  if (type != UplinkType::kCommand) {
+    // Nothing else is expected downward. Counted by the reader as a valid frame
+    // either way, so a mistake here shows up as frames_ok climbing with no
+    // commands relayed rather than as silence.
+    return;
+  }
+  // ⚠️ stream_id is the addressed device, taken by the gateway from the topic.
+  // Not re-derived from the document, which has no device field.
+  commandRelaySubmit(stream_id, reinterpret_cast<const char *>(payload), length);
+}
+
 void runPrimary() {
   ESP_LOGI(kTag, "primary: device %" PRIu64 ", ESP-NOW hub", deviceId());
 
@@ -373,6 +392,22 @@ void runPrimary() {
   // during startup is already subscribable. Refreshed every second below, because
   // a node that announces later would otherwise be uncommandable until reboot.
   commandRelayStart();
+
+  // The downward command path (TEC-NATKIT-92). Behind a gateway this primary has
+  // no broker session at all, so a command reaches it as a kCommand frame on the
+  // uplink's RX -- the pin claimed at design time for exactly this, and until now
+  // never read from.
+  //
+  // ⚠️ Only when there IS a wire. Under the Ethernet and #373 WiFi uplinks the
+  // exit is the radio, uplinkUartEnsure() installs nothing, and commands arrive
+  // by subscription as they always did.
+  if (!kWifiUplink && !kEthUplink) {
+    if (uplinkReaderStart(onDownlinkFrame) != ESP_OK) {
+      ESP_LOGE(kTag,
+               "downlink reader did not start -- device commands cannot reach "
+               "this rig, though data will keep flowing out");
+    }
+  }
 
   while (true) {
     vTaskDelay(pdMS_TO_TICKS(1000));
