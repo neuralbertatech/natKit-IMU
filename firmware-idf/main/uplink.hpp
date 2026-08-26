@@ -149,6 +149,25 @@ struct UplinkNodeStatus {
   // while a fifth of a leaf's frames were being discarded here.
   uint32_t publish_no_sync;   // no clock fit for that node yet
   uint32_t publish_no_shift;  // fit present but rewriteFrameTimestamps refused
+  // ⚠️ THE RAW ACCUMULATORS, published alongside the derived figures
+  // (TEC-NATKIT-52). The derived ones -- residual_rms_ns and the rest -- are
+  // averages SINCE THE PRIMARY BOOTED, computed in here where nothing outside can
+  // difference them. Two readings a day apart differ mostly because more history
+  // accumulated, not because the rig changed, which makes them useless for the
+  // one thing they keep being needed for: comparing two conditions.
+  //
+  // With the sums a consumer differences two samples and computes the mean and
+  // standard deviation OVER THAT WINDOW, exactly as beacons.py already does for
+  // beacon loss. A standard deviation is not a counter, which is why sampling and
+  // subtracting the derived value cannot substitute for this.
+  //
+  // Sums are over TYPICAL samples only, matching probe_error_count -- the
+  // excursion tail is counted separately on purpose (see NodeState), so a 0.7%
+  // tail cannot set the accuracy figure.
+  int64_t probe_error_sum_us;
+  uint64_t probe_error_sum_sq;
+  uint32_t probe_error_count;
+  uint32_t reserved_probe;  // keeps the 8-byte alignment explicit
 };
 
 // ⚠️ THESE SIZES ARE THE WIRE FORMAT. Every field added since 2026-08-17 has gone
@@ -157,7 +176,7 @@ struct UplinkNodeStatus {
 // plausible nonsense on the far side: a spurious 4 bytes in the primary layout once
 // came to the right total by coincidence and shifted every field after it, and the
 // size check passed. Assert it instead.
-static_assert(sizeof(UplinkNodeStatus) == 168,
+static_assert(sizeof(UplinkNodeStatus) == 192,
               "UplinkNodeStatus is published binary; use its reserved bytes rather "
               "than growing it, or bump the topic's V1 and update every decoder");
 
@@ -258,20 +277,48 @@ struct UplinkPrimaryStatus {
   // survives the restart; without it, "uptime went backwards" is the entire
   // diagnosis available.
   uint32_t reset_reason;
+  // ⚠️ Same reasoning as the per-leaf sums above (TEC-NATKIT-52): coherence_typical_us
+  // and coherence_bound_us are averages since boot, so they cannot compare two
+  // conditions. Measured 2026-08-18, the primary had ~20 h of uptime and reported
+  // 66 us typical -- a figure that averages TEC-NATKIT-50's interference episode
+  // together with the clean period after it.
+  //
+  // coherence_worst_us needs no companion: it is a high-water mark and is already
+  // windowable by differencing, which is how beacons.py reports worst_rose_us.
+  int64_t spread_sum_us;
+  uint64_t spread_sum_sq;
+  uint32_t markers_paired;
+  uint32_t reserved_coherence;  // keeps the 8-byte alignment explicit
 };
 
-static_assert(sizeof(UplinkPrimaryStatus) == 144,
+static_assert(sizeof(UplinkPrimaryStatus) == 168,
               "UplinkPrimaryStatus is published binary; use its reserved bytes "
               "rather than growing it, or bump the topic's V1");
 
+// A SNAPSHOT of the uplink counters, not a live view.
+//
+// ⚠️ Returned by value on purpose (TEC-NATKIT-75). Four of these are written from
+// TWO tasks -- the ESP-NOW receive callback on the WiFi task and the 1 Hz status
+// loop both call uplinkSend() -- and a plain `++` on a shared word loses
+// increments to the race. On the live rig frames_queued read ~30 BELOW frames_sent
+// with frames_dropped at 0, which the code makes otherwise impossible.
+//
+// The atomics live inside uplink.cpp rather than in this struct so that the wire
+// side stays a plain POD, and so a reader gets figures that were all read at
+// roughly the same moment instead of fields that can move between two reads.
 struct UplinkStats {
+  // ⚠️ Producer side: written from more than one task, so accumulated atomically.
   uint32_t frames_queued = 0;
-  uint32_t frames_sent = 0;
   uint32_t frames_dropped = 0;   // queue was full; OLDEST discarded
-  uint32_t write_timeouts = 0;
   uint32_t oversize_rejected = 0;
-  uint64_t bytes_sent = 0;
   uint32_t queue_high_water = 0;
+  // ⚠️ Drain side: written ONLY by drainTask, which is why these were never the
+  // ones that drifted. Left as plain words deliberately -- bytes_sent is 64-bit
+  // and std::atomic<uint64_t> on a 32-bit target is not lock-free, so making it
+  // atomic would pull libatomic in for no defect.
+  uint32_t frames_sent = 0;
+  uint32_t write_timeouts = 0;
+  uint64_t bytes_sent = 0;
 };
 
 // Installs and configures the uplink UART, exactly once.
@@ -300,7 +347,7 @@ esp_err_t uplinkStart();
 bool uplinkSend(UplinkType type, uint64_t stream_id, const void *payload,
                 size_t payload_size);
 
-const UplinkStats &uplinkStats();
+UplinkStats uplinkStats();
 
 // The MQTT topic template for a frame type -- one "%" PRIu64 for the device id.
 //
@@ -317,6 +364,39 @@ constexpr size_t kUplinkMaxPayload =
     kFrameHeaderSize + kMaxSamplesPerFrame * kSampleSize;
 constexpr size_t kUplinkMaxFrame =
     kUplinkHeaderSize + kUplinkMaxPayload + kUplinkCrcSize;
+
+// ⚠️ THE OFFSETS THE HOST DECODER READS, asserted here by the TARGET compiler.
+//
+// libnatkit-core decodes these frames byte by byte at hard-coded offsets, because
+// they are a memcpy of these structs built for xtensa and a struct declared on the
+// host would make correctness depend on two compilers agreeing about padding. The
+// weakness of that approach is that the offsets live in a different repository
+// from the layout they describe, so a field inserted here goes unnoticed there
+// until somebody reads a plausible wrong number off a panel.
+//
+// These asserts close that gap from this side: add or reorder a field and the
+// FIRMWARE stops compiling, naming the offset that moved. The matching constants
+// are in NatKitNodeStatusV1Schema.cpp / NatKitPrimaryStatusV1Schema.cpp.
+static_assert(offsetof(UplinkNodeStatus, device_id) == 0, "node: device_id moved");
+static_assert(offsetof(UplinkNodeStatus, mac) == 8, "node: mac moved");
+static_assert(offsetof(UplinkNodeStatus, last_seen_us) == 40, "node: last_seen_us moved");
+static_assert(offsetof(UplinkNodeStatus, sync) == 48, "node: sync moved");
+static_assert(offsetof(UplinkNodeStatus, sync_valid) == 136, "node: sync_valid moved");
+static_assert(offsetof(UplinkNodeStatus, leaf_frames_built) == 144, "node: leaf_frames_built moved");
+static_assert(offsetof(UplinkNodeStatus, publish_no_shift) == 164, "node: publish_no_shift moved");
+static_assert(offsetof(UplinkNodeStatus, probe_error_sum_us) == 168, "node: probe sums moved");
+static_assert(offsetof(UplinkNodeStatus, probe_error_sum_sq) == 176, "node: probe sums moved");
+static_assert(offsetof(UplinkNodeStatus, probe_error_count) == 184, "node: probe sums moved");
+
+static_assert(offsetof(UplinkPrimaryStatus, device_id) == 0, "primary: device_id moved");
+static_assert(offsetof(UplinkPrimaryStatus, uptime_us) == 8, "primary: uptime_us moved");
+static_assert(offsetof(UplinkPrimaryStatus, bytes_sent) == 56, "primary: bytes_sent moved");
+static_assert(offsetof(UplinkPrimaryStatus, coherence_typical_us) == 64, "primary: coherence moved");
+static_assert(offsetof(UplinkPrimaryStatus, commands_received) == 88, "primary: command counters moved");
+static_assert(offsetof(UplinkPrimaryStatus, reset_reason) == 136, "primary: reset_reason moved");
+static_assert(offsetof(UplinkPrimaryStatus, spread_sum_us) == 144, "primary: coherence sums moved");
+static_assert(offsetof(UplinkPrimaryStatus, spread_sum_sq) == 152, "primary: coherence sums moved");
+static_assert(offsetof(UplinkPrimaryStatus, markers_paired) == 160, "primary: coherence sums moved");
 
 static_assert(sizeof(UplinkNodeStatus) <= kUplinkMaxPayload,
               "node status must fit the frame the queue is sized for");

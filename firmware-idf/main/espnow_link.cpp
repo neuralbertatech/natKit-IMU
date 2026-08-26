@@ -467,6 +467,55 @@ constexpr uint8_t kMaxChannel = 13;
 // so like the channel survey it costs nothing that was not already being lost --
 // and it uses the DATA FRAMES ALREADY BEING SENT as its probes rather than adding
 // traffic.
+// How many sweeps in a row have measured nothing, for the backoff below. Reset as
+// soon as one succeeds.
+uint32_t sInconclusiveSweeps = 0;
+// 30 s, 60 s, 90 s, then 120 s forever. Long enough that a wedged rig is idle
+// rather than transmitting, short enough that unplugging and replugging the hub is
+// noticed within a couple of minutes.
+constexpr uint32_t kSweepBackoffBaseS = 30;
+
+// An operator's chosen transmit power, and whether they have chosen one.
+//
+// ⚠️ PINNING IS THE WHOLE POINT, not a detail of the implementation. The
+// automatic sweep re-runs whenever sends start failing, and the board this was
+// written for is one whose sends fail at every power -- so a hand-set level that
+// the sweep is free to overwrite is a level that survives until the next bad
+// interval and no longer. An override that does not stick cannot be used to test
+// whether a power works, which is the only reason to have one.
+bool sTxPowerPinned = false;
+
+int8_t currentTxPowerQuarterDbm() {
+  int8_t power = 0;
+  if (esp_wifi_get_max_tx_power(&power) != ESP_OK) {
+    return static_cast<int8_t>(sStats.tx_power_chosen_quarter_dbm);
+  }
+  return power;
+}
+
+// Whether the link has stopped getting through since the last check.
+//
+// ⚠️ A RATE OVER THIS INTERVAL, not a total. send_failures is cumulative since
+// boot and is routinely in the thousands after a bad spell, so any absolute test
+// on it fires forever once it has fired once -- the same trap the host-side
+// counters kept falling into.
+bool sendsAreFailing() {
+  static uint32_t last_sent = 0;
+  static uint32_t last_failed = 0;
+  const uint32_t sent = sStats.packets_sent - last_sent;
+  const uint32_t failed = sStats.send_failures - last_failed;
+  last_sent = sStats.packets_sent;
+  last_failed = sStats.send_failures;
+
+  // Nothing attempted tells us nothing. Don't re-sweep on an idle interval.
+  if (sent + failed < 20) {
+    return false;
+  }
+  // Two thirds failing is well past "a few retries" and well short of demanding
+  // perfection, which on this rig is not available at any power.
+  return failed * 3 > (sent + failed) * 2;
+}
+
 void sweepTxPower() {
   // Ascending, coarsely: 2, 5, 8.5, 11, 14, 17, 19.5 dBm. Fine steps would cost
   // time without changing the answer -- the transition from saturated to sane is
@@ -477,6 +526,16 @@ void sweepTxPower() {
   int8_t best = kLevels[0];
   uint32_t best_pct = 0;
   bool any = false;
+  // ⚠️ The power in force BEFORE the sweep, so an inconclusive sweep can actually
+  // put it back. Without this, "leave the power as it was" left the radio at the
+  // LAST level tried -- 19.5 dBm, maximum -- because the loop's final
+  // set_max_tx_power call is never undone. Combined with an immediate retry that
+  // meant continuous transmission at full power: the boards ran hot and the
+  // channel was hammered, which is a worse failure than the latch it replaced.
+  int8_t power_before = 0;
+  if (esp_wifi_get_max_tx_power(&power_before) != ESP_OK) {
+    power_before = kLevels[0];
+  }
   ESP_LOGI(kTag, "sweeping transmit power, %lu ms per level",
            static_cast<unsigned long>(dwell));
 
@@ -509,6 +568,31 @@ void sweepTxPower() {
       any = true;
     }
   }
+
+  // ⚠️ IF NOTHING ACKED AT ANY LEVEL, THE SWEEP LEARNED NOTHING (TEC-NATKIT-84).
+  //
+  // `best` is initialised to kLevels[0] -- the FLOOR -- and only replaced when a
+  // level beats the previous best percentage. So a sweep in which every level
+  // measures 0% leaves `best` at 2.0 dBm and then latches it forever, because
+  // tx_power_swept is set unconditionally below and nothing ever clears it. That
+  // is the worst possible outcome dressed as a decision: the leaf goes on hearing
+  // the primary perfectly, reports a locked clock, and cannot deliver a frame.
+  //
+  // Observed 2026-08-24: three leaves rebooted, all three came back at the floor
+  // with thousands of tx failures, and a power cycle re-rolled the same dice.
+  //
+  // So: keep whatever power the radio booted with, say so, and DO NOT latch --
+  // the next pass round the loop tries again.
+  if (!any) {
+    esp_wifi_set_max_tx_power(power_before);
+    ESP_LOGW(kTag,
+             "transmit power sweep inconclusive: no level acknowledged anything. "
+             "Restored %.1f dBm and backing off rather than asserting the floor",
+             power_before / 4.0);
+    sInconclusiveSweeps++;
+    return;
+  }
+  sInconclusiveSweeps = 0;
 
   esp_wifi_set_max_tx_power(best);
   sStats.tx_power_chosen_quarter_dbm = static_cast<uint8_t>(best);
@@ -574,10 +658,41 @@ void announceTask(void *) {
         now_us - last_beacon > kRescanAfterSilenceUs;
 
 #if CONFIG_NATKIT_TX_POWER_SWEEP
-    // Once, after the hub is found: there is nothing to measure ACKs against
-    // until there is something to acknowledge them.
-    if (sPrimaryKnown && !sStats.tx_power_swept) {
+    // After the hub is found: there is nothing to measure ACKs against until
+    // there is something to acknowledge them.
+    //
+    // ⚠️ NO LONGER ONCE PER BOOT (TEC-NATKIT-84). A chosen power is only right for
+    // the geometry it was measured in, and the failure it produces is silent and
+    // permanent -- rx keeps working, so the leaf looks healthy while delivering
+    // nothing. If the link stops acknowledging, the previous answer is stale by
+    // definition, so measure again.
+    if (sPrimaryKnown && !sStats.tx_power_swept && !sTxPowerPinned) {
+      // ⚠️ BACK OFF between inconclusive attempts. A sweep is ~10 s of continuous
+      // transmission that climbs to maximum power, so retrying it end to end is
+      // not a retry policy -- it is a duty cycle of 100% at full power. Measured
+      // after the first version of this fix: five sweeps in 45 seconds, and the
+      // boards were noticeably hot to the touch.
+      //
+      // A link that cannot be measured at any power will not become measurable in
+      // the next ten seconds, so waiting costs nothing that was available anyway.
+      if (sInconclusiveSweeps > 0) {
+        const uint32_t wait_s =
+            kSweepBackoffBaseS * (sInconclusiveSweeps < 4 ? sInconclusiveSweeps : 4);
+        ESP_LOGI(kTag,
+                 "waiting %lus before sweeping again (%lu inconclusive so far)",
+                 static_cast<unsigned long>(wait_s),
+                 static_cast<unsigned long>(sInconclusiveSweeps));
+        vTaskDelay(pdMS_TO_TICKS(wait_s * 1000));
+      }
       sweepTxPower();
+      continue;
+    }
+    if (sPrimaryKnown && sStats.tx_power_swept && !sTxPowerPinned &&
+        sendsAreFailing()) {
+      ESP_LOGW(kTag,
+               "sends are failing at %.1f dBm; sweeping transmit power again",
+               sStats.tx_power_chosen_quarter_dbm / 4.0);
+      sStats.tx_power_swept = false;
       continue;
     }
 #endif
@@ -1784,6 +1899,42 @@ uint64_t espNowPrimaryLastTxTsf() { return sBeaconTxTsfUs; }
 uint32_t espNowPrimaryCommandAnswersReceived() { return sCommandAnswersReceived; }
 uint32_t espNowPrimaryCommandAnswersPublished() {
   return sCommandAnswersPublished;
+}
+
+int8_t espNowLinkTxPowerQuarterDbm() { return currentTxPowerQuarterDbm(); }
+
+bool espNowLinkTxPowerPinned() { return sTxPowerPinned; }
+
+esp_err_t espNowLinkPinTxPower(int8_t quarter_dbm) {
+  // The ESP-IDF range. Refused rather than clamped: an operator testing whether
+  // 11 dBm carries this link needs to know they got 11 dBm, and a silent clamp
+  // to the nearest legal value makes the measurement a guess.
+  if (quarter_dbm < 8 || quarter_dbm > 84) {
+    return ESP_ERR_INVALID_ARG;
+  }
+  const esp_err_t err = esp_wifi_set_max_tx_power(quarter_dbm);
+  if (err != ESP_OK) {
+    return err;
+  }
+  sTxPowerPinned = true;
+  // So the status frame reports what is actually in force, not the level a sweep
+  // picked before the operator overrode it.
+  sStats.tx_power_chosen_quarter_dbm =
+      static_cast<uint8_t>(currentTxPowerQuarterDbm());
+  ESP_LOGW(kTag, "transmit power pinned at %.2f dBm by an operator; the sweep will not override it",
+           quarter_dbm / 4.0);
+  return ESP_OK;
+}
+
+void espNowLinkReleaseTxPower() {
+  if (!sTxPowerPinned) {
+    return;
+  }
+  sTxPowerPinned = false;
+  // Let the automatic sweep measure again from scratch: the pinned level is not a
+  // measurement, so leaving tx_power_swept set would report it as one.
+  sStats.tx_power_swept = false;
+  ESP_LOGI(kTag, "transmit power released; the sweep will measure again");
 }
 
 uint32_t espNowPrimaryCommandAnswersDuplicate() {

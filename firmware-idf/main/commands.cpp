@@ -1,4 +1,6 @@
 #include "commands.hpp"
+#include "board_config.hpp"
+#include "status_led.hpp"
 
 #include <cinttypes>
 #include <cstdio>
@@ -7,6 +9,7 @@
 #include "bno08x.hpp"
 #include "cJSON.h"
 #include "device_id.hpp"
+#include "espnow_link.hpp"
 #include "esp_app_desc.h"
 #include "esp_log.h"
 #include "esp_system.h"
@@ -122,6 +125,165 @@ void describeReports(char *out, size_t out_size, uint8_t mask) {
                 (mask & Bno08x::kReportGyro) ? 1 : 0,
                 (mask & Bno08x::kReportMagnetometer) ? 1 : 0,
                 (mask & Bno08x::kReportRotation) ? 1 : 0);
+}
+
+// --- the indicator LED (TEC-NATKIT-83) ------------------------------------
+
+bool runGetLed(const CommandFrame &request) {
+  const LedColour colour = statusLedCurrent();
+  if (colour.brightness == 0) {
+    reply(request, true, true, "off");
+    return true;
+  }
+  reply(request, true, true, "r=%u g=%u b=%u brightness=%u", colour.r, colour.g,
+        colour.b, colour.brightness);
+  return true;
+}
+
+bool runGetTxPower(const CommandFrame &request) {
+  const int8_t quarter = espNowLinkTxPowerQuarterDbm();
+  reply(request, true, true, "%.2f dBm (%d quarter-dBm), %s", quarter / 4.0,
+        static_cast<int>(quarter),
+        espNowLinkTxPowerPinned() ? "pinned by operator" : "chosen by the sweep");
+  return true;
+}
+
+bool runSetTxPower(const CommandFrame &request) {
+  cJSON *args = cJSON_Parse(request.args);
+  if (args == nullptr) {
+    reply(request, false, true,
+          "set_tx_power needs args like {\"dbm\":11} or {\"auto\":true}");
+    return false;
+  }
+
+  // Handing it back to the sweep is a first-class request, not an absent
+  // argument: "stop overriding this" has to be expressible or a pin is permanent
+  // until the next reboot.
+  const cJSON *automatic = cJSON_GetObjectItemCaseSensitive(args, "auto");
+  if (cJSON_IsBool(automatic) && cJSON_IsTrue(automatic)) {
+    cJSON_Delete(args);
+    espNowLinkReleaseTxPower();
+    reply(request, true, true, "released; the sweep will measure again");
+    return true;
+  }
+
+  // dBm for a person, quarter-dBm for the radio. Both accepted, because the
+  // status frame reports quarter-dBm and somebody reading it should be able to
+  // send the number back without converting it.
+  int8_t quarter = 0;
+  const cJSON *dbm = cJSON_GetObjectItemCaseSensitive(args, "dbm");
+  const cJSON *raw = cJSON_GetObjectItemCaseSensitive(args, "quarter_dbm");
+  if (cJSON_IsNumber(dbm)) {
+    quarter = static_cast<int8_t>(dbm->valuedouble * 4);
+  } else if (cJSON_IsNumber(raw)) {
+    quarter = static_cast<int8_t>(raw->valuedouble);
+  } else {
+    cJSON_Delete(args);
+    reply(request, false, true,
+          "set_tx_power needs {\"dbm\":11}, {\"quarter_dbm\":44} or {\"auto\":true}");
+    return false;
+  }
+  cJSON_Delete(args);
+
+  const esp_err_t err = espNowLinkPinTxPower(quarter);
+  if (err == ESP_ERR_INVALID_ARG) {
+    reply(request, false, true,
+          "%.2f dBm is outside the 2..21 dBm this radio accepts", quarter / 4.0);
+    return false;
+  }
+  if (err != ESP_OK) {
+    reply(request, false, true, "could not set transmit power (%s)",
+          esp_err_to_name(err));
+    return false;
+  }
+  // ⚠️ Answered with what the radio REPORTS, not what was asked for. The two can
+  // differ, and a command that echoes its own argument cannot tell you that.
+  reply(request, true, true, "pinned at %.2f dBm; the sweep will not override it",
+        espNowLinkTxPowerQuarterDbm() / 4.0);
+  return true;
+}
+
+bool runIdentify(const CommandFrame &request) {
+  // Optional {"flashes":N}; the default is enough to notice without being a
+  // performance. Clamped rather than rejected -- an operator who asks for 200 is
+  // trying to find a board, not configure a strobe.
+  uint8_t flashes = 4;
+  if (request.args[0] != '\0') {
+    cJSON *args = cJSON_Parse(request.args);
+    if (args != nullptr) {
+      const cJSON *count = cJSON_GetObjectItemCaseSensitive(args, "flashes");
+      if (cJSON_IsNumber(count)) {
+        const int wanted = count->valueint;
+        flashes = static_cast<uint8_t>(wanted < 1 ? 1 : (wanted > 20 ? 20 : wanted));
+      }
+      cJSON_Delete(args);
+    }
+  }
+
+  statusLedIdentify(flashes);
+
+  // ⚠️ ANSWERED IMMEDIATELY, before the flashing has finished, and that is right
+  // rather than lazy: the gesture is non-blocking by design (it is advanced from
+  // the leaf's loop, which must not stall), so there is nothing to wait for here.
+  // The operator's confirmation is the LED itself.
+  reply(request, true, true, "flashing %u time(s)", flashes);
+  return true;
+}
+
+bool runSetLed(const CommandFrame &request) {
+  cJSON *args = cJSON_Parse(request.args);
+  if (args == nullptr) {
+    reply(request, false, true,
+          "set_led needs args like {\"r\":0,\"g\":0,\"b\":255} or {\"off\":true}");
+    return false;
+  }
+
+  // ⚠️ STARTS FROM WHAT IS CURRENTLY SHOWING, like set_reports: a caller may send
+  // brightness alone, or a colour alone. Starting from zero would make
+  // {"brightness":40} turn the LED black.
+  LedColour colour = statusLedCurrent();
+
+  const cJSON *off = cJSON_GetObjectItemCaseSensitive(args, "off");
+  if (cJSON_IsBool(off) && cJSON_IsTrue(off)) {
+    // Off is brightness 0 rather than black, so "off" survives a round trip as an
+    // intention. r/g/b are kept, so turning it back on restores the colour.
+    colour.brightness = 0;
+  } else {
+    const auto component = [&](const char *name, uint8_t &out) {
+      const cJSON *item = cJSON_GetObjectItemCaseSensitive(args, name);
+      if (cJSON_IsNumber(item)) {
+        // Clamped rather than refused: a UI slider that sends 256 once should not
+        // make the operator retype a command.
+        const double value = item->valuedouble;
+        out = static_cast<uint8_t>(value < 0 ? 0 : (value > 255 ? 255 : value));
+      }
+    };
+    component("r", colour.r);
+    component("g", colour.g);
+    component("b", colour.b);
+    component("brightness", colour.brightness);
+    // A colour asked for with no brightness, on a dark LED, means "show this" --
+    // not "show this invisibly". Default to the bench-safe level rather than
+    // leaving the operator wondering why nothing happened.
+    if (colour.brightness == 0) {
+      colour.brightness = kStatusLedDefaultBrightness;
+    }
+  }
+  cJSON_Delete(args);
+
+  const esp_err_t err = statusLedSet(colour);
+  if (err != ESP_OK) {
+    reply(request, false, true, "no indicator on this node (%s)",
+          esp_err_to_name(err));
+    return false;
+  }
+  if (colour.brightness == 0) {
+    reply(request, true, true, "off");
+  } else {
+    reply(request, true, true, "r=%u g=%u b=%u brightness=%u", colour.r, colour.g,
+          colour.b, colour.brightness);
+  }
+  return true;
 }
 
 bool runGetReports(const CommandFrame &request) {
@@ -243,6 +405,16 @@ void commandsService() {
     runVersion(request);
   } else if (std::strcmp(request.command, "get_reports") == 0) {
     runGetReports(request);
+  } else if (std::strcmp(request.command, "get_led") == 0) {
+    runGetLed(request);
+  } else if (std::strcmp(request.command, "set_led") == 0) {
+    runSetLed(request);
+  } else if (std::strcmp(request.command, "identify") == 0) {
+    runIdentify(request);
+  } else if (std::strcmp(request.command, "get_tx_power") == 0) {
+    runGetTxPower(request);
+  } else if (std::strcmp(request.command, "set_tx_power") == 0) {
+    runSetTxPower(request);
   } else if (std::strcmp(request.command, "set_reports") == 0) {
     runSetReports(request);
   } else {

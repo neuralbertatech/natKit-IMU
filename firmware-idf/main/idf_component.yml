@@ -3,7 +3,11 @@ dependencies:
   idf:
     # ESP-IDF v5.5.3 is what is installed on the bench box (~/esp/esp-idf).
     version: '>=5.5'
-  # Nothing managed yet -- the scaffold uses only core components. Expected
+  # The identity LED (TEC-NATKIT-83). Chosen over hand-rolling the WS2812 bit
+  # timing because that timing cannot be verified without watching the LED, and
+  # this component is the one Espressif tests per target.
+  espressif/led_strip: '^3.0.0'
+  # Nothing else managed yet -- the scaffold otherwise uses only core components. Expected
   # additions, so the next slice knows where they go rather than reaching for a
   # REQUIRES that no longer exists in IDF v6:
   #   espressif/cjson  and  espressif/mqtt  for the gateway (TEC-NATKIT-26).

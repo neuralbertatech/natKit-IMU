@@ -1,3 +1,24 @@
+# ⚠️ THIS FILE IS READ ONCE, when `sdkconfig` does not exist.
+#
+# ESP-IDF generates `sdkconfig` from these defaults on the first configure and
+# then never consults them again. So adding a line here has NO EFFECT on any
+# checkout that has already been built — including yours. There is no warning; the
+# option is simply absent from the generated config.
+#
+# That has bitten this project twice over, silently:
+#   * CONFIG_ETH_SPI_ETHERNET_W5500 was added with the Ethernet uplink (0b5f303)
+#     and never applied, so `ethernet_net.cpp` failed to compile —
+#     `eth_w5500_config_t` undeclared — and the whole firmware would not build.
+#   * CONFIG_PARTITION_TABLE_CUSTOM is TEC-NATKIT-49's fix for the 1 MB app
+#     partition. It sat here inert while the build kept using the stock table,
+#     which is the very thing the ticket was raised about.
+#
+# After editing this file: `rm sdkconfig && idf.py reconfigure`, then check the
+# option actually landed:  grep '^CONFIG_YOUR_OPTION' sdkconfig
+#
+# `sdkconfig` is gitignored, so it is safe to delete — it is generated, and these
+# defaults are the source of truth.
+
 # Shared defaults for every role and every target.
 #
 # Only deliberate deviations from the ESP-IDF defaults belong here -- nothing
@@ -65,3 +86,28 @@ CONFIG_PARTITION_TABLE_CUSTOM_FILENAME="partitions.csv"
 # come from here -- it comes from the ESP-NOW timing master, and that is already
 # 60-100 us.
 CONFIG_LWIP_SNTP_UPDATE_DELAY=60000
+
+# --- Transmit power: pinned, and the sweep OFF (TEC-NATKIT-37) --------------
+#
+# ⚠️ THIS IS A KNOWN-GOOD STATE THAT WAS LOST ONCE ALREADY, which is why it is
+# here rather than in somebody's local sdkconfig. TEC-NATKIT-37 closed with the
+# bench recorded as "both leaves pinned at 8.5 dBm with NATKIT_TX_POWER_SWEEP
+# off", and a warning: if the sweep is re-enabled, watch for it choosing very
+# different powers per node, because that is what produced the asymmetry the
+# ticket was originally filed about.
+#
+# That warning came true on 2026-08-24. `NATKIT_TX_POWER_SWEEP` defaults to y in
+# Kconfig and nothing here overrode it, so a regenerated sdkconfig silently
+# turned it back on -- and the three leaves settled at 2.0, 8.5 and 19.5 dBm,
+# 17 dB apart. The symptom is not a board that fails: it is EXACTLY TWO of three
+# leaves working, with which one loses rotating between them as each sweep
+# re-runs. That reads like failing hardware and is a configuration difference.
+#
+# Pinning all leaves to one power removes the asymmetry at the source. 34
+# quarter-dBm = 8.5 dBm, which is the level the ticket measured. Do not "fix"
+# this by raising it: the sweep's own help records 19.5 dBm delivering 0.4
+# frames/s against 2 dBm delivering 8.5, because ~+9 dBm arriving at a 2.4 GHz
+# front end saturates it, and raising both leaves uniformly took 10.6 frames/s
+# each down to 2.6 and 6.2.
+CONFIG_NATKIT_TX_POWER_SWEEP=n
+CONFIG_NATKIT_TX_POWER_QUARTER_DBM=34

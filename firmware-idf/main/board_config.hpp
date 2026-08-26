@@ -69,6 +69,25 @@ constexpr gpio_num_t kBnoMosi = GPIO_NUM_19;
 // than the IOMUX fast path, which is fine at 1 MHz.
 constexpr spi_host_device_t kBnoSpiHost = SPI2_HOST;
 
+// --- Identity LED ---------------------------------------------------------
+//
+// The NeoPixel SOLDERED ONTO the boards, on the same pin the Arduino firmware
+// used (STATUS_NEOPIXEL_PIN 4 in ../../embeded/include/BoardConfig.hpp). Free of
+// the BNO08x pins above (15/32/14/5/21/19), and the firmware uses RMT nowhere
+// else, so the identity light cannot contend with anything.
+//
+// ⚠️ NOT the board's ONBOARD pixel, which is GPIO 0 and needs its power rail
+// switched on via GPIO 2 first (ONBOARD_NEOPIXEL_POWER_PIN). GPIO 0 is also the
+// strapping pin that selects download mode, so driving it is a way to make a
+// board that will not boot.
+constexpr gpio_num_t kStatusLedGpio = GPIO_NUM_4;
+constexpr uint32_t kStatusLedCount = 1;
+// 24/255, matching the Arduino firmware: enough to read across a bench, not
+// enough to dazzle or to matter to the power budget next to a transmitting radio.
+// A default, not a cap -- the frontend may send its own, and this is what a colour
+// sent without one gets.
+constexpr uint8_t kStatusLedDefaultBrightness = 24;
+
 // 1 MHz, SPI mode 3, MSB first — the settings the Adafruit stack used on this
 // board and the ones it has been streaming with.
 //

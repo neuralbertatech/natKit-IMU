@@ -1,6 +1,7 @@
 #include <cinttypes>
 
 #include "device_id.hpp"
+#include "status_led.hpp"
 #include "espnow_probe.hpp"
 #include "esp_chip_info.h"
 #include "esp_err.h"
@@ -118,6 +119,14 @@ extern "C" void app_main(void) {
   ESP_LOGW(kTag, "ESP-NOW PROBE build -- this is a bench tool, not a node");
   natkit::runEspNowProbe();
 #endif
+
+  // Put the indicator back to whatever it was last set to from the frontend.
+  //
+  // ⚠️ Before the role, deliberately: the boards you most need to identify are the
+  // ones that go on to fail at something, and a light restored after a successful
+  // bring-up is dark on exactly the board you are looking for. Its own failure is a
+  // warning, never fatal.
+  natkit::statusLedRestore();
 
   switch (natkit::kRole) {
     case natkit::NodeRole::kLeaf:
