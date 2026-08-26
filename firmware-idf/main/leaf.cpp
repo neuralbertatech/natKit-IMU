@@ -7,6 +7,7 @@
 #include "esp_system.h"
 #include "esp_timer.h"
 #include "commands.hpp"
+#include "device_controls.hpp"
 #include "espnow_link.hpp"
 #include "freertos/FreeRTOS.h"
 #include "freertos/task.h"
@@ -257,6 +258,11 @@ void runLeaf() {
   uint32_t frames_at_last_log = 0;
   uint64_t last_log_us = 0;
 
+  // Every 30 s. Slow enough to be free, fast enough that a leaf which booted
+  // before its primary is discoverable within half a minute of the hub arriving.
+  constexpr uint64_t kControlsIntervalUs = 30ULL * 1000ULL * 1000ULL;
+  uint64_t next_controls_us = 0;
+
   while (true) {
     if (have_imu) {
       // ⚠️ imu.service() is NOT called here any more -- see serviceTask. Putting it
@@ -273,6 +279,24 @@ void runLeaf() {
     statusLedService();
 
     const uint64_t now = static_cast<uint64_t>(esp_timer_get_time());
+
+    // --- advertise what this board can be asked to do (TEC-NATKIT-10) -------
+    //
+    // ⚠️ REPEATED, NOT ONCE AT BOOT. A leaf can come up before its primary, and
+    // an advertisement sent into an empty room is simply lost -- the same way an
+    // announce is. Cheap enough to repeat: sixteen bytes on the radio, and the
+    // gateway publishes it RETAINED so the broker keeps only the latest.
+    //
+    // ⚠️ The mask is recomputed each time rather than cached at boot, so a
+    // sensor that came up late is reflected without a reboot.
+    if (now >= next_controls_us) {
+      next_controls_us = now + kControlsIntervalUs;
+      ControlsFrame controls{};
+      controls.device_id = deviceId();
+      controls.mask = deviceControlsMask(have_imu);
+      espNowLinkSend(PacketType::kControls, &controls, sizeof(controls));
+    }
+
 
     // --- heartbeat -----------------------------------------------------------
     if (kHeartbeatIntervalUs > 0 && now >= next_heartbeat_us) {

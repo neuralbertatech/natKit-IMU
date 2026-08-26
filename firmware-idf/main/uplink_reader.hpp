@@ -35,6 +35,11 @@ struct UplinkReaderStats {
   uint32_t frames_node_status = 0;
   uint32_t frames_primary_status = 0;
   uint32_t frames_command_log = 0;
+  // Control advertisements seen on the line (TEC-NATKIT-10). Counted separately
+  // so "the leaf never advertised" and "the gateway never published it" are
+  // different numbers rather than one silence.
+  uint32_t frames_controls = 0;
+  uint32_t frames_heartbeat = 0;
   // Downward commands (TEC-NATKIT-92). Non-zero only on the PRIMARY, which is
   // the only end that reads this type -- a gateway seeing these has its wires
   // crossed, or something else is writing on the line.

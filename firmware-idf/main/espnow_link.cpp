@@ -1,5 +1,7 @@
 #include "espnow_link.hpp"
 
+#include "device_controls.hpp"
+
 #include <cinttypes>
 #include <cmath>
 #include <cstdio>
@@ -1491,6 +1493,39 @@ void primaryRecvCallback(const esp_now_recv_info_t *info, const uint8_t *data,
       std::memcpy(&ack, payload, sizeof(ack));
       ack.command_id[kCommandIdMax - 1] = '\0';
       commandRelayNoteAck(ack.device_id, ack.command_id);
+      break;
+    }
+    case PacketType::kControls: {
+      // ⚠️ THE PRIMARY RENDERS, THE LEAF DECIDES. The leaf sends a bitmask of
+      // what it actually has -- a board whose BNO08x never came up does not set
+      // the reports bit -- and the document is built here, where there is a
+      // console and a broker to complain to. Same division as kCommandLog.
+      if (payload_size < sizeof(ControlsFrame)) {
+        ++sUnknownPackets;
+        break;
+      }
+      ControlsFrame controls{};
+      std::memcpy(&controls, payload, sizeof(controls));
+      // ⚠️ The id comes from the packet, not from the registry entry, because
+      // the leaf is the authority on which device it is.
+      //
+      // ⚠️ SIZED FROM THE UPLINK, NOT FROM A GUESS. A first attempt at 768 bytes
+      // was too small for the real table -- the renderer correctly refused and
+      // the leaf would have advertised nothing. kUplinkMaxPayload is the actual
+      // ceiling this document has to pass through, so deriving the buffer from
+      // it means the two cannot disagree. The renderer still refuses rather than
+      // truncating: half a JSON object decodes as nothing, which on screen is
+      // indistinguishable from a device that never advertised.
+      static char advertisement[kUplinkMaxPayload];
+      const size_t written = deviceControlsRenderJson(
+          advertisement, sizeof(advertisement), controls.device_id,
+          controls.mask);
+      if (written == 0) {
+        ++sUnknownPackets;
+        break;
+      }
+      uplinkSend(UplinkType::kControls, controls.device_id, advertisement,
+                 written);
       break;
     }
     case PacketType::kCommandLog: {

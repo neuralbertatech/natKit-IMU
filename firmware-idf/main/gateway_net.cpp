@@ -230,7 +230,8 @@ uint64_t gatewayWallClockUs() {
          static_cast<uint64_t>(tv.tv_usec);
 }
 
-bool gatewayPublish(const char *topic, const void *payload, size_t length) {
+bool gatewayPublish(const char *topic, const void *payload,
+                    const size_t length, const bool retain) {
   if (sMqtt == nullptr || !sStats.mqtt_connected) {
     ++sStats.publishes_failed;
     return false;
@@ -252,7 +253,7 @@ bool gatewayPublish(const char *topic, const void *payload, size_t length) {
   // rather than absorbed.
   const int id = esp_mqtt_client_publish(
       sMqtt, topic, static_cast<const char *>(payload),
-      static_cast<int>(length), 0, 0);
+      static_cast<int>(length), 0, retain ? 1 : 0);
   if (id < 0) {
     ++sStats.publishes_failed;
     return false;

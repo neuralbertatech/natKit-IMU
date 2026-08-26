@@ -18,6 +18,7 @@ idf_component_register(
         "leaf.cpp"
         "command_relay.cpp"
         "commands.cpp"
+        "device_controls.cpp"
         "primary.cpp"
         "gateway.cpp"
     INCLUDE_DIRS

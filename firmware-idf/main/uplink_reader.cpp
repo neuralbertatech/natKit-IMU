@@ -102,6 +102,12 @@ void dispatch(size_t at) {
     case UplinkType::kCommandLog:
       ++sStats.frames_command_log;
       break;
+    case UplinkType::kControls:
+      ++sStats.frames_controls;
+      break;
+    case UplinkType::kHeartbeat:
+      ++sStats.frames_heartbeat;
+      break;
     case UplinkType::kCommand:
       // Downward, gateway -> primary. Counted at both ends: on the primary it
       // is the arrival of a command; on a gateway it should stay ZERO, and a

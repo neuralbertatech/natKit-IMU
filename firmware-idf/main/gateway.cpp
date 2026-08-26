@@ -240,7 +240,8 @@ void republishStatus(UplinkType type, const uint8_t *payload, size_t length) {
   }
   const uint64_t about = readLe<uint64_t>(payload);
   std::snprintf(sTopic, sizeof(sTopic), uplinkTopicTemplate(type), about);
-  if (gatewayPublish(sTopic, payload, length)) {
+  // ⚠️ Only the advertisement is retained -- see UplinkType::kControls.
+  if (gatewayPublish(sTopic, payload, length, type == UplinkType::kControls)) {
     ++sStatusPublished;
   } else {
     ++sStatusRefused;
@@ -391,6 +392,49 @@ void onFrame(UplinkType type, uint64_t stream_id, const uint8_t *payload,
       std::snprintf(sTopic, sizeof(sTopic),
                     uplinkTopicTemplate(UplinkType::kCommandLog), stream_id);
       gatewayPublish(sTopic, sFrame, length);
+      return;
+    }
+    case UplinkType::kHeartbeat: {
+      // ⚠️ NEVER RETAINED. The whole value of this channel is that it goes quiet
+      // when the device does; a retained heartbeat would keep asserting
+      // reachability for a board that is gone, which is the fault the channel
+      // exists to close.
+      if (length > sizeof(sFrame)) {
+        ++sFramesOversize;
+        return;
+      }
+      std::memcpy(sFrame, payload, length);
+      std::snprintf(sTopic, sizeof(sTopic),
+                    uplinkTopicTemplate(UplinkType::kHeartbeat), stream_id);
+      if (gatewayPublish(sTopic, sFrame, length, /*retain=*/false)) {
+        ++sStatusPublished;
+      } else {
+        ++sStatusRefused;
+      }
+      return;
+    }
+    case UplinkType::kControls: {
+      // The advertisement the primary built for one device. Republished verbatim
+      // and RETAINED -- a late subscriber must learn what a board offers without
+      // waiting for it to change, and this document says nothing about whether
+      // the device is currently reachable (that is the Heartbeat channel's job),
+      // so a stale one is informative rather than misleading.
+      //
+      // ⚠️ Not gated on gatewayTimeValid(). This carries no timestamp of ours,
+      // and "what can this board do" is a question worth answering while the
+      // clock is still settling.
+      if (length > sizeof(sFrame)) {
+        ++sFramesOversize;
+        return;
+      }
+      std::memcpy(sFrame, payload, length);
+      std::snprintf(sTopic, sizeof(sTopic),
+                    uplinkTopicTemplate(UplinkType::kControls), stream_id);
+      if (gatewayPublish(sTopic, sFrame, length, /*retain=*/true)) {
+        ++sStatusPublished;
+      } else {
+        ++sStatusRefused;
+      }
       return;
     }
     case UplinkType::kCommand: {

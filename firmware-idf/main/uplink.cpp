@@ -128,6 +128,10 @@ constexpr char kPrimaryStatusTopic[] =
 // topic and correlates by command_id, and it was verified against the Arduino
 // firmware in 2026-08. Matching it is what makes the existing backend and the
 // existing frontend buttons work with no server-side change at all.
+constexpr char kHeartbeatTopic[] =
+    "natKit/sending/Heartbeat-%llu-Json-DeviceHeartbeatV1";
+constexpr char kControlsTopic[] =
+    "natKit/sending/Configuration-%llu-Json-NatKitDeviceControlsV1";
 constexpr char kCommandLogTopic[] =
     "natKit/sending/Log-%" PRIu64 "-Json-NatLogV1";
 
@@ -152,9 +156,12 @@ void publishFrame(const uint8_t *frame, size_t length) {
     return;
   }
 
-  const char *topic = uplinkTopicTemplate(static_cast<UplinkType>(frame[3]));
+  const auto type = static_cast<UplinkType>(frame[3]);
+  const char *topic = uplinkTopicTemplate(type);
   std::snprintf(sTopic, sizeof(sTopic), topic, stream_id);
-  if (gatewayPublish(sTopic, frame + kUplinkHeaderSize, payload_length)) {
+  // ⚠️ Only the advertisement is retained -- see UplinkType::kControls.
+  const bool retain = type == UplinkType::kControls;
+  if (gatewayPublish(sTopic, frame + kUplinkHeaderSize, payload_length, retain)) {
     ++sFramesSent;
     sBytesSent += payload_length;
   } else {
@@ -281,6 +288,10 @@ const char *uplinkTopicTemplate(UplinkType type) {
       return kPrimaryStatusTopic;
     case UplinkType::kCommandLog:
       return kCommandLogTopic;
+    case UplinkType::kControls:
+      return kControlsTopic;
+    case UplinkType::kHeartbeat:
+      return kHeartbeatTopic;
     case UplinkType::kData:
       break;
     case UplinkType::kCommand:

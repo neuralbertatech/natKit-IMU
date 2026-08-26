@@ -81,6 +81,25 @@ enum class UplinkType : uint8_t {
   // primary and turned into an ESP-NOW unicast; the ANSWER comes back up as
   // kCommandLog, which is a different type on a different topic.
   kCommand = 5,
+  // The device's control advertisement, as a JSON document the primary built
+  // from a leaf's ControlsFrame. Goes to
+  // Configuration-<id>-Json-NatKitDeviceControlsV1 (TEC-NATKIT-10).
+  //
+  // ⚠️ PUBLISHED RETAINED, and it is the only type that is. A late subscriber
+  // must learn what a board offers without waiting for it to change. That is
+  // safe only because REACHABILITY lives on the Heartbeat channel instead: a
+  // retained advertisement stays informative without being actionable, so
+  // nothing has to be cleared when a device goes away.
+  kControls = 6,
+  // "This device is reachable right now" (TEC-NATKIT-10). Payload is a
+  // DeviceHeartbeat. Goes to Heartbeat-<id>-Json-DeviceHeartbeatV1.
+  //
+  // ⚠️ NEVER RETAINED, and that is the whole point of the channel. A retained
+  // "I am alive" is a lie from the moment it stops being true, and would
+  // recreate TEC-NATKIT-81 inside the mechanism built to prevent it.
+  // kControls is the exact inverse: retained, because it says nothing about
+  // reachability.
+  kHeartbeat = 7,
 };
 
 // What the gateway needs about one node: who it is, whether we are losing it, and
