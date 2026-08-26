@@ -4,6 +4,7 @@
 
 #include "board_config.hpp"
 #include "esp_log.h"
+#include "esp_timer.h"
 #include "led_strip.h"
 #include "nvs.h"
 #include "nvs_flash.h"
@@ -17,6 +18,31 @@ constexpr char kKeyColour[] = "led_colour";
 
 led_strip_handle_t sStrip = nullptr;
 LedColour sCurrent = kLedOff;
+
+// ⚠️ LIFTED OUT OF statusLedShowFault, where it was a function-static. Identify
+// has to put back what was showing when it finishes, and "what was showing" is the
+// FAULT colour whenever a fault is up -- not the operator's colour. With the state
+// hidden inside that function this was unrecoverable: identify would restore the
+// operator's colour, statusLedShowFault would see an unchanged fault and correctly
+// decline to rewrite it, and a faulted board would sit there looking healthy until
+// the fault happened to change.
+LinkFault sFault = LinkFault::kNone;
+
+// The identify sequence. Half-transitions remaining: each one toggles, so N
+// flashes is 2N of these.
+uint8_t sFlashesLeft = 0;
+bool sFlashOn = false;
+uint64_t sNextFlashUs = 0;
+
+// Long enough to read across a bench, short enough that the whole gesture is over
+// in about a second and nobody wonders whether it worked.
+constexpr uint64_t kFlashHalfPeriodUs = 150000;
+
+// ⚠️ White, because neither fault colour is: amber means "unheard by the primary"
+// and red means "no primary at all", and an identify that borrowed either would
+// send somebody to diagnose a board that is simply answering a question. Flashing
+// also distinguishes it from every steady colour an operator can assign.
+constexpr LedColour kIdentifyColour{255, 255, 255, kStatusLedDefaultBrightness};
 
 esp_err_t ensureStrip() {
   if (sStrip != nullptr) {
@@ -67,23 +93,75 @@ esp_err_t apply(const LedColour &colour) {
   return err;
 }
 
+// What the LED should show when nothing transient is happening: the fault if there
+// is one, else whatever the operator assigned. One place, so identify's restore
+// and the fault handler's recovery cannot disagree.
+esp_err_t applySteady() {
+  switch (sFault) {
+    case LinkFault::kUnheardByPrimary:
+      return apply(LedColour{255, 80, 0, kStatusLedDefaultBrightness});
+    case LinkFault::kNoPrimary:
+      return apply(LedColour{255, 0, 0, kStatusLedDefaultBrightness});
+    case LinkFault::kNone:
+      break;
+  }
+  return apply(sCurrent);
+}
+
 }  // namespace
 
 LedColour statusLedCurrent() { return sCurrent; }
 
+void statusLedIdentify(const uint8_t flashes) {
+  const uint8_t count = flashes == 0 ? 1 : flashes;
+  sFlashesLeft = static_cast<uint8_t>(count * 2);
+  sFlashOn = false;  // the first service() turns it on
+  sNextFlashUs = 0;  // ... immediately, rather than one period from now
+  ESP_LOGI(kTag, "identify: flashing %u time(s)", count);
+}
+
+bool statusLedIdentifying() { return sFlashesLeft > 0; }
+
+void statusLedService() {
+  if (sFlashesLeft == 0) {
+    return;
+  }
+  const uint64_t now = static_cast<uint64_t>(esp_timer_get_time());
+  if (now < sNextFlashUs) {
+    return;
+  }
+  sFlashOn = !sFlashOn;
+  --sFlashesLeft;
+  sNextFlashUs = now + kFlashHalfPeriodUs;
+
+  if (sFlashesLeft == 0) {
+    // Finished on an "off" half by construction (2N transitions from off), so put
+    // back whatever should be showing rather than leaving the board dark.
+    applySteady();
+    return;
+  }
+  apply(sFlashOn ? kIdentifyColour : kLedOff);
+}
+
 void statusLedShowFault(const LinkFault fault) {
-  static LinkFault shown = LinkFault::kNone;
-  if (fault == shown) {
+  if (fault == sFault) {
     return;  // see the header: write on CHANGE, never per loop
   }
-  shown = fault;
+  sFault = fault;
+
+  // ⚠️ Record the change but do not paint over a flash in progress. Identify calls
+  // applySteady() when it finishes, which reads sFault -- so a fault that arrives
+  // mid-gesture is shown a second later rather than fighting it for the LED.
+  if (statusLedIdentifying()) {
+    return;
+  }
 
   switch (fault) {
     case LinkFault::kNone:
       // Back to whatever the operator asked for. Not "off": a dark LED is
       // indistinguishable from a dead one and from a board that never booted.
       ESP_LOGI(kTag, "link recovered; restoring the operator's colour");
-      apply(sCurrent);
+      applySteady();
       return;
     case LinkFault::kUnheardByPrimary:
       // ⚠️ Amber rather than red, and the distinction is the point: this board is

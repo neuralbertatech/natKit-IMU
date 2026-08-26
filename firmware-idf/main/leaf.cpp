@@ -264,6 +264,14 @@ void runLeaf() {
       commandsService();
     }
 
+    // Advance an identify flash, if one is running. ⚠️ OUTSIDE the have_imu gate:
+    // an armed sequence must finish even on a board whose sensor did not come up,
+    // or the LED would be left stuck mid-flash. And here rather than inside the
+    // command handler because a blocking flash would stall this loop, which also
+    // services the link and the console (see status_led.hpp). Returns immediately
+    // when nothing is armed.
+    statusLedService();
+
     const uint64_t now = static_cast<uint64_t>(esp_timer_get_time());
 
     // --- heartbeat -----------------------------------------------------------

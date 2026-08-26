@@ -87,4 +87,35 @@ enum class LinkFault {
  */
 void statusLedShowFault(LinkFault fault);
 
+// --- Identify (TEC-NATKIT-99) -----------------------------------------------
+//
+// Flash the LED, so "which board on the bench is this stream?" is answerable by
+// clicking the node that carries it. The colour set by `set_led` answers the same
+// question, but only once somebody has already worked out the mapping and assigned
+// colours; identify answers it for a rig nobody has labelled yet, which is every
+// rig the first time.
+//
+// ⚠️ FLASHING IS SAFE HERE, despite the warning above. That warning is about the
+// ARDUINO firmware's `Adafruit_NeoPixel::show()`, which re-installed the RMT
+// driver on every call. This file drives the `led_strip` component: the RMT device
+// is created ONCE into a static handle and updates are set_pixel + refresh, which
+// is also how statusLedShowFault already changes colour at runtime.
+//
+// ⚠️ NON-BLOCKING, and that is a requirement rather than a preference. The command
+// that triggers this executes on the LEAF'S MAIN LOOP -- the loop that also
+// services the link and the console -- and commands.hpp is explicit that a burst
+// must not stall it. Sleeping ~1 s here would cost samples the same way sharing a
+// loop with imu.service() once cost 15% of sample slots. So this ARMS a sequence
+// and statusLedService() advances it.
+void statusLedIdentify(uint8_t flashes);
+
+/**
+ * Advance an armed identify sequence. Call from the leaf's main loop every pass;
+ * it returns immediately when nothing is running.
+ */
+void statusLedService();
+
+/** True while an identify sequence is in progress. */
+bool statusLedIdentifying();
+
 }  // namespace natkit

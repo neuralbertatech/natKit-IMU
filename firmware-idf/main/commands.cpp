@@ -203,6 +203,33 @@ bool runSetTxPower(const CommandFrame &request) {
   return true;
 }
 
+bool runIdentify(const CommandFrame &request) {
+  // Optional {"flashes":N}; the default is enough to notice without being a
+  // performance. Clamped rather than rejected -- an operator who asks for 200 is
+  // trying to find a board, not configure a strobe.
+  uint8_t flashes = 4;
+  if (request.args[0] != '\0') {
+    cJSON *args = cJSON_Parse(request.args);
+    if (args != nullptr) {
+      const cJSON *count = cJSON_GetObjectItemCaseSensitive(args, "flashes");
+      if (cJSON_IsNumber(count)) {
+        const int wanted = count->valueint;
+        flashes = static_cast<uint8_t>(wanted < 1 ? 1 : (wanted > 20 ? 20 : wanted));
+      }
+      cJSON_Delete(args);
+    }
+  }
+
+  statusLedIdentify(flashes);
+
+  // ⚠️ ANSWERED IMMEDIATELY, before the flashing has finished, and that is right
+  // rather than lazy: the gesture is non-blocking by design (it is advanced from
+  // the leaf's loop, which must not stall), so there is nothing to wait for here.
+  // The operator's confirmation is the LED itself.
+  reply(request, true, true, "flashing %u time(s)", flashes);
+  return true;
+}
+
 bool runSetLed(const CommandFrame &request) {
   cJSON *args = cJSON_Parse(request.args);
   if (args == nullptr) {
@@ -382,6 +409,8 @@ void commandsService() {
     runGetLed(request);
   } else if (std::strcmp(request.command, "set_led") == 0) {
     runSetLed(request);
+  } else if (std::strcmp(request.command, "identify") == 0) {
+    runIdentify(request);
   } else if (std::strcmp(request.command, "get_tx_power") == 0) {
     runGetTxPower(request);
   } else if (std::strcmp(request.command, "set_tx_power") == 0) {
