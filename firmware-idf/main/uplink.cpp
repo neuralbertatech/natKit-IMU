@@ -128,6 +128,8 @@ constexpr char kPrimaryStatusTopic[] =
 // topic and correlates by command_id, and it was verified against the Arduino
 // firmware in 2026-08. Matching it is what makes the existing backend and the
 // existing frontend buttons work with no server-side change at all.
+constexpr char kHeartbeatTopic[] =
+    "natKit/sending/Heartbeat-%llu-Json-DeviceHeartbeatV1";
 constexpr char kControlsTopic[] =
     "natKit/sending/Configuration-%llu-Json-NatKitDeviceControlsV1";
 constexpr char kCommandLogTopic[] =
@@ -288,6 +290,8 @@ const char *uplinkTopicTemplate(UplinkType type) {
       return kCommandLogTopic;
     case UplinkType::kControls:
       return kControlsTopic;
+    case UplinkType::kHeartbeat:
+      return kHeartbeatTopic;
     case UplinkType::kData:
       break;
     case UplinkType::kCommand:

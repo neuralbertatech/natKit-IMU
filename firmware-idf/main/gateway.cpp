@@ -394,6 +394,25 @@ void onFrame(UplinkType type, uint64_t stream_id, const uint8_t *payload,
       gatewayPublish(sTopic, sFrame, length);
       return;
     }
+    case UplinkType::kHeartbeat: {
+      // ⚠️ NEVER RETAINED. The whole value of this channel is that it goes quiet
+      // when the device does; a retained heartbeat would keep asserting
+      // reachability for a board that is gone, which is the fault the channel
+      // exists to close.
+      if (length > sizeof(sFrame)) {
+        ++sFramesOversize;
+        return;
+      }
+      std::memcpy(sFrame, payload, length);
+      std::snprintf(sTopic, sizeof(sTopic),
+                    uplinkTopicTemplate(UplinkType::kHeartbeat), stream_id);
+      if (gatewayPublish(sTopic, sFrame, length, /*retain=*/false)) {
+        ++sStatusPublished;
+      } else {
+        ++sStatusRefused;
+      }
+      return;
+    }
     case UplinkType::kControls: {
       // The advertisement the primary built for one device. Republished verbatim
       // and RETAINED -- a late subscriber must learn what a board offers without

@@ -91,6 +91,15 @@ enum class UplinkType : uint8_t {
   // retained advertisement stays informative without being actionable, so
   // nothing has to be cleared when a device goes away.
   kControls = 6,
+  // "This device is reachable right now" (TEC-NATKIT-10). Payload is a
+  // DeviceHeartbeat. Goes to Heartbeat-<id>-Json-DeviceHeartbeatV1.
+  //
+  // ⚠️ NEVER RETAINED, and that is the whole point of the channel. A retained
+  // "I am alive" is a lie from the moment it stops being true, and would
+  // recreate TEC-NATKIT-81 inside the mechanism built to prevent it.
+  // kControls is the exact inverse: retained, because it says nothing about
+  // reachability.
+  kHeartbeat = 7,
 };
 
 // What the gateway needs about one node: who it is, whether we are losing it, and

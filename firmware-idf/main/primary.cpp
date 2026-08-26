@@ -1,4 +1,5 @@
 #include <cinttypes>
+#include <cstdio>
 #include <cmath>
 #include <cstring>
 
@@ -787,6 +788,39 @@ void runPrimary() {
         if (!status_nodes[i].in_use) {
           continue;
         }
+
+        // --- reachability, on its own channel (TEC-NATKIT-10) --------------
+        //
+        // ⚠️ EMITTED ONLY FOR A LEAF WE HAVE ACTUALLY HEARD. This is the hub
+        // speaking on behalf of a device that cannot publish MQTT itself, which
+        // is the proxy shape that produced TEC-NATKIT-81: for 16.8 hours this
+        // rig published fresh status frames for four leaves it had not heard,
+        // and every visible number said the rig was complete. A heartbeat
+        // emitted on a timer rather than on evidence would recreate that fault
+        // inside the mechanism built to prevent it.
+        //
+        // The predicate is TEC-NATKIT-81's own: nodeIsPresent(), the 30 s window
+        // sized to clear this rig's known 18-second dropouts. The status frame
+        // below is still sent for an absent leaf -- "last heard 2m ago" is worth
+        // more than silence -- but the HEARTBEAT is not, because the heartbeat's
+        // only meaning is "reachable now".
+        if (nodeIsPresent(status_nodes[i], now_us)) {
+          char beat[192];
+          const int beat_len = std::snprintf(
+              beat, sizeof(beat),
+              "{\"schema_version\":\"nat.heartbeat.v1\",\"device_id\":%llu,"
+              "\"reachable\":true,\"via_device_id\":%llu,"
+              "\"unheard_us\":%llu}",
+              static_cast<unsigned long long>(status_nodes[i].device_id),
+              static_cast<unsigned long long>(deviceId()),
+              static_cast<unsigned long long>(
+                  now_us - status_nodes[i].last_seen_us));
+          if (beat_len > 0 && static_cast<size_t>(beat_len) < sizeof(beat)) {
+            uplinkSend(UplinkType::kHeartbeat, status_nodes[i].device_id, beat,
+                       static_cast<size_t>(beat_len));
+          }
+        }
+
         UplinkNodeStatus node_status{};
         fillNodeStatus(status_nodes[i], node_status);
         uplinkSend(UplinkType::kNodeStatus, status_nodes[i].device_id,
