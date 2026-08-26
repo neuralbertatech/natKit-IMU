@@ -79,7 +79,13 @@ uint64_t gatewayWallClockUs();
 // freshest frame is the valuable one, and a queue that grows while the broker is
 // away is a heap leak with extra steps. Returns false when the client refused it,
 // which is counted rather than swallowed.
-bool gatewayPublish(const char *topic, const void *payload, size_t length);
+// ⚠️ `retain` is false for everything except the control advertisement
+// (TEC-NATKIT-10). Retaining a data frame or a status frame would serve a late
+// subscriber a stale reading it cannot date -- which is the shape of
+// TEC-NATKIT-81. An advertisement is safe to retain precisely because it says
+// nothing about whether the device is still there; Heartbeat answers that.
+bool gatewayPublish(const char *topic, const void *payload, size_t length,
+                    bool retain = false);
 
 // --- inbound (server -> device) --------------------------------------------
 //

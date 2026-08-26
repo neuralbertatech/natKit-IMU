@@ -81,6 +81,16 @@ enum class UplinkType : uint8_t {
   // primary and turned into an ESP-NOW unicast; the ANSWER comes back up as
   // kCommandLog, which is a different type on a different topic.
   kCommand = 5,
+  // The device's control advertisement, as a JSON document the primary built
+  // from a leaf's ControlsFrame. Goes to
+  // Configuration-<id>-Json-NatKitDeviceControlsV1 (TEC-NATKIT-10).
+  //
+  // ⚠️ PUBLISHED RETAINED, and it is the only type that is. A late subscriber
+  // must learn what a board offers without waiting for it to change. That is
+  // safe only because REACHABILITY lives on the Heartbeat channel instead: a
+  // retained advertisement stays informative without being actionable, so
+  // nothing has to be cleared when a device goes away.
+  kControls = 6,
 };
 
 // What the gateway needs about one node: who it is, whether we are losing it, and

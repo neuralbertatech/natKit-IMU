@@ -54,6 +54,10 @@ enum class PacketType : uint8_t {
   kCommand = 12,           // primary -> leaf (unicast): payload is a CommandFrame
   kCommandLog = 13,        // leaf -> primary: payload is a CommandLogFrame
   kCommandAck = 14,        // leaf -> primary: payload is a CommandAck
+  // leaf -> primary: payload is a ControlsFrame. ⚠️ A MASK, NOT A DOCUMENT --
+  // the primary renders the advertisement, because the leaf never builds JSON
+  // (see the note on kCommand below).
+  kControls = 15,
 };
 
 // --- server -> device commands ---------------------------------------------
