@@ -67,6 +67,20 @@ enum class UplinkType : uint8_t {
   // The primary's own health, including what it dropped and the rig's
   // time-coherence metric (#315).
   kPrimaryStatus = 3,
+  // ⚠️ THE ONLY TYPE THAT TRAVELS GATEWAY -> PRIMARY (TEC-NATKIT-92). Payload is
+  // the command JSON exactly as the backend published it, and `stream_id` is the
+  // device it is addressed to -- taken from the TOPIC the gateway received it
+  // on, never from the document, which has no device field.
+  //
+  // The frame format was directionless already: magic, version, type, id,
+  // sequence, length, CRC say nothing about which way they are going. What was
+  // missing was a reader on the primary and a writer on the gateway, not a
+  // protocol.
+  //
+  // ⚠️ It is never published to MQTT in either direction. It is consumed at the
+  // primary and turned into an ESP-NOW unicast; the ANSWER comes back up as
+  // kCommandLog, which is a different type on a different topic.
+  kCommand = 5,
 };
 
 // What the gateway needs about one node: who it is, whether we are losing it, and
@@ -153,6 +167,11 @@ struct UplinkPrimaryStatus {
   uint32_t epoch;
   uint32_t free_heap;
   uint32_t min_free_heap;
+  // ⚠️ THE ROSTER, NOT THE FLEET. This is registryCount(): how many nodes the hub
+  // has ever admitted and remembers in NVS. It is deliberately persistent — that
+  // is what makes a roster a roster, and what a seal freezes — so it does NOT fall
+  // when a leaf stops talking. Read alone it says the rig is complete when a board
+  // is dead on the bench (TEC-NATKIT-81). Pair it with nodes_present.
   uint32_t nodes_known;
   uint32_t nodes_rejected;      // packets from MACs the registry will not accept
   uint32_t unknown_packets;
@@ -187,7 +206,29 @@ struct UplinkPrimaryStatus {
   // diagnosable from the broker rather than from a console that resets the board.
   // 0 = fine, 0xff = this target has no sensor.
   uint8_t chip_temp_err;
-  uint8_t reserved[2];
+  // ⚠️ THE FLEET, as against nodes_known's roster: how many nodes the hub has
+  // actually HEARD inside the presence window. This is the number that falls when
+  // a board dies, and the discrepancy between the two is the whole finding of
+  // TEC-NATKIT-81 — a leaf went quiet for hours while nodes_known held at 4 and
+  // the hub kept composing a status frame for it out of its last known state.
+  //
+  // Two counts rather than one because they are different questions and both are
+  // wanted: "which nodes are mine" survives a reboot and a leaf's absence, "which
+  // nodes are here" is now. Expiring the ROSTER to make one number do both would
+  // be wrong twice over: a sealed rig would evict the very node it is sealed to
+  // accept, and it would then be unable to tell an absent node from an unknown one.
+  //
+  // ⚠️ `nodes_present_valid` exists because a legacy frame's spare bytes are ZERO,
+  // and zero is a legitimate reading here — every leaf gone is exactly the state
+  // this field is for. Without the flag, firmware too old to report it would be
+  // indistinguishable from a rig with nothing left alive, which is the more
+  // alarming of the two. 0 = this hub does not report presence; ignore the count.
+  uint8_t nodes_present;
+  uint8_t nodes_present_valid;
+  // ⚠️ NO SPARE BYTES REMAIN in the declared body: nodes_present took the last two
+  // that `reserved[2]` held. The next field either uses bytes 140..143 — real tail
+  // padding today, which must be DECLARED before it can be written, since padding
+  // is not guaranteed to be transmitted as anything in particular — or bumps V1.
   // Command relay (TEC-NATKIT-39). ⚠️ These are here rather than on the console
   // because THE PRIMARY'S CONSOLE CANNOT BE READ: the ESP32-S3 resets when its
   // native USB console is opened AND re-enumerates, so the reading process loses
@@ -233,6 +274,19 @@ struct UplinkStats {
   uint32_t queue_high_water = 0;
 };
 
+// Installs and configures the uplink UART, exactly once.
+//
+// ⚠️ EXISTS BECAUSE BOTH ENDS NOW READ AND WRITE THE SAME PORT (TEC-NATKIT-92),
+// and ESP-IDF allows one driver install per UART. Before the downward command
+// path there was a clean split -- the primary called uplinkStart() and installed
+// with a TX buffer, the gateway called uplinkReaderStart() and installed with RX
+// only -- and each side called exactly one of them. Now each side calls both,
+// so the second install would fail on an already-installed driver.
+//
+// Idempotent, and sized for BOTH directions rather than for whichever caller
+// happens to run first. Safe to call from either, in either order.
+esp_err_t uplinkUartEnsure();
+
 // Brings up the uplink UART and its drain task.
 esp_err_t uplinkStart();
 
@@ -247,6 +301,14 @@ bool uplinkSend(UplinkType type, uint64_t stream_id, const void *payload,
                 size_t payload_size);
 
 const UplinkStats &uplinkStats();
+
+// The MQTT topic template for a frame type -- one "%" PRIu64 for the device id.
+//
+// Shared between the primary's direct publisher and the gateway's republisher on
+// purpose (TEC-NATKIT-88): they are the two ways a frame reaches the broker, the
+// backend correlates on these exact names, and when each kept its own copy the
+// gateway's silently lacked the two status topics entirely.
+const char *uplinkTopicTemplate(UplinkType type);
 
 // The largest payload the uplink will carry: the canonical frame at its
 // configured maximum. Sized from the frame constants rather than a round number

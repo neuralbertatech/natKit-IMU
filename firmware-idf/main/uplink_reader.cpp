@@ -102,6 +102,12 @@ void dispatch(size_t at) {
     case UplinkType::kCommandLog:
       ++sStats.frames_command_log;
       break;
+    case UplinkType::kCommand:
+      // Downward, gateway -> primary. Counted at both ends: on the primary it
+      // is the arrival of a command; on a gateway it should stay ZERO, and a
+      // non-zero count there means something is writing back on the line.
+      ++sStats.frames_command;
+      break;
   }
 
   // The uplink's own sequence, which answers a different question from the radio
@@ -177,24 +183,11 @@ void readerTask(void *) {
 esp_err_t uplinkReaderStart(UplinkFrameHandler handler) {
   sHandler = handler;
 
-  uart_config_t cfg{};
-  cfg.baud_rate = CONFIG_NATKIT_UPLINK_BAUD;
-  cfg.data_bits = UART_DATA_8_BITS;
-  cfg.parity = UART_PARITY_DISABLE;
-  cfg.stop_bits = UART_STOP_BITS_1;
-  cfg.flow_ctrl = UART_HW_FLOWCTRL_DISABLE;
-  cfg.source_clk = UART_SCLK_DEFAULT;
-
-  // A generous RX buffer: the reader task competes with the network stack, and
-  // an overrun here is a lost frame that no counter upstream can attribute.
-  ESP_ERROR_CHECK(uart_driver_install(kUartPort, kScanBuffer * 2, 0, 0, nullptr,
-                                      0));
-  if (!kOnConsole) {
-    ESP_ERROR_CHECK(uart_param_config(kUartPort, &cfg));
-    ESP_ERROR_CHECK(uart_set_pin(kUartPort, CONFIG_NATKIT_UPLINK_TX_GPIO,
-                                 CONFIG_NATKIT_UPLINK_RX_GPIO,
-                                 UART_PIN_NO_CHANGE, UART_PIN_NO_CHANGE));
-  }
+  // ⚠️ SHARED WITH THE WRITER (TEC-NATKIT-92). This used to install the driver
+  // itself, with a zero-length TX buffer, which was correct while only the
+  // gateway ever read and only the primary ever wrote. Both ends now do both, so
+  // whichever direction starts first installs the port for both.
+  ESP_ERROR_CHECK(uplinkUartEnsure());
 
   xTaskCreate(readerTask, "natkit-gwrx", 4096, nullptr, 6, nullptr);
   ESP_LOGI(kTag,

@@ -534,6 +534,13 @@ struct NodeState {
   uint32_t publish_no_sync = 0;   // the leaf's fit had not arrived yet
   uint32_t publish_no_time = 0;   // no wall clock: NTP had not synced
   uint32_t publish_no_shift = 0;  // the timestamp rewrite refused the frame
+  // ⚠️ TOO BIG FOR THE SHIFT BUFFER (TEC-NATKIT-86). This branch used to fall off
+  // the end of the guard chain with no counter and no log line, so the frame was
+  // discarded and the `NOT PUBLISHED:` line -- the instrument used to rule the
+  // publish path in or out -- said nothing about it. Every other way a frame can
+  // fail to reach the uplink queue is counted; a diagnostic is only load-bearing
+  // if every path through the code it describes is accounted for.
+  uint32_t publish_too_big = 0;
 
   // The probe instrument: measured minus predicted, in microseconds. This is the
   // headline accuracy figure for #340 and the raw material for #315's confidence

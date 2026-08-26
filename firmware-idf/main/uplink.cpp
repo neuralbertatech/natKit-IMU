@@ -133,20 +133,7 @@ void publishFrame(const uint8_t *frame, size_t length) {
     return;
   }
 
-  const char *topic = kTopicTemplate;
-  switch (static_cast<UplinkType>(frame[3])) {
-    case UplinkType::kNodeStatus:
-      topic = kNodeStatusTopic;
-      break;
-    case UplinkType::kPrimaryStatus:
-      topic = kPrimaryStatusTopic;
-      break;
-    case UplinkType::kCommandLog:
-      topic = kCommandLogTopic;
-      break;
-    default:
-      break;
-  }
+  const char *topic = uplinkTopicTemplate(static_cast<UplinkType>(frame[3]));
   std::snprintf(sTopic, sizeof(sTopic), topic, stream_id);
   if (gatewayPublish(sTopic, frame + kUplinkHeaderSize, payload_length)) {
     ++sStats.frames_sent;
@@ -216,7 +203,28 @@ void drainTask(void *) {
 
 }  // namespace
 
-esp_err_t uplinkStart() {
+// ⚠️ THE ONE PLACE A FRAME TYPE BECOMES A TOPIC NAME (TEC-NATKIT-88).
+//
+// There are two publishers of these frames and they must not be able to
+// disagree: the PRIMARY publishing directly (publishFrame above, the Ethernet
+// and #373 WiFi paths) and the GATEWAY republishing what arrived over the wire
+// (gateway.cpp). They were separate copies, and the copies diverged -- the
+// gateway never grew the two status topics at all, so a WiFi rig streamed data
+// perfectly and published nothing about its own health for two weeks without a
+// single error anywhere.
+//
+// A second copy that is merely correct today is the same bug waiting again, so
+// the mapping lives here and both callers ask for it.
+esp_err_t uplinkUartEnsure() {
+  if (kOnConsole || kWifiUplink) {
+    // No wire of ours in either mode: UART0 already has the console's driver,
+    // and the #373/Ethernet paths exit through the radio.
+    return ESP_OK;
+  }
+  if (uart_is_driver_installed(kUartPort)) {
+    return ESP_OK;  // the other direction got here first
+  }
+
   uart_config_t cfg{};
   cfg.baud_rate = CONFIG_NATKIT_UPLINK_BAUD;
   cfg.data_bits = UART_DATA_8_BITS;
@@ -225,19 +233,51 @@ esp_err_t uplinkStart() {
   cfg.flow_ctrl = UART_HW_FLOWCTRL_DISABLE;
   cfg.source_clk = UART_SCLK_DEFAULT;
 
-  if (!kOnConsole && !kWifiUplink) {
-    // Only install a driver and re-pin when this is OUR uart. Doing either to
-    // UART0 would fight the console driver that is already there, and under
-    // #373 there is no wire at all -- the exit is the radio.
-    ESP_ERROR_CHECK(uart_driver_install(kUartPort,
-                                        CONFIG_NATKIT_UPLINK_RX_BUFFER,
-                                        CONFIG_NATKIT_UPLINK_TX_BUFFER, 0,
-                                        nullptr, 0));
-    ESP_ERROR_CHECK(uart_param_config(kUartPort, &cfg));
-    ESP_ERROR_CHECK(uart_set_pin(kUartPort, CONFIG_NATKIT_UPLINK_TX_GPIO,
-                                 CONFIG_NATKIT_UPLINK_RX_GPIO,
-                                 UART_PIN_NO_CHANGE, UART_PIN_NO_CHANGE));
+  // ⚠️ BOTH BUFFERS, ALWAYS, whichever side installs first. The reader wants a
+  // generous RX buffer because an overrun is a lost frame no counter upstream
+  // can attribute; the writer wants a TX buffer so a frame does not block the
+  // drain task. Sizing for only the caller that happened to run first would make
+  // the other direction's behaviour depend on task start order.
+  const int rx_bytes = CONFIG_NATKIT_UPLINK_RX_BUFFER > kUplinkMaxFrame * 4
+                           ? CONFIG_NATKIT_UPLINK_RX_BUFFER
+                           : static_cast<int>(kUplinkMaxFrame * 4);
+  ESP_ERROR_CHECK(uart_driver_install(kUartPort, rx_bytes,
+                                      CONFIG_NATKIT_UPLINK_TX_BUFFER, 0, nullptr,
+                                      0));
+  ESP_ERROR_CHECK(uart_param_config(kUartPort, &cfg));
+  ESP_ERROR_CHECK(uart_set_pin(kUartPort, CONFIG_NATKIT_UPLINK_TX_GPIO,
+                               CONFIG_NATKIT_UPLINK_RX_GPIO,
+                               UART_PIN_NO_CHANGE, UART_PIN_NO_CHANGE));
+  ESP_LOGI(kTag, "uplink UART%d ready: tx gpio %d, rx gpio %d, %d baud, rx buf %d B",
+           CONFIG_NATKIT_UPLINK_UART_NUM, CONFIG_NATKIT_UPLINK_TX_GPIO,
+           CONFIG_NATKIT_UPLINK_RX_GPIO, CONFIG_NATKIT_UPLINK_BAUD, rx_bytes);
+  return ESP_OK;
+}
+
+const char *uplinkTopicTemplate(UplinkType type) {
+  switch (type) {
+    case UplinkType::kNodeStatus:
+      return kNodeStatusTopic;
+    case UplinkType::kPrimaryStatus:
+      return kPrimaryStatusTopic;
+    case UplinkType::kCommandLog:
+      return kCommandLogTopic;
+    case UplinkType::kData:
+      break;
+    case UplinkType::kCommand:
+      // Never published. It travels gateway -> primary and is consumed there;
+      // the answer returns as kCommandLog on its own topic. Named explicitly so
+      // this switch stays exhaustive and a future type cannot slip through on a
+      // default label.
+      break;
   }
+  return kTopicTemplate;
+}
+
+esp_err_t uplinkStart() {
+  // Shared with the reader, which the primary now also runs for the downward
+  // command path -- see uplinkUartEnsure().
+  ESP_ERROR_CHECK(uplinkUartEnsure());
 
   sQueue = xQueueCreate(CONFIG_NATKIT_UPLINK_QUEUE_DEPTH, sizeof(TxFrame));
   sWireLock = xSemaphoreCreateMutex();

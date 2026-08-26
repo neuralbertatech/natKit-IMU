@@ -434,6 +434,27 @@ config NATKIT_ESPNOW_HEARTBEAT_MS
         queue are its own back-pressure, not the primary's loss, and from the
         receiving side alone the two are indistinguishable.
 
+config NATKIT_NODE_PRESENCE_TIMEOUT_MS
+    int "How long a node may go unheard before the hub stops counting it present"
+    default 30000
+    range 1000 600000
+    help
+        The window behind `nodes_present` in the hub's status frame. A node the
+        primary has not heard from -- no data frame, no heartbeat, no announce --
+        for longer than this stops being counted as part of the fleet, and the hub
+        logs the transition once rather than printing a growing "silent" figure
+        forever among everything else it prints.
+
+        It does NOT touch the registry. The roster is persistent on purpose, and a
+        node dropping off the air is exactly the case a sealed rig must keep
+        accepting when it comes back.
+
+        30 s by default, and the default is set by the known failure rather than by
+        the heartbeat: leaves on this rig go quiet for up to 18 s and return
+        (TEC-NATKIT-46), so anything near the 2 s heartbeat would spend its life
+        flapping and teach an operator to ignore it. A board that is actually gone
+        stays gone for hours (TEC-NATKIT-81), so nothing is lost by waiting.
+
 config NATKIT_TIME_BEACON_MS
     int "Primary timing broadcast interval (milliseconds)"
     default 1000
@@ -637,8 +658,16 @@ config NATKIT_REGISTRY_CLEAR_ON_BOOT
 config NATKIT_UPLINK_UART_NUM
     int "Primary uplink UART (0 shares the console; 1 is the real link)"
     default 1
+    range 0 1 if IDF_TARGET_ESP32C3
     range 0 2
     help
+        ⚠️ THE ESP32-C3 HAS ONLY TWO UARTs (0 and 1), not three, hence the
+        narrower range. The default of 1 is valid everywhere, so this guards the
+        menuconfig path rather than the default one -- but a 2 selected by hand
+        on a C3 fails the same way an out-of-range GPIO does: an abort inside
+        driver setup, before there is any console output to explain it.
+
+
         Which UART carries the primary's framed stream to the gateway
         (TEC-NATKIT-25).
 
@@ -672,33 +701,98 @@ config NATKIT_UPLINK_BAUD
 
 config NATKIT_UPLINK_TX_GPIO
     int "Primary uplink UART TX GPIO"
-    default 4 if IDF_TARGET_ESP32S3
+    default 9 if IDF_TARGET_ESP32S3
+    default 5 if IDF_TARGET_ESP32C3
     default 26
+    range 0 21 if IDF_TARGET_ESP32C3
     range 0 48
     help
         Ignored when the uplink shares UART0.
 
-        26/25 are free on the ESP32-PICO-V3-02 -- no strapping function, not
-        flash or PSRAM, and clear of every BNO08x pin in board_config.hpp.
+        ⚠️ PER-TARGET, AND EVERY TARGET THAT IS MISSING FROM THE LIST FAILS THE
+        SAME WAY: it takes the fallback below, `uart_set_pin` rejects a GPIO the
+        chip does not have, and the board REBOOTS IN A LOOP before anything else
+        runs. There is no log to read, because nothing gets far enough to log.
 
-        ⚠️ THOSE NUMBERS ARE FATAL ON THE ESP32-S3, which is why this is
-        per-target. The S3 has no GPIO 22-25 at all, so `uart_set_pin` aborts
-        with "rx_io_num error" and the board reboots in a loop before anything
-        else runs -- and GPIO 26-32 there are the SPI flash and PSRAM pins, so
-        the "working" one of the pair would have been worse than the failing
-        one. 17/18 are ordinary GPIOs on the S3, clear of the native USB
-        Serial/JTAG pins (19/20) that this target's console depends on.
+        26/25 -- classic ESP32. Free on the ESP32-PICO-V3-02: no strapping
+        function, not flash or PSRAM, and clear of every BNO08x pin in
+        board_config.hpp.
+
+        5/6 -- ESP32-C3 (TEC-NATKIT-87). The C3 has only GPIO 0-21, so it would
+        inherit 26/25 and abort. Its budget: 11-17 are SPI flash (11 is
+        VDD_SPI), 18/19 the native USB Serial/JTAG, 20/21 the UART0 console that
+        sdkconfig.defaults.esp32c3 deliberately keeps there, 2/8/9 strapping
+        pins sampled at reset (a UART line idles high), and 4 the status LED.
+        That leaves 3, 5, 6, 7 and 10; 5/6 is the adjacent pair and 10/3 are the
+        alternates. 5/6 are also MTDI/MTCK, so this forfeits EXTERNAL JTAG --
+        which costs nothing, because the C3 debugs over its own USB
+        Serial/JTAG on 18/19.
+
+        9/10 -- ESP32-S3. It has no GPIO 22-25 at all, and 26-32 there are the
+        SPI flash and PSRAM pins, so the classic pair's "working" half would
+        have been worse than the failing half. 9/10 is what is left after
+        removing EVERYTHING already spoken for on the Thread Border Router
+        board: 4 (status LED), 5/14/15/19/21/32 (the BNO08x pins in
+        board_config.hpp), 19/20 (native USB Serial/JTAG), 26-32 (SPI flash and
+        PSRAM), 33-37 (octal PSRAM where fitted), 21/38-41/45 (the W5500), 7/8
+        (H2 co-processor reset and boot), 17/18 (H2 co-processor UART), 39-42
+        (JTAG), 43/44 (UART0), and 0/3/45/46 (strapping).
+
+        ⚠️ 5 was the obvious adjacent choice and is WRONG: `kBnoSck` is
+        GPIO_NUM_5 in board_config.hpp for this target. Nothing would have
+        broken today -- a primary has no sensor and a leaf has no uplink, so the
+        two are never configured in one image -- but choosing a pin another
+        header already claims is how the GPIO 4 problem below got made in the
+        first place, and "it does not collide yet" is exactly the sentence that
+        preceded it.
+
+        ⚠️ UNVERIFIED ON HARDWARE, and honestly so: the S3 runs the ETHERNET
+        uplink, so it never calls uart_set_pin at all (see the guard in
+        uplinkStart). Nothing on this bench exercises an S3 serial uplink, and
+        these two numbers are reasoned from the pin list above rather than
+        measured against a schematic. Check them before wiring an S3 primary to
+        a gateway.
+
+        ⚠️ THE S3 USED TO DEFAULT TO 4, WHICH IS THE STATUS LED'S PIN
+        (`kStatusLedGpio`, board_config.hpp). statusLedRestore() runs in
+        app_main BEFORE the role dispatch, so RMT claims GPIO 4 on every role
+        and every target. It never collided in practice only because
+        uplinkStart() skips uart_set_pin entirely when the uplink publishes over
+        the network, and the S3 defaults to the Ethernet uplink -- so the fault
+        was armed to appear the first time somebody turned Ethernet OFF to use
+        the serial uplink, which is exactly what the two-board WiFi rig does.
+        Moved off it while nothing was wired to it.
+
+        ⚠️ THE PROSE HERE HAS BEEN WRONG BEFORE, so trust the defaults above
+        rather than the paragraphs. The previous version of this help
+        recommended 17/18 for the S3 while the actual default was 4/5 -- and
+        17/18 are the ESP32-H2 co-processor's UART on that board (see
+        NATKIT_ETH_SPI_CLOCK_MHZ), so following the advice would have been worse
+        than ignoring it. The `default` lines are the contract; everything else
+        in this help is commentary on how they were chosen.
 
 config NATKIT_UPLINK_RX_GPIO
     int "Primary uplink UART RX GPIO"
-    default 5 if IDF_TARGET_ESP32S3
+    default 10 if IDF_TARGET_ESP32S3
+    default 6 if IDF_TARGET_ESP32C3
     default 25
+    range 0 21 if IDF_TARGET_ESP32C3
     range 0 48
     help
-        Ignored when the uplink shares UART0. Nothing is received on it yet --
-        the downward command path is TEC-NATKIT-26's decision -- but the pin is
-        claimed now so the wiring and the enclosure (#320) do not have to change
-        later. See the TX pin above for why this is per-target.
+        See the TX pin above for the per-target reasoning and the pin budgets.
+
+        ⚠️ BOTH ENDS OF THE WIRE READ THESE TWO SYMBOLS, and that is what makes
+        one setting describe a two-board link: each board drives its own TX and
+        listens on its own RX, so the jumpers are a CROSSOVER between two
+        different pin numbers when the boards are different targets. An ESP32
+        hub feeding a C3 gateway is ESP32 GPIO 26 -> C3 GPIO 6 for data, and C3
+        GPIO 5 -> ESP32 GPIO 25 for commands back. TX to TX is two push-pull
+        outputs on one net, and the symptom -- garbage the CRC silently
+        discards -- looks exactly like a baud mismatch.
+
+        The receive direction is not read yet on the primary (the downward
+        command path is TEC-NATKIT-26's remaining scope), but the pin is claimed
+        now so the wiring and the enclosure (#320) do not have to change later.
 
 config NATKIT_UPLINK_QUEUE_DEPTH
     int "Primary uplink queue depth (frames)"

@@ -14,6 +14,7 @@
 #include "command_relay.hpp"
 #include "registry.hpp"
 #include "uplink.hpp"
+#include "uplink_reader.hpp"
 #include "esp_log.h"
 #include "esp_timer.h"
 #include "espnow_link.hpp"
@@ -201,6 +202,51 @@ void fillNodeStatus(const NodeState &node, UplinkNodeStatus &out) {
   out.publish_no_shift = node.publish_no_shift;
 }
 
+// --- presence, as against the roster (TEC-NATKIT-81) -------------------------
+//
+// A leaf stopped talking to this hub and the hub did not notice: it kept
+// composing a status frame for it once a second out of the state the node had
+// when it went away, and `nodes_known` -- the persistent registry count -- went
+// on saying 4. Every visible number described a complete rig while a board sat
+// dead on the bench.
+//
+// The fix is NOT to age the node out. Two things would break: the roster is what
+// a seal freezes, so a sealed rig would evict the node it exists to accept and
+// then refuse it on its return; and dropping its NodeState would stop the status
+// frame entirely, which loses the only evidence that the node was ever here. The
+// panel's "last heard 2m ago" is worth more than silence, because silence cannot
+// be told from a node that never existed.
+//
+// So the hub keeps publishing, and reports separately how many nodes it can
+// actually hear.
+constexpr uint64_t kPresenceTimeoutUs =
+    static_cast<uint64_t>(CONFIG_NATKIT_NODE_PRESENCE_TIMEOUT_MS) * 1000ULL;
+
+// ⚠️ last_seen_us == 0 means never heard, not "heard at time zero". An entry can
+// be in_use with no packet behind it only transiently, but treating 0 as recent
+// at boot would report a node present before it has said anything.
+bool nodeIsPresent(const NodeState &node, uint64_t now_us) {
+  if (!node.in_use || node.last_seen_us == 0) {
+    return false;
+  }
+  // Saturating: the primary's esp_timer clock is monotonic, so now < last_seen
+  // should be impossible, but an unsigned wrap here would report a dead node as
+  // present forever, which is the exact failure this is here to end.
+  return now_us >= node.last_seen_us &&
+         (now_us - node.last_seen_us) <= kPresenceTimeoutUs;
+}
+
+uint8_t countNodesPresent(uint64_t now_us) {
+  const NodeState *nodes = espNowPrimaryNodes();
+  uint8_t present = 0;
+  for (size_t i = 0; i < kMaxTrackedNodes; ++i) {
+    if (nodeIsPresent(nodes[i], now_us)) {
+      ++present;
+    }
+  }
+  return present;
+}
+
 void fillPrimaryStatus(UplinkPrimaryStatus &out) {
   out = UplinkPrimaryStatus{};
   const CommandRelayStats &commands = commandRelayStats();
@@ -223,6 +269,9 @@ void fillPrimaryStatus(UplinkPrimaryStatus &out) {
   out.free_heap = static_cast<uint32_t>(esp_get_free_heap_size());
   out.min_free_heap = static_cast<uint32_t>(esp_get_minimum_free_heap_size());
   out.nodes_known = registryCount();
+  out.nodes_present =
+      countNodesPresent(static_cast<uint64_t>(esp_timer_get_time()));
+  out.nodes_present_valid = 1;
   out.nodes_rejected = registryRejections();
   out.unknown_packets = espNowPrimaryUnknownPackets();
   out.noise_floor_dbm = espNowPrimaryNoiseFloor();
@@ -247,6 +296,24 @@ void fillPrimaryStatus(UplinkPrimaryStatus &out) {
 }
 
 }  // namespace
+
+// A frame arriving FROM the gateway. The only type that travels this way.
+//
+// ⚠️ Runs on the reader task, so it does the same thing the MQTT handler does:
+// hand the document over and return. The relay owns a stack sized for parsing;
+// this one is not it.
+void onDownlinkFrame(UplinkType type, uint64_t stream_id,
+                     const uint8_t *payload, size_t length) {
+  if (type != UplinkType::kCommand) {
+    // Nothing else is expected downward. Counted by the reader as a valid frame
+    // either way, so a mistake here shows up as frames_ok climbing with no
+    // commands relayed rather than as silence.
+    return;
+  }
+  // ⚠️ stream_id is the addressed device, taken by the gateway from the topic.
+  // Not re-derived from the document, which has no device field.
+  commandRelaySubmit(stream_id, reinterpret_cast<const char *>(payload), length);
+}
 
 void runPrimary() {
   ESP_LOGI(kTag, "primary: device %" PRIu64 ", ESP-NOW hub", deviceId());
@@ -354,6 +421,11 @@ void runPrimary() {
   (void)interval_s;
 
   uint32_t previous_frames[kMaxTrackedNodes] = {};
+  // Whether each node was present on the PREVIOUS pass, so the console says
+  // something once when a node leaves or returns instead of printing a "silent
+  // 4,215,880 ms" that scrolls past with everything else. An operator reads an
+  // edge; nobody reads a gauge that has been wrong for an hour.
+  bool was_present[kMaxTrackedNodes] = {};
   uint32_t ticks = 0;
   uint64_t next_status_us = 0;
 
@@ -373,6 +445,22 @@ void runPrimary() {
   // during startup is already subscribable. Refreshed every second below, because
   // a node that announces later would otherwise be uncommandable until reboot.
   commandRelayStart();
+
+  // The downward command path (TEC-NATKIT-92). Behind a gateway this primary has
+  // no broker session at all, so a command reaches it as a kCommand frame on the
+  // uplink's RX -- the pin claimed at design time for exactly this, and until now
+  // never read from.
+  //
+  // ⚠️ Only when there IS a wire. Under the Ethernet and #373 WiFi uplinks the
+  // exit is the radio, uplinkUartEnsure() installs nothing, and commands arrive
+  // by subscription as they always did.
+  if (!kWifiUplink && !kEthUplink) {
+    if (uplinkReaderStart(onDownlinkFrame) != ESP_OK) {
+      ESP_LOGE(kTag,
+               "downlink reader did not start -- device commands cannot reach "
+               "this rig, though data will keep flowing out");
+    }
+  }
 
   while (true) {
     vTaskDelay(pdMS_TO_TICKS(1000));
@@ -395,6 +483,40 @@ void runPrimary() {
       const uint32_t delta = node.data_frames - previous_frames[i];
       previous_frames[i] = node.data_frames;
 
+      // --- the hub noticing, once, that a node left or came back -------------
+      //
+      // ⚠️ THIS IS THE HALF THAT WAS MISSING (TEC-NATKIT-81). The "silent N ms"
+      // figure below has always been correct and has never been read: it is one
+      // number inside a line the hub prints for every node every second, so a leaf
+      // going dark looks exactly like a leaf that is fine unless somebody is
+      // diffing consecutive lines at the moment it happens. A WARN on the edge is
+      // a thing you can find afterwards, and it names the count that stopped.
+      const bool present = nodeIsPresent(node, now);
+      if (present != was_present[i]) {
+        was_present[i] = present;
+        if (present) {
+          ESP_LOGW(kTag,
+                   "node %" PRIu64 " is being heard (%lu data frames so far); "
+                   "%lu of %lu roster node(s) present",
+                   node.device_id, static_cast<unsigned long>(node.data_frames),
+                   static_cast<unsigned long>(countNodesPresent(now)),
+                   static_cast<unsigned long>(registryCount()));
+        } else {
+          ESP_LOGW(kTag,
+                   "node %" PRIu64 " (%02x:%02x:%02x:%02x:%02x:%02x) HAS GONE "
+                   "QUIET: nothing heard for %llu ms, stopped at %lu data frames. "
+                   "It stays on the roster and its status frame keeps being "
+                   "published from its last known state -- that frame is now "
+                   "HISTORY, not news. %lu of %lu roster node(s) present.",
+                   node.device_id, node.mac[0], node.mac[1], node.mac[2],
+                   node.mac[3], node.mac[4], node.mac[5],
+                   static_cast<unsigned long long>(silent_ms),
+                   static_cast<unsigned long>(node.data_frames),
+                   static_cast<unsigned long>(countNodesPresent(now)),
+                   static_cast<unsigned long>(registryCount()));
+        }
+      }
+
       ESP_LOGI(kTag,
                "node %" PRIu64 " (%02x:%02x:%02x:%02x:%02x:%02x): %lu data frames "
                "(+%lu/s), %lu B, seq %llu, gaps %lu, dupes %lu, restarts %lu, "
@@ -412,13 +534,22 @@ void runPrimary() {
                static_cast<unsigned long>(node.last_declared_rate));
 
       // --- the time-shift proxy, and its two instruments (#340) -------------
-      if (node.publish_no_sync || node.publish_no_time || node.publish_no_shift) {
+      // ⚠️ EVERY WAY A FRAME CAN FAIL TO REACH THE QUEUE, or this line lies by
+      // omission -- which is exactly what TEC-NATKIT-86 was. publish_too_big
+      // existed as a code path and not as a counter, so a dropped frame showed
+      // up only as a gap between what the hub said it received and what the
+      // broker saw, with nothing anywhere to explain it. Adding the branch to
+      // the guard chain without adding it here would leave the bug half fixed.
+      if (node.publish_no_sync || node.publish_no_time ||
+          node.publish_no_shift || node.publish_too_big) {
         ESP_LOGW(kTag,
                  "  NOT PUBLISHED: %lu no leaf fit, %lu no wall clock, %lu "
-                 "rewrite refused -- these never reached the uplink queue",
+                 "rewrite refused, %lu TOO BIG for the shift buffer -- these "
+                 "never reached the uplink queue",
                  static_cast<unsigned long>(node.publish_no_sync),
                  static_cast<unsigned long>(node.publish_no_time),
-                 static_cast<unsigned long>(node.publish_no_shift));
+                 static_cast<unsigned long>(node.publish_no_shift),
+                 static_cast<unsigned long>(node.publish_too_big));
       }
       if (node.frames_unicast || node.frames_broadcast) {
         ESP_LOGI(kTag, "  delivery: %lu unicast, %lu BROADCAST fallback",
