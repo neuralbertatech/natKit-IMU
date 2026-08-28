@@ -224,8 +224,13 @@ trees share no toolchain, no build directory and no configuration.
 
 ## Software Requirements
 
-- [PlatformIO](https://platformio.org/) (VS Code extension recommended)
+- [pioarduino IDE](https://marketplace.visualstudio.com/items?itemName=pioarduino.pioarduino-ide) for VS Code
 - natKit backend running (see main repository README)
+
+This project uses the pioarduino ESP32 platform declared in `embeded/platformio.ini`.
+Do not install the official `platformio.platformio-ide` extension alongside
+`pioarduino.pioarduino-ide`; both extensions manage the same PlatformIO Python
+environment and can leave it partially installed.
 
 ## Project Structure
 
@@ -326,6 +331,52 @@ Key configuration values are defined at the top of `main.cpp`:
 | `SEND_MESSAGE_TASK_STACK_SIZE` | 18432 | FreeRTOS task stack size |
 
 ## Troubleshooting
+
+### PlatformIO fails to start on Windows
+
+If PlatformIO reports a missing Python module such as `click`, or VS Code says
+that Python dependencies could not be installed, replace the official
+PlatformIO extension with the pioarduino extension:
+
+```powershell
+code --uninstall-extension platformio.platformio-ide
+code --install-extension pioarduino.pioarduino-ide --force
+```
+
+Restart VS Code after changing extensions.
+
+The pioarduino ESP32 packages contain paths longer than the legacy Windows
+260-character limit. The preferred fix is to enable **Win32 long paths** in an
+Administrator PowerShell, then restart Windows:
+
+```powershell
+New-ItemProperty -Path 'HKLM:\SYSTEM\CurrentControlSet\Control\FileSystem' `
+  -Name LongPathsEnabled -Value 1 -PropertyType DWORD -Force
+```
+
+If administrator access is unavailable, use a shorter user-scoped PlatformIO
+data directory and restart VS Code:
+
+```powershell
+[Environment]::SetEnvironmentVariable(
+  'PLATFORMIO_CORE_DIR',
+  "$env:USERPROFILE\.pio",
+  'User'
+)
+```
+
+Then build from the firmware project directory:
+
+```powershell
+cd natKit-IMU\embeded
+pio run -e release
+```
+
+The first pioarduino build downloads several gigabytes and compiles the Arduino
+ESP-IDF libraries, so it can take 30 minutes or longer on Windows. If that first
+pass exits successfully immediately after `Compile Arduino IDF libs`, run the
+same command again to create `firmware.bin`, `firmware.elf`, and
+`firmware.factory.bin` under `.pio\build\release`.
 
 ### Device won't connect to WiFi
 - Verify WiFi credentials in `DevConfig.hpp`
